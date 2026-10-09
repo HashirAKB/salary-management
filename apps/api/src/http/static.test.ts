@@ -28,6 +28,16 @@ describe('static serving of the web build', () => {
     app = undefined;
   });
 
+  it('a non-API path returns index.html when static serving is on', async () => {
+    app = testApp({ staticRoot });
+
+    const response = await app.inject({ method: 'GET', url: '/employees/42' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers['content-type']).toMatch(/^text\/html/);
+    expect(response.body).toContain(MARKER);
+  });
+
   it('an unknown /api path is still a ROUTE_NOT_FOUND problem when static serving is on', async () => {
     app = testApp({ staticRoot });
 
