@@ -170,6 +170,7 @@ Each slice lists: goal, demo, scope, test list (pointing at rows in `05-test-str
 - `.gitignore` (`node_modules/`, `dist/`, `.ai-notes/`, `.env`, `*.db`, `e2e/.data/`, `.vitest/`) is already committed with the Claude Code kit before S0 (D-067); S0 adds any entry it finds missing in a `chore` commit. `.env.example` with every variable from 03 section 8. `.nvmrc` with `24`.
 - `config.ts` (zod), `createDb`, `fixedClock` and `systemClock`, `buildApp`, problem-details error handler, `/api/health`, `@fastify/static` serving the Vite build with the SPA fallback (04 section 8.1).
 - Web: Vite, React 19.2, Mantine provider, a placeholder page, the test render wrapper.
+- Supporting packages from A-007: `typescript-eslint`, `@types/node`, `@types/react`, `@types/react-dom`, `@mantine/hooks`.
 - CI workflow (3.4), branch protection and merge settings (3.3), PR template.
 - `render.yaml`: `type: web`, `runtime: node`, `plan: free`, `region: singapore`, `buildCommand: npm ci && npm run build`, `startCommand: node apps/api/dist/main.js`, `healthCheckPath: /api/health`, `autoDeployTrigger: checksPass`; `DATABASE_URL` and `DATABASE_AUTH_TOKEN` with `sync: false`. Turso database created and its URL and token set in Render.
 
