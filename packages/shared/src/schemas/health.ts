@@ -1,7 +1,6 @@
 import { z } from 'zod';
 
-export type HealthResponse = { status: 'ok' };
+// 04 section 5.1.
+export const healthResponseSchema = z.object({ status: z.literal('ok') });
 
-export const healthResponseSchema = z.custom<HealthResponse>(() => {
-  throw new Error('not implemented');
-});
+export type HealthResponse = z.infer<typeof healthResponseSchema>;

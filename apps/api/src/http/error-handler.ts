@@ -1,5 +1,5 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
-import { problem, type ProblemInput } from './problem.ts';
+import { AppError, problem, type ProblemInput } from './problem.ts';
 
 const pathOf = (request: FastifyRequest) => request.url.split('?')[0];
 
@@ -21,7 +21,15 @@ export function registerErrorHandling(app: FastifyInstance) {
     }),
   );
 
-  app.setErrorHandler((error: FastifyError, request, reply) => {
+  app.setErrorHandler((error: FastifyError | AppError, request, reply) => {
+    if (error instanceof AppError) {
+      return sendProblem(reply, {
+        status: error.status,
+        code: error.code,
+        detail: error.message,
+        instance: pathOf(request),
+      });
+    }
     if (error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
       return sendProblem(reply, {
         status: 415,

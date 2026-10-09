@@ -15,6 +15,19 @@ export type Problem = {
 
 export type ProblemInput = Omit<Problem, 'type' | 'title'>;
 
+// Thrown below the route layer; the error handler turns it into a problem response.
+export class AppError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(status: number, code: string, detail: string) {
+    super(detail);
+    this.name = 'AppError';
+    this.status = status;
+    this.code = code;
+  }
+}
+
 // RFC 9110 status phrases for every status in the 04 section 4.4 catalogue.
 const STATUS_TITLES: Record<number, string> = {
   400: 'Bad Request',
