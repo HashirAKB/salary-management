@@ -1,3 +1,4 @@
+// The only module allowed to read the system time (D-051).
 export interface Clock {
   /** The current instant. */
   now(): Date;
@@ -7,15 +8,20 @@ export interface Clock {
 
 export type FixedClock = Clock & { advance(ms: number): void };
 
+const utcDate = (instant: Date): string => instant.toISOString().slice(0, 10);
+
 export const systemClock: Clock = {
-  now: () => {
-    throw new Error('not implemented');
-  },
-  today: () => {
-    throw new Error('not implemented');
-  },
+  now: () => new Date(),
+  today: () => utcDate(new Date()),
 };
 
-export function fixedClock(_iso: string): FixedClock {
-  throw new Error('not implemented');
+export function fixedClock(iso: string): FixedClock {
+  let ms = new Date(iso).getTime();
+  return {
+    now: () => new Date(ms),
+    today: () => utcDate(new Date(ms)),
+    advance: (by) => {
+      ms += by;
+    },
+  };
 }
