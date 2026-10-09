@@ -22,7 +22,11 @@ export default defineConfig(
   tseslint.configs.recommended,
   {
     files: ['**/*.{ts,tsx}'],
-    rules: { 'no-restricted-syntax': ['error', ...determinismBans] },
+    rules: {
+      'no-restricted-syntax': ['error', ...determinismBans],
+      // Red-step stubs keep their final signature with unused, underscore-prefixed parameters.
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+    },
   },
   {
     files: ['apps/api/src/domain/clock.ts', 'apps/api/src/seed/random.ts'],
