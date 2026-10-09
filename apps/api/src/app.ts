@@ -3,6 +3,7 @@ import type { Config } from './config.ts';
 import type { Db } from './db/client.ts';
 import type { Clock } from './domain/clock.ts';
 import { registerErrorHandling } from './http/error-handler.ts';
+import { registerStatic } from './http/static.ts';
 import { healthRoutes } from './modules/health/routes.ts';
 
 export type AppDeps = {
@@ -16,7 +17,8 @@ export type AppDeps = {
 // The composition root used by main.ts and every test (03 section 6, rule 1).
 export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({ logger: { level: deps.config.logLevel }, trustProxy: true });
-  registerErrorHandling(app);
+  if (deps.staticRoot) registerStatic(app, deps.staticRoot);
+  registerErrorHandling(app, { spaFallback: Boolean(deps.staticRoot) });
   healthRoutes(app, { db: deps.db });
   return app;
 }
