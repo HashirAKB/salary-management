@@ -9,6 +9,8 @@ export type AppDeps = {
   db: Db;
   clock: Clock;
   config: Config;
+  /** Folder with the web build; static serving with an SPA fallback is on when set. */
+  staticRoot?: string;
 };
 
 // The composition root used by main.ts and every test (03 section 6, rule 1).
