@@ -15,10 +15,23 @@ export type Problem = {
 
 export type ProblemInput = Omit<Problem, 'type' | 'title'>;
 
-export function problem(_input: ProblemInput): Problem {
-  throw new Error('not implemented');
+// RFC 9110 status phrases for every status in the 04 section 4.4 catalogue.
+const STATUS_TITLES: Record<number, string> = {
+  400: 'Bad Request',
+  401: 'Unauthorized',
+  403: 'Forbidden',
+  404: 'Not Found',
+  415: 'Unsupported Media Type',
+  422: 'Unprocessable Content',
+  429: 'Too Many Requests',
+  500: 'Internal Server Error',
+  503: 'Service Unavailable',
+};
+
+export function problem(input: ProblemInput): Problem {
+  return { type: 'about:blank', title: STATUS_TITLES[input.status] ?? 'Error', ...input };
 }
 
-export function validationErrors(_error: z.ZodError): ProblemFieldError[] {
-  throw new Error('not implemented');
+export function validationErrors(error: z.ZodError): ProblemFieldError[] {
+  return error.issues.map((issue) => ({ path: issue.path.join('.'), message: issue.message }));
 }
