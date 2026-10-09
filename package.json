@@ -1,0 +1,25 @@
+{
+  "name": "acme-salary",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "workspaces": [
+    "packages/shared",
+    "apps/api",
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @acme/api & npm run dev -w @acme/web & wait",
+    "build": "tsc -b apps/api/tsconfig.build.json && npm run build -w @acme/web",
+    "typecheck": "tsc -p packages/shared && tsc -p apps/api && tsc -p apps/web",
+    "test": "TZ=UTC vitest run",
+    "test:coverage": "TZ=UTC vitest run --coverage",
+    "lint": "eslint ."
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}

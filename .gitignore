@@ -6,3 +6,4 @@ coverage/
 *.db
 e2e/.data/
 .vitest/
+*.tsbuildinfo
