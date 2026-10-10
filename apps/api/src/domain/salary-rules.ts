@@ -38,5 +38,11 @@ export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode 
   const { today, employee, change } = context;
   if (change.effectiveDate > today) return 'DATE_IN_FUTURE';
   if (change.effectiveDate < employee.salaryEffectiveDate) return 'SALARY_DATE_BEFORE_CURRENT';
+  if (change.reason === 'merit' || change.reason === 'market_adjustment') {
+    if (change.amount.amountMinor <= employee.salary.amountMinor) return 'RAISE_REQUIRED';
+    if (change.jobTitleId !== employee.jobTitleId || change.levelRank !== employee.levelRank) {
+      return 'POSITION_MUST_NOT_CHANGE';
+    }
+  }
   return null;
 }
