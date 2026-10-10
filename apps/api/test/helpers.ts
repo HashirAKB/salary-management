@@ -15,6 +15,8 @@ export const testConfig: Config = {
   askUserDailyLimit: 30,
   askGlobalDailyLimit: 300,
   logLevel: 'silent',
+  // Tests hash at N=2^10 to stay fast (03 section 7).
+  scrypt: { N: 1024, r: 8, p: 3 },
 };
 
 // A fresh in-memory database with the real migrations and the seed's reference data (05 section 4.1).

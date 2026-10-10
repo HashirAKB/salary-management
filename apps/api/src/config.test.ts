@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ConfigError, loadConfig } from './config.ts';
+import { PRODUCTION_SCRYPT } from './modules/auth/password.ts';
 
 function invalidVariables(env: Record<string, string | undefined>): string[] {
   try {
@@ -19,7 +20,7 @@ describe('config', () => {
     expect(variables).toEqual(expect.arrayContaining(['DATABASE_URL', 'PORT', 'LOG_LEVEL']));
   });
 
-  it('applies the documented defaults when optional variables are absent or empty', () => {
+  it('applies the documented defaults, including the production scrypt cost, when optional variables are absent or empty', () => {
     const config = loadConfig({
       DATABASE_URL: 'file:./data/dev.db',
       ANTHROPIC_API_KEY: '',
@@ -36,6 +37,7 @@ describe('config', () => {
       askUserDailyLimit: 30,
       askGlobalDailyLimit: 300,
       logLevel: 'info',
+      scrypt: PRODUCTION_SCRYPT,
     });
   });
 

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { PRODUCTION_SCRYPT, type ScryptParams } from './modules/auth/password.ts';
 
 export type Config = {
   nodeEnv: 'development' | 'production' | 'test';
@@ -10,6 +11,8 @@ export type Config = {
   askUserDailyLimit: number;
   askGlobalDailyLimit: number;
   logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
+  /** Password hashing cost (03 section 7); not an env variable. */
+  scrypt: ScryptParams;
 };
 
 export type ConfigProblem = { variable: string; message: string };
@@ -78,5 +81,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     askUserDailyLimit: e.ASK_USER_DAILY_LIMIT,
     askGlobalDailyLimit: e.ASK_GLOBAL_DAILY_LIMIT,
     logLevel: e.LOG_LEVEL,
+    scrypt: PRODUCTION_SCRYPT,
   };
 }

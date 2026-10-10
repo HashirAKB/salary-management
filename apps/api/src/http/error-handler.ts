@@ -1,4 +1,5 @@
 import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import { hasZodFastifySchemaValidationErrors } from 'fastify-type-provider-zod';
 import { AppError, problem, type ProblemInput } from './problem.ts';
 
 const pathOf = (request: FastifyRequest): string => request.url.split('?', 1)[0] ?? request.url;
@@ -36,6 +37,20 @@ export function registerErrorHandling(
         code: error.code,
         detail: error.message,
         instance: pathOf(request),
+      });
+    }
+    if (hasZodFastifySchemaValidationErrors(error)) {
+      const errors = error.validation.map((issue) => ({
+        path: issue.instancePath.slice(1).replaceAll('/', '.'),
+        message: issue.message ?? 'Invalid value.',
+      }));
+      return sendProblem(reply, {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        detail:
+          errors.length === 1 ? '1 field is invalid.' : `${errors.length} fields are invalid.`,
+        instance: pathOf(request),
+        errors,
       });
     }
     if (error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {

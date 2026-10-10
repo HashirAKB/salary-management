@@ -14,5 +14,5 @@ export function render(ui: ReactElement, { route = '/' }: { route?: string } = {
       </QueryClientProvider>
     </MantineProvider>
   );
-  return rtlRender(ui, { wrapper: Wrapper });
+  return { ...rtlRender(ui, { wrapper: Wrapper }), queryClient };
 }
