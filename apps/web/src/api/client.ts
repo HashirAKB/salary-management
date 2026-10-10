@@ -25,6 +25,15 @@ export type ApiRequest<T> = {
   schema?: { parse(value: unknown): T };
 };
 
+/** Reads a problem+json response (04 section 4.4) into an ApiError. */
+async function toApiError(response: Response): Promise<ApiError> {
+  const retryAfter = response.headers.get('retry-after');
+  return new ApiError(
+    problemSchema.parse(await response.json()),
+    retryAfter ? Number(retryAfter) : undefined,
+  );
+}
+
 const unauthenticatedListeners = new Set<() => void>();
 
 /** Runs `listener` whenever a call gets 401 UNAUTHENTICATED; returns the unsubscribe. */
@@ -44,11 +53,7 @@ export async function apiFetch<T = void>(
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!response.ok) {
-    const retryAfter = response.headers.get('retry-after');
-    const error = new ApiError(
-      problemSchema.parse(await response.json()),
-      retryAfter ? Number(retryAfter) : undefined,
-    );
+    const error = await toApiError(response);
     if (error.code === 'UNAUTHENTICATED')
       unauthenticatedListeners.forEach((listener) => listener());
     throw error;
