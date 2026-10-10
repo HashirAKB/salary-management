@@ -88,3 +88,40 @@ describe.each(['merit', 'market_adjustment'] as const)(
     });
   },
 );
+
+describe('checkSalaryChange: promotion (D-022)', () => {
+  const promotion = { reason: 'promotion' as const, levelRank: 3 };
+
+  it('accepts a higher amount and a higher level', () => {
+    expect(checkSalaryChange(context({ change: promotion }))).toBeNull();
+  });
+
+  it('allows a new job title', () => {
+    expect(checkSalaryChange(context({ change: { ...promotion, jobTitleId: 2 } }))).toBeNull();
+  });
+
+  it.each([
+    { case: 'an equal amount', amountMinor: 200_000_000 },
+    { case: 'a lower amount', amountMinor: 190_000_000 },
+  ])('requires a raise: $case', ({ amountMinor }) => {
+    const change = { ...promotion, amount: { amountMinor, currency: 'INR' } };
+    expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
+  });
+
+  it.each([
+    { case: 'the same level', levelRank: 2 },
+    { case: 'a lower level', levelRank: 1 },
+  ])('requires a higher level: $case', ({ levelRank }) => {
+    const change = { ...promotion, levelRank, jobTitleId: 2 };
+    expect(checkSalaryChange(context({ change }))).toBe('PROMOTION_LEVEL_NOT_HIGHER');
+  });
+
+  it('reports the raise before the level', () => {
+    const change = {
+      ...promotion,
+      levelRank: 2,
+      amount: { amountMinor: 200_000_000, currency: 'INR' },
+    };
+    expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
+  });
+});
