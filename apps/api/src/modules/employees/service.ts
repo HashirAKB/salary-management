@@ -379,10 +379,24 @@ export async function createEmployee(
 
 // E4 (04 section 5.4): names and gender only; allowed on terminated employees.
 export async function updateEmployee(
-  _db: Db,
-  _id: number,
-  _body: UpdateEmployeeBody,
-  _now: string,
+  db: Db,
+  id: number,
+  body: UpdateEmployeeBody,
+  now: string,
 ): Promise<EmployeeDetail> {
-  throw new Error('not implemented');
+  const [current] = await db.select().from(employees).where(eq(employees.id, id));
+  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+  const firstName = body.firstName ?? current.firstName;
+  const lastName = body.lastName ?? current.lastName;
+  await db
+    .update(employees)
+    .set({
+      firstName,
+      lastName,
+      gender: body.gender ?? current.gender,
+      nameSearch: nameSearch(firstName, lastName),
+      updatedAt: now,
+    })
+    .where(eq(employees.id, id));
+  return getEmployee(db, id);
 }
