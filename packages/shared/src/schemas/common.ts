@@ -14,7 +14,7 @@ export type IsoDate = z.infer<typeof isoDateSchema>;
 // runs on the raw value, so a leading tab is caught before trim removes it.
 export const personNameSchema = z
   .string()
-  .refine((value) => !/^[=+\-@\t]/.test(value), {
+  .refine((value) => !/^\s*[=+\-@]|^[\t\r]/.test(value), {
     message: "Name can't start with =, +, -, @ or a tab.",
   })
   .trim()
