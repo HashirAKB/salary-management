@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { createDb, type Db } from '../db/client.ts';
 import { migrate } from '../db/migrate.ts';
+import { verifyPassword } from '../modules/auth/password.ts';
+import { runSeed } from './cli.ts';
 import { generateDataset, REF_DATE, SEED, SEED_CONFIG, type Dataset } from './generate.ts';
 import { generateReferenceData } from './reference.ts';
 import { writeDataset, type SeedUser } from './write.ts';
@@ -130,5 +132,42 @@ describe('writeDataset (seed.int)', () => {
       ['hr.viewer@acme.test', 'hr_viewer', 'viewer-two'],
       ['finance@acme.test', 'finance', 'finance-two'],
     ]);
+  });
+});
+
+describe('seed CLI (seed.int)', () => {
+  it('the seed CLI migrates, writes the dataset, stores scrypt hashes for the demo users and prints the report', async () => {
+    const db = createDb(':memory:');
+    const output: string[] = [];
+    const env = {
+      DATABASE_URL: ':memory:',
+      DEMO_HR_ADMIN_PASSWORD: 'admin-password-1',
+      DEMO_HR_VIEWER_PASSWORD: 'viewer-password-1',
+      DEMO_FINANCE_PASSWORD: 'finance-password-1',
+    };
+
+    const exitCode = await runSeed(env, {
+      openDb: () => db,
+      log: (line) => output.push(line),
+      error: (line) => output.push(line),
+      scrypt: { N: 1024, r: 8, p: 3 },
+    });
+    const stored = await db.$client.execute('SELECT email, password_hash FROM users ORDER BY id');
+
+    expect(exitCode).toBe(0);
+    expect(await count(db, 'employees')).toBe(10_250);
+    expect(stored.rows.map((r) => r.email)).toEqual([
+      'hr.admin@acme.test',
+      'hr.viewer@acme.test',
+      'finance@acme.test',
+    ]);
+    const hashes = stored.rows.map((r) => String(r.password_hash));
+    expect(await verifyPassword('admin-password-1', hashes[0]!)).toBe(true);
+    expect(await verifyPassword('viewer-password-1', hashes[1]!)).toBe(true);
+    expect(await verifyPassword('finance-password-1', hashes[2]!)).toBe(true);
+    expect(output.join('\n')).toContain(
+      'Active employees: 10000 (CA 800, DE 1200, GB 1500, IN 4000, US 2500)',
+    );
+    expect(output.join('\n')).not.toContain('admin-password-1');
   });
 });
