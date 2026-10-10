@@ -11,6 +11,7 @@ import {
 } from '@faker-js/faker';
 import type { employees, Gender, LevelCode, salaryChanges } from '../db/schema.ts';
 import { nameSearch } from '../domain/name-search.ts';
+import { buildHistory, drawHireDate, roundSalary, tenureYears } from './history.ts';
 import { createRandom, largestRemainder, type Random } from './random.ts';
 import {
   ACCOUNT_EXECUTIVE,
@@ -132,14 +133,6 @@ function allocateActive(seed: number, refDate: string, bands: Map<string, PayBan
 
 const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
 
-/** Salary rounding step in minor units: 100 major units, 1,000 for INR (02 section 7.6 step 4). */
-const salaryStepMinor = (currencyCode: string) => (currencyCode === 'INR' ? 1000 : 100) * 100;
-
-const roundSalary = (amountMinor: number, currencyCode: string) => {
-  const step = salaryStepMinor(currencyCode);
-  return Math.round(amountMinor / step) * step;
-};
-
 // 02 section 7.6: compa-ratio draws, outliers outside the target cohorts, then one factor on
 // women's pay per eligible cohort so the realised gap meets its target, then rounding.
 function shapeSalaries(people: Person[], random: Random, config: SeedConfig): void {
@@ -187,10 +180,29 @@ const code = (n: number) => `E${String(n).padStart(6, '0')}`;
 function toRows(people: Person[], random: Random, refDate: string) {
   const employeeRows: EmployeeRow[] = [];
   const changeRows: SalaryChangeRow[] = [];
-  random.shuffle(people).forEach((person, index) => {
+  const shuffled = random.shuffle(people);
+  // 02 section 7.7: 10% of active employees, chosen among those with 2.5+ years of tenure, are stale.
+  const hireDates = shuffled.map(() => drawHireDate(random, refDate));
+  const candidates = shuffled.flatMap((_, i) =>
+    tenureYears(hireDates[i] as string, refDate) >= 2.5 ? [i] : [],
+  );
+  const stale = new Set(random.shuffle(candidates).slice(0, Math.round(shuffled.length * 0.1)));
+  shuffled.forEach((person, index) => {
     const id = index + 1;
-    const hireDate = refDate;
-    const createdAt = `${hireDate}T00:00:00.000Z`;
+    const currencyCode = person.band.currencyCode;
+    const hireDate = hireDates[index] as string;
+    const { rows } = buildHistory(
+      {
+        levelCode: person.levelCode,
+        salaryMinor: person.salaryMinor,
+        currencyCode,
+        endDate: refDate,
+        hireDate,
+        stale: stale.has(index),
+      },
+      random,
+    );
+    const last = rows[rows.length - 1] ?? { effectiveDate: hireDate };
     employeeRows.push({
       id,
       employeeCode: code(id),
@@ -205,23 +217,25 @@ function toRows(people: Person[], random: Random, refDate: string) {
       status: 'active',
       terminationDate: null,
       salaryMinor: person.salaryMinor,
-      salaryCurrency: person.band.currencyCode,
-      salaryEffectiveDate: hireDate,
-      createdAt,
-      updatedAt: createdAt,
+      salaryCurrency: currencyCode,
+      salaryEffectiveDate: last.effectiveDate,
+      createdAt: `${hireDate}T00:00:00.000Z`,
+      updatedAt: `${last.effectiveDate}T00:00:00.000Z`,
     });
-    changeRows.push({
-      id: changeRows.length + 1,
-      employeeId: id,
-      effectiveDate: hireDate,
-      amountMinor: person.salaryMinor,
-      currencyCode: person.band.currencyCode,
-      jobTitleId: person.jobTitleId,
-      levelCode: person.levelCode,
-      reason: 'hire',
-      changedByUserId: null,
-      createdAt,
-    });
+    for (const row of rows) {
+      changeRows.push({
+        id: changeRows.length + 1,
+        employeeId: id,
+        effectiveDate: row.effectiveDate,
+        amountMinor: row.amountMinor,
+        currencyCode,
+        jobTitleId: person.jobTitleId,
+        levelCode: row.levelCode,
+        reason: row.reason,
+        changedByUserId: null,
+        createdAt: `${row.effectiveDate}T00:00:00.000Z`,
+      });
+    }
   });
   return { employeeRows, changeRows };
 }
