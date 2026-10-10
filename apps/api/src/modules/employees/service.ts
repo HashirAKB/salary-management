@@ -288,6 +288,42 @@ export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
   };
 }
 
+// E3 rules, in the order 04 section 5.4 lists them. An unknown country, title or level has no
+// band, so it ends as NO_PAY_BAND. A starting salary outside the band is allowed.
+async function checkCreateRules(db: Db, body: CreateEmployeeBody, today: string): Promise<void> {
+  if (body.hireDate > today) {
+    throw new AppError(422, 'DATE_IN_FUTURE', "Hire date can't be in the future.");
+  }
+  const [band] = await db
+    .select({ currency: payBands.currencyCode })
+    .from(payBands)
+    .where(
+      and(
+        eq(payBands.countryCode, body.countryCode),
+        eq(payBands.jobTitleId, body.jobTitleId),
+        eq(payBands.levelCode, body.levelCode),
+      ),
+    );
+  const [country] = await db
+    .select({ currency: countries.currencyCode })
+    .from(countries)
+    .where(eq(countries.code, body.countryCode));
+  if (country && country.currency !== body.startingSalary.currency) {
+    throw new AppError(
+      422,
+      'SALARY_CURRENCY_MISMATCH',
+      `Salary must be in ${country.currency} for this country.`,
+    );
+  }
+  if (!band) {
+    throw new AppError(
+      422,
+      'NO_PAY_BAND',
+      "There's no pay band for this country, job title and level.",
+    );
+  }
+}
+
 // E3 (04 section 5.4): one write transaction inserts the employee and its hire history row.
 export async function createEmployee(
   db: Db,
@@ -295,6 +331,7 @@ export async function createEmployee(
   context: { today: string; now: string; userId: number },
 ): Promise<EmployeeDetail> {
   const { startingSalary: salary } = body;
+  await checkCreateRules(db, body, context.today);
   const id = await db.transaction(async (tx) => {
     const [maxes] = await tx
       .select({
