@@ -88,6 +88,16 @@ async function logInAs(role: Role) {
 }
 
 describe('redirects around login (04 sections 8.1, 8.2)', () => {
+  it.each<[Role, string]>([
+    ['hr_viewer', 'Employees'],
+    ['finance', 'Insights'],
+  ])("sends / to the role's landing page (%s)", async (role, heading) => {
+    loggedInAs(role);
+    render(<AppRoutes />, { route: '/' });
+
+    expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+  });
+
   it.each<[Role, string, string]>([
     ['finance', '/employees', 'Insights'],
     ['hr_viewer', '/insights/pay-equity', 'Pay equity'],
