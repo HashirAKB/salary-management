@@ -6,6 +6,7 @@ import {
   Button,
   Group,
   Pagination,
+  Progress,
   Select,
   Skeleton,
   Stack,
@@ -87,6 +88,7 @@ export function EmployeeListPage(): ReactElement {
     placeholderData: keepPreviousData,
   });
   const data = employees.data;
+  const loadingNext = employees.isPlaceholderData;
   const empty = data?.total === 0;
   const pastTheEnd =
     data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
@@ -137,8 +139,13 @@ export function EmployeeListPage(): ReactElement {
           </Group>
         </Alert>
       )}
+      {loadingNext && <Progress value={100} animated size={3} aria-label="Loading page" />}
       {showTable && (
-        <Table striped>
+        <Table
+          striped
+          data-fetching={loadingNext || undefined}
+          style={loadingNext ? { opacity: 0.5 } : undefined}
+        >
           <Table.Thead>
             <Table.Tr>
               {COLUMNS.map((column) => (
