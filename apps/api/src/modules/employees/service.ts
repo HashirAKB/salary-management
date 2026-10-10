@@ -1,5 +1,5 @@
 import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
-import { and, asc, count, eq, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, sql, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { usdMinorSql } from '../../db/money-sql.ts';
 import {
@@ -11,6 +11,7 @@ import {
   levels,
   payBands,
 } from '../../db/schema.ts';
+import { parseSearch } from '../../domain/employee-search.ts';
 import { fxAsOf } from '../auth/sessions.ts';
 
 // E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
@@ -18,8 +19,19 @@ export async function listEmployees(
   db: Db,
   query: EmployeeListQuery,
 ): Promise<EmployeeListResponse> {
-  const { page, pageSize, status } = query;
-  const where: SQL | undefined = status === 'all' ? undefined : eq(employees.status, status);
+  const { page, pageSize, status, q } = query;
+  const conditions: (SQL | undefined)[] = [
+    status === 'all' ? undefined : eq(employees.status, status),
+  ];
+  if (q !== undefined) {
+    const search = parseSearch(q);
+    conditions.push(
+      search.kind === 'code'
+        ? eq(employees.employeeCode, search.code)
+        : sql`instr(${employees.nameSearch}, ${search.text}) > 0`,
+    );
+  }
+  const where = and(...conditions);
 
   const [rows, [totals], asOf] = await Promise.all([
     db
