@@ -1,10 +1,11 @@
 import type { Action } from '@acme/shared';
 import type { ReactElement } from 'react';
-import { Route, Routes } from 'react-router';
+import { Navigate, Route, Routes } from 'react-router';
 import { PlaceholderPage } from './components/PlaceholderPage.tsx';
 import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
 import { Shell, useViewer } from './components/Shell.tsx';
 import { LoginPage } from './features/auth/LoginPage.tsx';
+import { landingPath } from './features/auth/useSession.ts';
 import { ROUTES } from './routes.ts';
 
 function Gated({ action, title }: { action: Action; title: string }): ReactElement {
@@ -14,6 +15,10 @@ function Gated({ action, title }: { action: Action; title: string }): ReactEleme
       <PlaceholderPage title={title} />
     </RoleGate>
   );
+}
+
+function Landing(): ReactElement {
+  return <Navigate to={landingPath(useViewer())} replace />;
 }
 
 function NotFound(): ReactElement {
@@ -26,6 +31,7 @@ export function AppRoutes(): ReactElement {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route element={<Shell />}>
+        <Route path="/" element={<Landing />} />
         {ROUTES.map(({ path, action, title }) => (
           <Route key={path} path={path} element={<Gated action={action} title={title} />} />
         ))}
