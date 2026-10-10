@@ -9,4 +9,5 @@ export const theme = createTheme({
 });
 
 // The colour scheme survives reloads in localStorage (06 S3).
-export const colorSchemeManager = localStorageColorSchemeManager({ key: 'acme-color-scheme' });
+export const COLOR_SCHEME_KEY = 'acme-color-scheme';
+export const colorSchemeManager = localStorageColorSchemeManager({ key: COLOR_SCHEME_KEY });
