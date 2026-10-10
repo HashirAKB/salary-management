@@ -1,18 +1,31 @@
 import type { Action } from '@acme/shared';
-import type { ReactElement } from 'react';
+import type { ComponentType, ReactElement } from 'react';
 import { Navigate, Route, Routes } from 'react-router';
 import { PlaceholderPage } from './components/PlaceholderPage.tsx';
 import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
 import { Shell, useViewer } from './components/Shell.tsx';
+import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
 import { LoginPage } from './features/auth/LoginPage.tsx';
 import { landingPath } from './features/auth/useSession.ts';
 import { ROUTES } from './routes.ts';
 
-function Gated({ action, title }: { action: Action; title: string }): ReactElement {
+// Screens built so far, by path; every other route shows a placeholder.
+const SCREENS: Record<string, ComponentType> = { '/employees': EmployeeListPage };
+
+function Gated({
+  action,
+  title,
+  path,
+}: {
+  action: Action;
+  title: string;
+  path: string;
+}): ReactElement {
   const me = useViewer();
+  const Screen = SCREENS[path];
   return (
     <RoleGate me={me} action={action}>
-      <PlaceholderPage title={title} />
+      {Screen ? <Screen /> : <PlaceholderPage title={title} />}
     </RoleGate>
   );
 }
@@ -33,7 +46,11 @@ export function AppRoutes(): ReactElement {
       <Route element={<Shell />}>
         <Route path="/" element={<Landing />} />
         {ROUTES.map(({ path, action, title }) => (
-          <Route key={path} path={path} element={<Gated action={action} title={title} />} />
+          <Route
+            key={path}
+            path={path}
+            element={<Gated action={action} title={title} path={path} />}
+          />
         ))}
         <Route path="*" element={<NotFound />} />
       </Route>

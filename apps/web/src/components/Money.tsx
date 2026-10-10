@@ -1,7 +1,12 @@
+import { Text, type TextProps } from '@mantine/core';
 import type { ReactElement } from 'react';
-import type { MoneyValue } from '../format.ts';
+import { formatMoney, type MoneyValue } from '../format.ts';
 
 /** The only place money is formatted for display (04 section 8.4). */
-export function Money(_props: { value: MoneyValue }): ReactElement {
-  throw new Error('not implemented');
+export function Money({ value, ...props }: { value: MoneyValue } & TextProps): ReactElement {
+  return (
+    <Text span {...props}>
+      {formatMoney(value)}
+    </Text>
+  );
 }
