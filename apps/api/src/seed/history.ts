@@ -55,7 +55,7 @@ export const roundSalary = (amountMinor: number, currencyCode: string) => {
 };
 
 /** Hire date by tenure bucket before the end date; terminated employees need 6 months' tenure. */
-export function drawHireDate(random: Random, endDate: string, minTenureDays = 0): string {
+export function drawHireDate(random: Random, endDate: string, minTenureMonths = 0): string {
   const u = random.next();
   let cumulative = 0;
   const bucket =
@@ -65,7 +65,7 @@ export function drawHireDate(random: Random, endDate: string, minTenureDays = 0)
     Math.ceil(bucket.fromYears * YEAR_DAYS),
     Math.floor(bucket.toYears * YEAR_DAYS) - 1,
   );
-  const hire = addDays(endDate, -Math.max(days, minTenureDays));
+  const hire = minDate(addDays(endDate, -days), addMonths(endDate, -minTenureMonths));
   return hire < EARLIEST_HIRE ? EARLIEST_HIRE : hire;
 }
 

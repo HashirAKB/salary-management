@@ -79,12 +79,20 @@ type Person = {
   lastName: string;
   band: PayBandRow;
   salaryMinor: number;
+  terminationDate: string | null;
 };
+
+type NameOf = (gender: Gender) => { firstName: string; lastName: string };
 
 const bandKey = (countryCode: string, jobTitleId: number, levelCode: string) =>
   `${countryCode}/${jobTitleId}/${levelCode}`;
 
-function namesFor(country: CountrySpec, countryIndex: number, seed: number, refDate: string) {
+function namesFor(
+  country: CountrySpec,
+  countryIndex: number,
+  seed: number,
+  refDate: string,
+): NameOf {
   const faker = new Faker({ locale: [LOCALES[country.locale], en, base] });
   faker.seed(seed + countryIndex);
   faker.setDefaultRefDate(refDate);
@@ -98,11 +106,11 @@ function namesFor(country: CountrySpec, countryIndex: number, seed: number, refD
 }
 
 // 02 section 7.5: cohort counts by largest remainder per country, then genders per cohort.
-function allocateActive(seed: number, refDate: string, bands: Map<string, PayBandRow>): Person[] {
+function allocateActive(names: NameOf[], bands: Map<string, PayBandRow>): Person[] {
   const people: Person[] = [];
   const cohortWeights = JOB_TITLES.flatMap((t) => LEVELS.map((l) => t.share * l.share));
   COUNTRIES.forEach((country, countryIndex) => {
-    const nameOf = namesFor(country, countryIndex, seed, refDate);
+    const nameOf = names[countryIndex] as NameOf;
     const cohortCounts = largestRemainder(country.activeHeadcount, cohortWeights);
     let cohort = 0;
     for (const title of JOB_TITLES) {
@@ -122,10 +130,78 @@ function allocateActive(seed: number, refDate: string, bands: Map<string, PayBan
               ...nameOf(gender),
               band,
               salaryMinor: band.midMinor,
+              terminationDate: null,
             });
           }
         });
       }
+    }
+  });
+  return people;
+}
+
+const pickWeighted = (random: Random, weights: readonly number[]): number => {
+  const total = weights.reduce((a, b) => a + b, 0);
+  let u = random.next() * total;
+  for (let i = 0; i < weights.length; i++) {
+    u -= weights[i] ?? 0;
+    if (u < 0) return i;
+  }
+  return weights.length - 1;
+};
+
+const TERMINATION_FROM = '2024-01-01';
+const TERMINATION_DAYS = 623; // 2024-01-01 to 2026-09-15 inclusive
+
+// 02 section 7.8: spread across countries by headcount, titles and levels drawn by their shares,
+// salaries drawn like active pay but with no gap shaping or outliers.
+function generateTerminated(
+  count: number,
+  names: NameOf[],
+  bands: Map<string, PayBandRow>,
+  random: Random,
+): Person[] {
+  const people: Person[] = [];
+  const perCountry = largestRemainder(
+    count,
+    COUNTRIES.map((c) => c.activeHeadcount),
+  );
+  COUNTRIES.forEach((country, countryIndex) => {
+    for (let n = 0; n < (perCountry[countryIndex] ?? 0); n++) {
+      const title =
+        JOB_TITLES[
+          pickWeighted(
+            random,
+            JOB_TITLES.map((t) => t.share),
+          )
+        ]!;
+      const level =
+        LEVELS[
+          pickWeighted(
+            random,
+            LEVELS.map((l) => l.share),
+          )
+        ]!;
+      const w = Math.min(0.9, title.womenShare * level.womenFactor);
+      const gender = GENDERS[pickWeighted(random, [0.97 * w, 0.97 * (1 - w), 0.01, 0.02])]!;
+      const band = bands.get(bandKey(country.code, title.id, level.code))!;
+      const compa = Math.min(1.16, Math.max(0.84, random.normal(1, 0.06)));
+      const terminationDate = new Date(
+        Date.parse(`${TERMINATION_FROM}T00:00:00.000Z`) +
+          random.int(0, TERMINATION_DAYS - 1) * 86_400_000,
+      )
+        .toISOString()
+        .slice(0, 10);
+      people.push({
+        countryCode: country.code,
+        jobTitleId: title.id,
+        levelCode: level.code,
+        gender,
+        ...(names[countryIndex] as NameOf)(gender),
+        band,
+        salaryMinor: roundSalary(compa * band.midMinor, band.currencyCode),
+        terminationDate,
+      });
     }
   });
   return people;
@@ -177,18 +253,23 @@ function shapeSalaries(people: Person[], random: Random, config: SeedConfig): vo
 
 const code = (n: number) => `E${String(n).padStart(6, '0')}`;
 
-function toRows(people: Person[], random: Random, refDate: string) {
-  const employeeRows: EmployeeRow[] = [];
-  const changeRows: SalaryChangeRow[] = [];
+type Rows = { employees: EmployeeRow[]; salaryChanges: SalaryChangeRow[] };
+
+// Shuffles, numbers and gives each person a hire date and history (02 sections 7.2 and 7.7).
+function appendRows(people: Person[], random: Random, refDate: string, out: Rows): void {
   const shuffled = random.shuffle(people);
-  // 02 section 7.7: 10% of active employees, chosen among those with 2.5+ years of tenure, are stale.
-  const hireDates = shuffled.map(() => drawHireDate(random, refDate));
-  const candidates = shuffled.flatMap((_, i) =>
-    tenureYears(hireDates[i] as string, refDate) >= 2.5 ? [i] : [],
+  const endDate = (p: Person) => p.terminationDate ?? refDate;
+  const hireDates = shuffled.map((p) =>
+    drawHireDate(random, endDate(p), p.terminationDate ? 6 : 0),
   );
-  const stale = new Set(random.shuffle(candidates).slice(0, Math.round(shuffled.length * 0.1)));
+  // 02 section 7.7: 10% of active employees, chosen among those with 2.5+ years of tenure, are stale.
+  const activeCount = shuffled.filter((p) => !p.terminationDate).length;
+  const candidates = shuffled.flatMap((p, i) =>
+    !p.terminationDate && tenureYears(hireDates[i] as string, refDate) >= 2.5 ? [i] : [],
+  );
+  const stale = new Set(random.shuffle(candidates).slice(0, Math.round(activeCount * 0.1)));
   shuffled.forEach((person, index) => {
-    const id = index + 1;
+    const id = out.employees.length + 1;
     const currencyCode = person.band.currencyCode;
     const hireDate = hireDates[index] as string;
     const { rows } = buildHistory(
@@ -196,14 +277,14 @@ function toRows(people: Person[], random: Random, refDate: string) {
         levelCode: person.levelCode,
         salaryMinor: person.salaryMinor,
         currencyCode,
-        endDate: refDate,
+        endDate: endDate(person),
         hireDate,
         stale: stale.has(index),
       },
       random,
     );
     const last = rows[rows.length - 1] ?? { effectiveDate: hireDate };
-    employeeRows.push({
+    out.employees.push({
       id,
       employeeCode: code(id),
       firstName: person.firstName,
@@ -214,8 +295,8 @@ function toRows(people: Person[], random: Random, refDate: string) {
       jobTitleId: person.jobTitleId,
       levelCode: person.levelCode,
       hireDate,
-      status: 'active',
-      terminationDate: null,
+      status: person.terminationDate ? 'terminated' : 'active',
+      terminationDate: person.terminationDate,
       salaryMinor: person.salaryMinor,
       salaryCurrency: currencyCode,
       salaryEffectiveDate: last.effectiveDate,
@@ -223,8 +304,8 @@ function toRows(people: Person[], random: Random, refDate: string) {
       updatedAt: `${last.effectiveDate}T00:00:00.000Z`,
     });
     for (const row of rows) {
-      changeRows.push({
-        id: changeRows.length + 1,
+      out.salaryChanges.push({
+        id: out.salaryChanges.length + 1,
         employeeId: id,
         effectiveDate: row.effectiveDate,
         amountMinor: row.amountMinor,
@@ -237,7 +318,6 @@ function toRows(people: Person[], random: Random, refDate: string) {
       });
     }
   });
-  return { employeeRows, changeRows };
 }
 
 // generateDataset: pure, no DB, no clock, no env (02 section 7.1).
@@ -247,8 +327,13 @@ export function generateDataset(config: SeedConfig, seed: number, refDate: strin
     reference.payBands.map((b) => [bandKey(b.countryCode, b.jobTitleId, b.levelCode), b]),
   );
   const random = createRandom(seed);
-  const people = allocateActive(seed, refDate, bands);
-  shapeSalaries(people, random, config);
-  const { employeeRows, changeRows } = toRows(people, random, refDate);
-  return { ...reference, employees: employeeRows, salaryChanges: changeRows };
+  const names = COUNTRIES.map((country, i) => namesFor(country, i, seed, refDate));
+  const active = allocateActive(names, bands);
+  shapeSalaries(active, random, config);
+  const terminated = generateTerminated(config.terminatedCount, names, bands, random);
+  // Active employees are numbered E000001 onwards, terminated ones after them (02 section 7.2).
+  const rows: Rows = { employees: [], salaryChanges: [] };
+  appendRows(active, random, refDate, rows);
+  appendRows(terminated, random, refDate, rows);
+  return { ...reference, ...rows };
 }
