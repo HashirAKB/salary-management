@@ -28,8 +28,8 @@ class ResizeObserver {
 window.ResizeObserver = ResizeObserver;
 
 // The list page renders a filter bar of Mantine selects; a cold first render takes over the
-// default 1 s that findBy and waitFor wait.
-configure({ asyncUtilTimeout: 5000 });
+// default 1 s that findBy and waitFor wait; under a full parallel run it can pass 5 s.
+configure({ asyncUtilTimeout: 10_000 });
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
 afterEach(() => {
