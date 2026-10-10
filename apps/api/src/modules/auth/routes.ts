@@ -11,6 +11,8 @@ const LOGIN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' };
 
 // A2 to A4 (04 section 5.2).
 export function authRoutes(app: FastifyInstance, deps: AuthDeps) {
+  const secure = deps.config.nodeEnv === 'production';
+
   app.register(async (scope) => {
     await scope.register(rateLimit, {
       global: false,
@@ -28,10 +30,7 @@ export function authRoutes(app: FastifyInstance, deps: AuthDeps) {
       async (request, reply): Promise<MeResponse> => {
         const body = loginBodySchema.parse(request.body);
         const { token, me } = await login(deps, body.email, body.password);
-        reply.header(
-          'set-cookie',
-          sessionCookie(token, { secure: deps.config.nodeEnv === 'production' }),
-        );
+        reply.header('set-cookie', sessionCookie(token, { secure }));
         return me;
       },
     );
@@ -41,10 +40,7 @@ export function authRoutes(app: FastifyInstance, deps: AuthDeps) {
   app.post('/api/auth/logout', async (request, reply) => {
     const token = readSid(request.headers.cookie);
     if (token) await deleteSession(deps.db, hashToken(token));
-    reply.header(
-      'set-cookie',
-      clearedSessionCookie({ secure: deps.config.nodeEnv === 'production' }),
-    );
+    reply.header('set-cookie', clearedSessionCookie({ secure }));
     return reply.status(204).send();
   });
 
