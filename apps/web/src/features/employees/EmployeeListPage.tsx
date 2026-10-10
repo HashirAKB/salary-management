@@ -14,6 +14,7 @@ import {
   Text,
   Title,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import type { ReactElement } from 'react';
@@ -38,6 +39,7 @@ const COLUMNS = [
   'Band',
   'Hire date',
 ];
+const SORTABLE = { Name: 'name', Salary: 'salaryUsd', 'Hire date': 'hireDate' } as const;
 const SKELETON_ROWS = 10;
 const PAGE_SIZES = ['25', '50', '100'];
 const count = new Intl.NumberFormat('en-US');
@@ -78,7 +80,21 @@ function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement
 /** S-2 Employees list (04 section 8.5). */
 export function EmployeeListPage(): ReactElement {
   const filters = useEmployeeFilters();
-  const { query, page, pageSize, setPage, setPageSize } = filters;
+  const { query, page, pageSize, setPage, setPageSize, setFilters, clearFilters } = filters;
+  const sort = query.sort ?? 'name';
+  const order = query.order ?? 'asc';
+  const sortBy = (column: (typeof SORTABLE)[keyof typeof SORTABLE]) =>
+    setFilters(
+      column === sort
+        ? { order: order === 'asc' ? 'desc' : undefined }
+        : { sort: column === 'name' ? undefined : column, order: undefined },
+    );
+  const filtered =
+    query.status !== 'active' ||
+    [query.q, query.band, query.salaryUnchangedSince].some(Boolean) ||
+    [query.country, query.department, query.jobTitle, query.level, query.gender].some(
+      (values) => values && values.length > 0,
+    );
   // page and pageSize are always sent; the serializer leaves out every default.
   const filterQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
   const employees = useQuery({
@@ -88,6 +104,7 @@ export function EmployeeListPage(): ReactElement {
         `/api/employees?page=${page}&pageSize=${pageSize}${filterQuery && `&${filterQuery}`}`,
         { schema: employeeListResponseSchema },
       ),
+    enabled: filters.ready,
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   });
@@ -110,6 +127,11 @@ export function EmployeeListPage(): ReactElement {
         <Title order={1}>Employees</Title>
         {canAdd && !empty && addButton}
       </Group>
+      {filters.droppedValues && (
+        <Alert color="yellow" withCloseButton onClose={filters.dismissDropped}>
+          Some filters in this link weren't recognised and were removed.
+        </Alert>
+      )}
       <EmployeeFilterBar filters={filters} />
       {employees.isError && (
         <Alert color="red">
@@ -121,7 +143,15 @@ export function EmployeeListPage(): ReactElement {
           </Group>
         </Alert>
       )}
-      {empty && (
+      {empty && filtered && (
+        <Stack align="flex-start">
+          <Text>No employees match these filters.</Text>
+          <Button variant="light" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        </Stack>
+      )}
+      {empty && !filtered && (
         <Stack align="flex-start">
           <Text>No employees yet.</Text>
           {canAdd && addButton}
@@ -153,9 +183,25 @@ export function EmployeeListPage(): ReactElement {
         >
           <Table.Thead>
             <Table.Tr>
-              {COLUMNS.map((column) => (
-                <Table.Th key={column}>{column}</Table.Th>
-              ))}
+              {COLUMNS.map((column) => {
+                const key = SORTABLE[column as keyof typeof SORTABLE] as string | undefined;
+                if (!key) return <Table.Th key={column}>{column}</Table.Th>;
+                const active = key === sort;
+                return (
+                  <Table.Th
+                    key={column}
+                    aria-sort={active ? (order === 'asc' ? 'ascending' : 'descending') : undefined}
+                  >
+                    <UnstyledButton
+                      fw="inherit"
+                      onClick={() => sortBy(key as (typeof SORTABLE)[keyof typeof SORTABLE])}
+                    >
+                      {column}
+                      {active && <span aria-hidden>{order === 'asc' ? ' ▲' : ' ▼'}</span>}
+                    </UnstyledButton>
+                  </Table.Th>
+                );
+              })}
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>

@@ -1,10 +1,9 @@
-import { referenceResponseSchema, type EmployeeListQuery } from '@acme/shared';
+import type { EmployeeListQuery } from '@acme/shared';
 import { Button, Group, MultiSelect, Select, TextInput } from '@mantine/core';
 import { useDebouncedCallback } from '@mantine/hooks';
-import { useQuery } from '@tanstack/react-query';
 import { useEffect, useRef, useState, type ReactElement } from 'react';
-import { apiFetch } from '../../api/client.ts';
 import type { useEmployeeFilters } from './useEmployeeFilters.ts';
+import { useReference } from './useReference.ts';
 
 const SEARCH_DEBOUNCE_MS = 300;
 const STATUS_OPTIONS = [
@@ -29,11 +28,7 @@ export function EmployeeFilterBar({
   filters: ReturnType<typeof useEmployeeFilters>;
 }): ReactElement {
   const { query, setFilters, clearFilters } = filters;
-  const reference = useQuery({
-    queryKey: ['reference'],
-    queryFn: () => apiFetch('/api/reference', { schema: referenceResponseSchema }),
-    staleTime: Infinity,
-  }).data;
+  const reference = useReference().data;
 
   const [search, setSearch] = useState(query.q ?? '');
   // The last q this bar put in the URL; a different q in the URL came from outside (back, clear).
