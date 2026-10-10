@@ -132,7 +132,7 @@ describe('employee list page (04 section 8.5)', () => {
     expect(screen.getByLabelText('location')).toHaveTextContent('/employees?page=2');
     expect(requests.at(-1)?.get('page')).toBe('2');
 
-    await user.click(screen.getByRole('textbox', { name: 'Page size' }));
+    await user.click(screen.getByRole('combobox', { name: 'Page size' }));
     await user.click(await screen.findByRole('option', { name: '25' }));
 
     expect(await screen.findByText('Showing 1 to 25 of 120 employees')).toBeInTheDocument();
