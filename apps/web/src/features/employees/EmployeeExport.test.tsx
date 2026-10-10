@@ -1,7 +1,7 @@
 import type { Role } from '@acme/shared';
 import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { delay, http, HttpResponse } from 'msw';
+import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { anEmployeeListResponse } from '../../../test/fixtures/employees.ts';
 import { aMeResponse } from '../../../test/fixtures/me.ts';
@@ -39,10 +39,14 @@ describe('export CSV button (04 sections 5.7 and 8.5)', () => {
   it('requests the current filters and shows a spinner until the file arrives', async () => {
     loggedInAs('hr_admin');
     const requests: URLSearchParams[] = [];
+    let release: () => void = () => {};
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
     server.use(
       http.get('/api/exports/employees.csv', async ({ request }) => {
         requests.push(new URL(request.url).searchParams);
-        await delay(150);
+        await released;
         return new HttpResponse('﻿"Employee ID"\r\n', {
           headers: {
             'content-type': 'text/csv; charset=utf-8',
@@ -59,6 +63,7 @@ describe('export CSV button (04 sections 5.7 and 8.5)', () => {
     const exporting = await screen.findByRole('button', { name: 'Export CSV' });
     expect(exporting).toBeDisabled();
     expect(exporting).toHaveAttribute('data-loading', 'true');
+    release();
     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
     expect(requests).toHaveLength(1);
