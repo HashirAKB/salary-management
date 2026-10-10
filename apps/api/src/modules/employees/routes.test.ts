@@ -1,9 +1,10 @@
-import { employeeListResponseSchema } from '@acme/shared';
+import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
 import { testApp, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
+import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
 
 describe('GET /api/employees (E1)', () => {
   let app: FastifyInstance | undefined;
@@ -110,5 +111,58 @@ describe('GET /api/employees (E1)', () => {
         code: 'VALIDATION_FAILED',
       });
     }
+  });
+
+  describe('salary in local currency and USD, with compa-ratio and band position', () => {
+    const band = generateBands().find(
+      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+    )!;
+    const INR_MICROS = 11_500;
+
+    it.each([
+      ['below', band.minMinor - 1],
+      ['inside', band.minMinor],
+      ['inside', band.midMinor],
+      ['inside', band.maxMinor],
+      ['above', band.maxMinor + 1],
+    ] as const)('places %s the band a salary of %i', async (position, salaryMinor) => {
+      const get = await setup(async (db) => {
+        await anEmployee().inCountry('IN').withSalary(salaryMinor).insert(db);
+      });
+
+      const [item] = (await get()).json().items;
+
+      expect(item).toMatchObject({
+        salary: { amountMinor: salaryMinor, currency: 'INR' },
+        salaryUsd: { amountMinor: toUsdMinor(salaryMinor, INR_MICROS), currency: 'USD' },
+        compaRatio: compaRatio(salaryMinor, band.midMinor),
+        bandPosition: position,
+      });
+    });
+
+    it('shows a USD salary unchanged', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().inCountry('US').withSalary(12_345_600).insert(db);
+      });
+
+      const [item] = (await get()).json().items;
+
+      expect(item.salary).toEqual({ amountMinor: 12_345_600, currency: 'USD' });
+      expect(item.salaryUsd).toEqual({ amountMinor: 12_345_600, currency: 'USD' });
+    });
+
+    it('rounds the USD figure half up to the cent for each employee', async () => {
+      // At 0.011500, 44 paise is 0.506 of a cent (rounds up to 1) and 43 is 0.4945 (rounds to 0).
+      const get = await setup(async (db) => {
+        await anEmployee().named('A', 'First').inCountry('IN').withSalary(44).insert(db);
+        await anEmployee().named('B', 'Second').inCountry('IN').withSalary(43).insert(db);
+      });
+
+      const items = (await get()).json().items;
+
+      expect(
+        items.map((item: { salaryUsd: { amountMinor: number } }) => item.salaryUsd.amountMinor),
+      ).toEqual([toUsdMinor(44, INR_MICROS), toUsdMinor(43, INR_MICROS)]);
+    });
   });
 });
