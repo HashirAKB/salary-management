@@ -39,9 +39,14 @@ const TENURE_BUCKETS = [
 const toDays = (date: string) => Date.parse(`${date}T00:00:00.000Z`) / DAY_MS;
 const fromDays = (days: number) => new Date(days * DAY_MS).toISOString().slice(0, 10);
 export const addDays = (date: string, days: number) => fromDays(toDays(date) + days);
+// Calendar months, clamped to the month's last day: 2024-10-31 minus 6 months is 2024-04-30.
 const addMonths = (date: string, months: number) => {
   const d = new Date(`${date}T00:00:00.000Z`);
+  const day = d.getUTCDate();
+  d.setUTCDate(1);
   d.setUTCMonth(d.getUTCMonth() + months);
+  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
+  d.setUTCDate(Math.min(day, lastDay));
   return d.toISOString().slice(0, 10);
 };
 const minDate = (a: string, b: string) => (a < b ? a : b);
