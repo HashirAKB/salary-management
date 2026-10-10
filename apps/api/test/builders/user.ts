@@ -58,6 +58,24 @@ class UserBuilder {
 
 export const aUser = (role: Role) => new UserBuilder(role);
 
+/** Inserts a session row for an existing user and returns its cookie header. */
+export async function aSessionFor(
+  db: DbOrTx,
+  userId: number,
+  { createdAt = '2026-10-09T09:00:00.000Z' }: { createdAt?: string } = {},
+): Promise<string> {
+  const [row] = await db.all<{ n: number }>('SELECT count(*) + 1 AS n FROM sessions');
+  const token = `test-token-${row?.n ?? 1}`;
+  const created = new Date(createdAt);
+  await db.insert(sessions).values({
+    tokenHash: createHash('sha256').update(token).digest('hex'),
+    userId,
+    createdAt: created.toISOString(),
+    expiresAt: new Date(created.getTime() + 8 * 60 * 60 * 1000).toISOString(),
+  });
+  return `sid=${token}`;
+}
+
 /**
  * Inserts a user and a session row directly and returns the cookie header, so only login tests
  * pay for hashing (05 section 4.2). The session starts at the test clock's default instant.
@@ -65,16 +83,8 @@ export const aUser = (role: Role) => new UserBuilder(role);
 export async function loggedInAs(
   db: DbOrTx,
   role: Role,
-  { createdAt = '2026-10-09T09:00:00.000Z' }: { createdAt?: string } = {},
+  options: { createdAt?: string } = {},
 ): Promise<{ cookie: string; user: InsertedUser }> {
   const user = await aUser(role).insert(db);
-  const token = `test-token-${user.id}`;
-  const created = new Date(createdAt);
-  await db.insert(sessions).values({
-    tokenHash: createHash('sha256').update(token).digest('hex'),
-    userId: user.id,
-    createdAt: created.toISOString(),
-    expiresAt: new Date(created.getTime() + 8 * 60 * 60 * 1000).toISOString(),
-  });
-  return { cookie: `sid=${token}`, user };
+  return { cookie: await aSessionFor(db, user.id, options), user };
 }

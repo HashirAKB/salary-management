@@ -8,4 +8,4 @@ export {
   type HistoryEntry,
 } from './employee.ts';
 export { aReferenceSet } from './reference-set.ts';
-export { aUser, loggedInAs, type InsertedUser } from './user.ts';
+export { aSessionFor, aUser, loggedInAs, type InsertedUser } from './user.ts';

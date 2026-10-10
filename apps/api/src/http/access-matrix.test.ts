@@ -1,7 +1,7 @@
 import type { Role } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { loggedInAs } from '../../test/builders/index.ts';
+import { aSessionFor, aUser } from '../../test/builders/index.ts';
 import { testApp, testDb } from '../../test/helpers.ts';
 import { can } from '../domain/permissions.ts';
 import type { RouteAccess } from './guard.ts';
@@ -42,13 +42,15 @@ describe('access matrix (D-054)', () => {
     app = undefined;
   });
 
+  // Each call gets its own session, so a route that ends one (logout) can't affect the next call.
   async function appWithRoles() {
     const db = await testDb();
-    const cookies = {} as Record<Role, string>;
-    for (const role of ROLES) cookies[role] = (await loggedInAs(db, role)).cookie;
+    const userIds = {} as Record<Role, number>;
+    for (const role of ROLES) userIds[role] = (await aUser(role).insert(db)).id;
     app = testApp({ db });
     await app.ready();
-    return { app, cookies };
+    const sessionAs = (role: Role) => aSessionFor(db, userIds[role]);
+    return { app, sessionAs };
   }
 
   it('every route, called logged out, returns 401 except the public ones', async () => {
@@ -65,11 +67,11 @@ describe('access matrix (D-054)', () => {
   });
 
   it('every route, called as each role, returns 403 exactly when 04 section 4.5 says the role lacks the action', async () => {
-    const { app, cookies } = await appWithRoles();
+    const { app, sessionAs } = await appWithRoles();
 
     for (const entry of routeCatalog(app)) {
       for (const role of ROLES) {
-        const response = await call(app, entry, cookies[role]);
+        const response = await call(app, entry, await sessionAs(role));
         expect({ route: key(entry), role, status: response.statusCode }).toEqual({
           route: key(entry),
           role,
@@ -83,13 +85,13 @@ describe('access matrix (D-054)', () => {
 
   // No write route Finance may not use exists until S5; the guard test covers the rule meanwhile.
   it('Finance gets 403, not 400, on every write route it may not use', async () => {
-    const { app, cookies } = await appWithRoles();
+    const { app, sessionAs } = await appWithRoles();
     const writes = routeCatalog(app).filter(
       (entry) => WRITE_METHODS.has(entry.method) && deniedTo('finance', entry.access),
     );
 
     for (const entry of writes) {
-      const response = await call(app, entry, cookies.finance, { unknownField: '' });
+      const response = await call(app, entry, await sessionAs('finance'), { unknownField: '' });
       expect({ route: key(entry), status: response.statusCode }).toEqual({
         route: key(entry),
         status: 403,
