@@ -1,5 +1,5 @@
 import type { EmployeeListItem } from '@acme/shared';
-import { employeeListResponseSchema } from '@acme/shared';
+import { employeeListResponseSchema, serializeEmployeeListQuery } from '@acme/shared';
 import {
   Alert,
   Badge,
@@ -14,15 +14,17 @@ import {
   Text,
   Title,
   Tooltip,
+  UnstyledButton,
 } from '@mantine/core';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { Link } from 'react-router';
-import { apiFetch } from '../../api/client.ts';
+import { ApiError, apiDownload, apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
+import { EmployeeFilterBar } from './EmployeeFilterBar.tsx';
 import { useEmployeeFilters } from './useEmployeeFilters.ts';
 
 const BAND_LABELS = { below: 'Below', inside: 'Inside', above: 'Above' } as const;
@@ -37,6 +39,7 @@ const COLUMNS = [
   'Band',
   'Hire date',
 ];
+const SORTABLE = { Name: 'name', Salary: 'salaryUsd', 'Hire date': 'hireDate' } as const;
 const SKELETON_ROWS = 10;
 const PAGE_SIZES = ['25', '50', '100'];
 const count = new Intl.NumberFormat('en-US');
@@ -76,14 +79,32 @@ function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement
 
 /** S-2 Employees list (04 section 8.5). */
 export function EmployeeListPage(): ReactElement {
-  const { page, pageSize, setPage, setPageSize } = useEmployeeFilters();
-  const query = { page, pageSize };
+  const filters = useEmployeeFilters();
+  const { query, page, pageSize, setPage, setPageSize, setFilters, clearFilters } = filters;
+  const sort = query.sort ?? 'name';
+  const order = query.order ?? 'asc';
+  const sortBy = (column: (typeof SORTABLE)[keyof typeof SORTABLE]) =>
+    setFilters(
+      column === sort
+        ? { order: order === 'asc' ? 'desc' : undefined }
+        : { sort: column === 'name' ? undefined : column, order: undefined },
+    );
+  const filtered =
+    query.status !== 'active' ||
+    [query.q, query.band, query.salaryUnchangedSince].some(Boolean) ||
+    [query.country, query.department, query.jobTitle, query.level, query.gender].some(
+      (values) => values && values.length > 0,
+    );
+  // page and pageSize are always sent; the serializer leaves out every default.
+  const filterQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
   const employees = useQuery({
     queryKey: ['employees', query],
     queryFn: () =>
-      apiFetch(`/api/employees?page=${query.page}&pageSize=${query.pageSize}`, {
-        schema: employeeListResponseSchema,
-      }),
+      apiFetch(
+        `/api/employees?page=${page}&pageSize=${pageSize}${filterQuery && `&${filterQuery}`}`,
+        { schema: employeeListResponseSchema },
+      ),
+    enabled: filters.ready,
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   });
@@ -93,7 +114,33 @@ export function EmployeeListPage(): ReactElement {
   const pastTheEnd =
     data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
   const showTable = !empty && (data !== undefined || !employees.isError);
-  const canAdd = useViewer().permissions.includes('employee.write');
+  const permissions = useViewer().permissions;
+  const canAdd = permissions.includes('employee.write');
+  const canExport = permissions.includes('export.employees');
+  const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string>();
+  const exportCsv = async () => {
+    setExporting(true);
+    setExportError(undefined);
+    try {
+      const exportQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
+      const { blob, filename } = await apiDownload(
+        `/api/exports/employees.csv${exportQuery && `?${exportQuery}`}`,
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } catch (error) {
+      // A 401 is handled for every call by the session listener.
+      if (!(error instanceof ApiError && error.code === 'UNAUTHENTICATED'))
+        setExportError(error instanceof Error ? error.message : 'The export failed.');
+    } finally {
+      setExporting(false);
+    }
+  };
   const addButton = (
     <Button component={Link} to="/employees/new">
       Add employee
@@ -104,8 +151,36 @@ export function EmployeeListPage(): ReactElement {
     <Stack>
       <Group justify="space-between">
         <Title order={1}>Employees</Title>
-        {canAdd && !empty && addButton}
+        <Group>
+          {canExport && (
+            <Button
+              variant="default"
+              loading={exporting}
+              disabled={exporting}
+              onClick={() => void exportCsv()}
+            >
+              Export CSV
+            </Button>
+          )}
+          {canAdd && !empty && addButton}
+        </Group>
       </Group>
+      {filters.droppedValues && (
+        <Alert color="yellow" withCloseButton onClose={filters.dismissDropped}>
+          Some filters in this link weren't recognised and were removed.
+        </Alert>
+      )}
+      <EmployeeFilterBar filters={filters} />
+      {exportError && (
+        <Alert color="red">
+          <Group justify="space-between">
+            <Text>{exportError}</Text>
+            <Button variant="light" onClick={() => void exportCsv()}>
+              Retry
+            </Button>
+          </Group>
+        </Alert>
+      )}
       {employees.isError && (
         <Alert color="red">
           <Group justify="space-between">
@@ -116,7 +191,15 @@ export function EmployeeListPage(): ReactElement {
           </Group>
         </Alert>
       )}
-      {empty && (
+      {empty && filtered && (
+        <Stack align="flex-start">
+          <Text>No employees match these filters.</Text>
+          <Button variant="light" onClick={clearFilters}>
+            Clear filters
+          </Button>
+        </Stack>
+      )}
+      {empty && !filtered && (
         <Stack align="flex-start">
           <Text>No employees yet.</Text>
           {canAdd && addButton}
@@ -148,9 +231,25 @@ export function EmployeeListPage(): ReactElement {
         >
           <Table.Thead>
             <Table.Tr>
-              {COLUMNS.map((column) => (
-                <Table.Th key={column}>{column}</Table.Th>
-              ))}
+              {COLUMNS.map((column) => {
+                const key = SORTABLE[column as keyof typeof SORTABLE] as string | undefined;
+                if (!key) return <Table.Th key={column}>{column}</Table.Th>;
+                const active = key === sort;
+                return (
+                  <Table.Th
+                    key={column}
+                    aria-sort={active ? (order === 'asc' ? 'ascending' : 'descending') : undefined}
+                  >
+                    <UnstyledButton
+                      fw="inherit"
+                      onClick={() => sortBy(key as (typeof SORTABLE)[keyof typeof SORTABLE])}
+                    >
+                      {column}
+                      {active && <span aria-hidden>{order === 'asc' ? ' ▲' : ' ▼'}</span>}
+                    </UnstyledButton>
+                  </Table.Th>
+                );
+              })}
             </Table.Tr>
           </Table.Thead>
           <Table.Tbody>
@@ -177,7 +276,7 @@ export function EmployeeListPage(): ReactElement {
             allowDeselect={false}
             data={PAGE_SIZES}
             value={String(pageSize)}
-            onChange={(value) => value && setPageSize(Number(value))}
+            onChange={(value) => value && setPageSize(Number(value) as 25 | 50 | 100)}
           />
           <FxAsOf date={data.fxAsOf} />
         </Group>

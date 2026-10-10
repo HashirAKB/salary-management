@@ -3,17 +3,11 @@ import { asc } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../../db/client.ts';
 import { countries, departments, fxRates, jobTitles, levels } from '../../db/schema.ts';
+import { GENDERS } from '../../domain/genders.ts';
 import { requires } from '../../http/guard.ts';
 import { fxAsOf } from '../auth/sessions.ts';
 
 // Static in v1 (04 section 5.3). `hire` is written by the system, so it is not a UI reason.
-const GENDERS = [
-  { code: 'female', name: 'Female' },
-  { code: 'male', name: 'Male' },
-  { code: 'non_binary', name: 'Non-binary' },
-  { code: 'not_disclosed', name: 'Not disclosed' },
-];
-
 const SALARY_CHANGE_REASONS = [
   { code: 'promotion', name: 'Promotion' },
   { code: 'merit', name: 'Merit increase' },

@@ -42,11 +42,7 @@ export function onUnauthenticated(listener: () => void): () => void {
   return () => unauthenticatedListeners.delete(listener);
 }
 
-/** Calls the same-origin API (ADR 0002). Throws ApiError for a problem response. */
-export async function apiFetch<T = void>(
-  path: string,
-  { method = 'GET', body, schema }: ApiRequest<T> = {},
-): Promise<T> {
+async function send(path: string, method: string, body?: unknown): Promise<Response> {
   const response = await fetch(path, {
     method,
     headers: body === undefined ? {} : { 'content-type': 'application/json' },
@@ -58,5 +54,24 @@ export async function apiFetch<T = void>(
       unauthenticatedListeners.forEach((listener) => listener());
     throw error;
   }
+  return response;
+}
+
+/** Calls the same-origin API (ADR 0002). Throws ApiError for a problem response. */
+export async function apiFetch<T = void>(
+  path: string,
+  { method = 'GET', body, schema }: ApiRequest<T> = {},
+): Promise<T> {
+  const response = await send(path, method, body);
   return (schema ? schema.parse(await response.json()) : undefined) as T;
+}
+
+/** Fetches a file; the name comes from Content-Disposition. Throws ApiError for a problem response. */
+export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string }> {
+  const response = await send(path, 'GET');
+  const disposition = response.headers.get('content-disposition') ?? '';
+  return {
+    blob: await response.blob(),
+    filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'download',
+  };
 }

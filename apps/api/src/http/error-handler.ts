@@ -37,6 +37,7 @@ export function registerErrorHandling(
         code: error.code,
         detail: error.message,
         instance: pathOf(request),
+        ...(error.errors && { errors: error.errors }),
       });
     }
     if (hasZodFastifySchemaValidationErrors(error)) {

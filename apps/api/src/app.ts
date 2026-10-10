@@ -41,6 +41,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   healthRoutes(app, { db: deps.db });
   authRoutes(app, deps);
   referenceRoutes(app, { db: deps.db });
-  employeeRoutes(app, { db: deps.db });
+  employeeRoutes(app, { db: deps.db, clock: deps.clock });
   return app;
 }

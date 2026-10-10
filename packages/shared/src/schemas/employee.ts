@@ -1,7 +1,24 @@
 import { z } from 'zod';
 import { isoDateSchema } from './common.ts';
 
-// 04 section 5.4 E1 query, S3 subset. Strict: S4 adds the filters, sort and `q`.
+// 04 section 4.6: a list is one comma-separated param; trim, drop empties, de-duplicate.
+// Shape only: whether a country or level exists is checked against the reference tables.
+const commaList = z.preprocess(
+  (value) =>
+    typeof value === 'string'
+      ? [
+          ...new Set(
+            value
+              .split(',')
+              .map((item) => item.trim())
+              .filter((item) => item !== ''),
+          ),
+        ]
+      : value,
+  z.array(z.string()),
+);
+
+// 04 section 5.4 E1 query.
 export const employeeListQuerySchema = z.strictObject({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce
@@ -9,9 +26,49 @@ export const employeeListQuerySchema = z.strictObject({
     .pipe(z.union([z.literal(25), z.literal(50), z.literal(100)]))
     .default(50),
   status: z.enum(['active', 'terminated', 'all']).default('active'),
+  q: z.string().trim().min(1).max(100).optional(),
+  country: commaList.optional(),
+  department: commaList.optional(),
+  jobTitle: commaList.optional(),
+  level: commaList.optional(),
+  gender: commaList.optional(),
+  band: z.enum(['below', 'above', 'outside', 'inside']).optional(),
+  salaryUnchangedSince: isoDateSchema.optional(),
+  sort: z.enum(['name', 'salaryUsd', 'hireDate']).optional(),
+  order: z.enum(['asc', 'desc']).optional(),
 });
 
 export type EmployeeListQuery = z.infer<typeof employeeListQuerySchema>;
+
+// 04 section 5.7 X1 takes the list filters and sort, but no paging.
+export const employeeExportQuerySchema = employeeListQuerySchema.omit({
+  page: true,
+  pageSize: true,
+});
+
+export type EmployeeExportQuery = z.infer<typeof employeeExportQuerySchema>;
+
+const LIST_KEYS = ['country', 'department', 'jobTitle', 'level', 'gender'] as const;
+const SCALAR_KEYS = ['q', 'band', 'salaryUnchangedSince', 'sort', 'order'] as const;
+
+/** Query string (no leading `?`) for a parsed query; defaults and empty lists are left out. */
+export function serializeEmployeeListQuery(query: EmployeeListQuery): string {
+  const parts: string[] = [];
+  if (query.page !== 1) parts.push(`page=${query.page}`);
+  if (query.pageSize !== 50) parts.push(`pageSize=${query.pageSize}`);
+  if (query.status !== 'active') parts.push(`status=${query.status}`);
+  for (const key of SCALAR_KEYS) {
+    const value = query[key];
+    if (value !== undefined) parts.push(`${key}=${encodeURIComponent(value)}`);
+  }
+  for (const key of LIST_KEYS) {
+    const values = query[key];
+    if (values !== undefined && values.length > 0) {
+      parts.push(`${key}=${values.map(encodeURIComponent).join(',')}`);
+    }
+  }
+  return parts.join('&');
+}
 
 const codeName = z.object({ code: z.string(), name: z.string() });
 const idName = z.object({ id: z.number().int(), name: z.string() });
