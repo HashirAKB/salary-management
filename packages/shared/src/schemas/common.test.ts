@@ -25,6 +25,13 @@ describe('PersonName', () => {
     },
   );
 
+  it.each(['  =cmd', ' +1', '\t -1', '\r@sum'])(
+    'rejects %j, which starts with a formula character once trimmed',
+    (name) => {
+      expect(personNameSchema.safeParse(name).success).toBe(false);
+    },
+  );
+
   it('accepts a formula character that is not leading', () => {
     expect(personNameSchema.safeParse("Anne-Marie O'Neil").success).toBe(true);
   });
