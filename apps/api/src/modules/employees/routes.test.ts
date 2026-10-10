@@ -672,3 +672,125 @@ describe('POST /api/employees (E3)', () => {
     });
   });
 });
+
+describe('PATCH /api/employees/:id (E4)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
+    const db = await testDb();
+    await seed(db);
+    const { cookie } = await loggedInAs(db, 'hr_admin');
+    app = testApp({ db });
+    return {
+      db,
+      patch: (body: object, id: number | string = 1) =>
+        app!.inject({
+          method: 'PATCH',
+          url: `/api/employees/${id}`,
+          headers: { cookie },
+          payload: body,
+        }),
+      search: async (q: string) =>
+        (
+          await app!.inject({
+            method: 'GET',
+            url: `/api/employees?q=${encodeURIComponent(q)}`,
+            headers: { cookie },
+          })
+        ).json().items as { id: number }[],
+    };
+  }
+
+  it('editing the last name updates name_search, so a search finds the new name', async () => {
+    const { patch, search } = await setup(async (db) => {
+      await anEmployee().named('Asha', 'Rao').insert(db);
+    });
+
+    const response = await patch({ lastName: 'Müller' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: 1,
+      firstName: 'Asha',
+      lastName: 'Müller',
+      updatedAt: '2026-10-09T09:00:00.000Z',
+    });
+    expect((await search('muller')).map((item) => item.id)).toEqual([1]);
+    expect(await search('rao')).toEqual([]);
+  });
+
+  it('changes gender without touching the names', async () => {
+    const { patch } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    const response = await patch({ gender: 'not_disclosed' });
+
+    expect(response.json()).toMatchObject({
+      firstName: 'Asha',
+      lastName: 'Rao',
+      gender: 'not_disclosed',
+    });
+  });
+
+  it.each(['jobTitleId', 'levelCode', 'countryCode'])(
+    'rejects a PATCH containing %s with 400 naming the key',
+    async (key) => {
+      const { patch, db } = await setup(async (db) => {
+        await anEmployee().insert(db);
+      });
+
+      const response = await patch({ lastName: 'Changed', [key]: 'L4' });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe('VALIDATION_FAILED');
+      expect(JSON.stringify(response.json().errors)).toContain(key);
+      expect(
+        (await db.$client.execute('SELECT last_name FROM employees WHERE id = 1')).rows[0]
+          ?.last_name,
+      ).toBe('Rao');
+    },
+  );
+
+  it('rejects an empty body and a formula-leading name with 400', async () => {
+    const { patch } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    const empty = await patch({});
+    const formula = await patch({ firstName: '=cmd' });
+
+    expect(empty.statusCode).toBe(400);
+    expect(formula.statusCode).toBe(400);
+    expect(formula.json().errors[0].path).toBe('firstName');
+  });
+
+  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown id', async () => {
+    const { patch } = await setup();
+
+    const response = await patch({ lastName: 'Rao' }, 999);
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().code).toBe('EMPLOYEE_NOT_FOUND');
+  });
+
+  it("edits a terminated employee's details", async () => {
+    const { patch } = await setup(async (db) => {
+      await anEmployee().terminatedOn('2025-01-31').insert(db);
+    });
+
+    const response = await patch({ firstName: 'Ashaa' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      firstName: 'Ashaa',
+      status: 'terminated',
+      terminationDate: '2025-01-31',
+    });
+  });
+});

@@ -3,17 +3,25 @@ import {
   createEmployeeBodySchema,
   employeeIdParamsSchema,
   employeeListQuerySchema,
+  updateEmployeeBodySchema,
   type CreateEmployeeBody,
   type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListQuery,
   type EmployeeListResponse,
+  type UpdateEmployeeBody,
 } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../../db/client.ts';
 import type { Clock } from '../../domain/clock.ts';
 import { requires } from '../../http/guard.ts';
-import { createEmployee, exportEmployees, getEmployee, listEmployees } from './service.ts';
+import {
+  createEmployee,
+  exportEmployees,
+  getEmployee,
+  listEmployees,
+  updateEmployee,
+} from './service.ts';
 
 // E1 (04 section 5.4).
 export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Clock }) {
@@ -44,6 +52,22 @@ export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Cloc
       });
       return reply.code(201).header('Location', `/api/employees/${created.id}`).send(created);
     },
+  );
+
+  // E4 (04 section 5.4).
+  app.patch(
+    '/api/employees/:id',
+    {
+      onRequest: requires('employee.write'),
+      schema: { params: employeeIdParamsSchema, body: updateEmployeeBodySchema },
+    },
+    async (request): Promise<EmployeeDetail> =>
+      updateEmployee(
+        deps.db,
+        (request.params as { id: number }).id,
+        request.body as UpdateEmployeeBody,
+        deps.clock.now().toISOString(),
+      ),
   );
 
   // X1 (04 section 5.7).

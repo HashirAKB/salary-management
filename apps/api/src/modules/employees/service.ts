@@ -6,6 +6,7 @@ import {
   type EmployeeListItem,
   type EmployeeListQuery,
   type EmployeeListResponse,
+  type UpdateEmployeeBody,
 } from '@acme/shared';
 import {
   and,
@@ -374,4 +375,14 @@ export async function createEmployee(
     return id;
   });
   return getEmployee(db, id);
+}
+
+// E4 (04 section 5.4): names and gender only; allowed on terminated employees.
+export async function updateEmployee(
+  _db: Db,
+  _id: number,
+  _body: UpdateEmployeeBody,
+  _now: string,
+): Promise<EmployeeDetail> {
+  throw new Error('not implemented');
 }
