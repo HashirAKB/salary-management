@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { buildApp } from './app.ts';
 import { ConfigError, loadConfig, type Config } from './config.ts';
 import { createDb } from './db/client.ts';
+import { migrate } from './db/migrate.ts';
 import { systemClock } from './domain/clock.ts';
 
 function readConfig(): Config {
@@ -18,6 +19,7 @@ function readConfig(): Config {
 
 const config = readConfig();
 const db = createDb(config.databaseUrl, config.databaseAuthToken);
+await migrate(db);
 // apps/api/{src,dist}/main → apps/web/dist; served only in production (03 section 8).
 const staticRoot =
   config.nodeEnv === 'production'
