@@ -18,4 +18,5 @@ jobs:
       - run: npm run typecheck
       - run: npm run test:coverage
       - run: npm run build
+      - run: scripts/smoke-start.sh
   # e2e job added in S9: needs verify, installs Chromium, runs npm run e2e
