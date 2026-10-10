@@ -205,3 +205,38 @@ describe('generateDataset: salary history (02 section 7.7)', () => {
     );
   });
 });
+
+describe('generateDataset: terminated employees (02 section 7.8)', () => {
+  const terminated = () => dataset().employees.filter((e) => e.status === 'terminated');
+
+  it('creates exactly 250 terminated employees, spread across countries in proportion to headcount', () => {
+    const byCountry = countBy(terminated(), (e) => e.countryCode);
+    const headcount: Record<string, number> = { CA: 800, DE: 1200, GB: 1500, IN: 4000, US: 2500 };
+
+    expect(terminated()).toHaveLength(250);
+    for (const [country, active] of Object.entries(headcount)) {
+      expect(Math.abs((byCountry[country] ?? 0) - (250 * active) / 10_000), country).toBeLessThan(
+        1,
+      );
+    }
+  });
+
+  it('terminates between 2024-01-01 and 2026-09-15, at least 6 months after hire, with codes E010001 to E010250', () => {
+    const rows = terminated();
+    const codes = rows.map((e) => e.employeeCode).sort();
+    const sixMonthsAfter = (date: string) => {
+      const d = new Date(`${date}T00:00:00.000Z`);
+      d.setUTCMonth(d.getUTCMonth() + 6);
+      return d.toISOString().slice(0, 10);
+    };
+
+    for (const e of rows) {
+      expect(e.terminationDate! >= '2024-01-01', e.employeeCode).toBe(true);
+      expect(e.terminationDate! <= '2026-09-15', e.employeeCode).toBe(true);
+      expect(sixMonthsAfter(e.hireDate) <= e.terminationDate!, e.employeeCode).toBe(true);
+    }
+    expect(codes).toEqual(
+      Array.from({ length: 250 }, (_, i) => `E${String(10_001 + i).padStart(6, '0')}`),
+    );
+  });
+});
