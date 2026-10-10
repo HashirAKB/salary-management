@@ -1,4 +1,4 @@
-import type { ErrorCode, Problem } from '@acme/shared';
+import { problemSchema, type ErrorCode, type Problem } from '@acme/shared';
 
 /** A problem response (04 section 4.4) as the screens see it. */
 export class ApiError extends Error {
@@ -26,6 +26,21 @@ export type ApiRequest<T> = {
 };
 
 /** Calls the same-origin API (ADR 0002). Throws ApiError for a problem response. */
-export async function apiFetch<T = void>(_path: string, _request: ApiRequest<T> = {}): Promise<T> {
-  throw new Error('not implemented');
+export async function apiFetch<T = void>(
+  path: string,
+  { method = 'GET', body, schema }: ApiRequest<T> = {},
+): Promise<T> {
+  const response = await fetch(path, {
+    method,
+    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) {
+    const retryAfter = response.headers.get('retry-after');
+    throw new ApiError(
+      problemSchema.parse(await response.json()),
+      retryAfter ? Number(retryAfter) : undefined,
+    );
+  }
+  return (schema ? schema.parse(await response.json()) : undefined) as T;
 }
