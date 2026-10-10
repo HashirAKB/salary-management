@@ -240,10 +240,19 @@ describe('generateDataset: terminated employees (02 section 7.8)', () => {
       Array.from({ length: 250 }, (_, i) => `E${String(10_001 + i).padStart(6, '0')}`),
     );
   });
+
+  it('spreads termination dates over the whole window, with some in 2026', () => {
+    const byYear = countBy(terminated(), (e) => e.terminationDate!.slice(0, 4));
+
+    // 989 days: 366 in 2024, 365 in 2025 and 258 in 2026, so about 65 of 250 land in 2026.
+    expect(byYear['2026'] ?? 0).toBeGreaterThanOrEqual(40);
+    expect(byYear['2024'] ?? 0).toBeGreaterThanOrEqual(70);
+    expect(byYear['2025'] ?? 0).toBeGreaterThanOrEqual(70);
+  });
 });
 
-// Recorded from the generator at 327bd9b; CI must reproduce it (06 S1 acceptance).
-const RECORDED_HASH = 'd865363a8a3ee8aae37fd10fadf0112e2241c039ac0b456c2e3e1477ccb220bb';
+// Recorded with the full 02 section 7.8 termination window; CI must reproduce it (06 S1 acceptance).
+const RECORDED_HASH = '53bae56dcc677310a6e210a9c5aba8b327a9d0472c59b045f1053c6211842d53';
 
 const TABLES = [
   'fxRates',
