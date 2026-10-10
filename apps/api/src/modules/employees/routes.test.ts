@@ -1,7 +1,7 @@
 import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
+import { aReferenceSet, anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
 import { testApp, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
 import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
@@ -509,8 +509,11 @@ describe('POST /api/employees (E3)', () => {
     startingSalary: { amountMinor: bandMid, currency: 'INR' },
   };
 
-  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
-    const db = await testDb();
+  async function setup(
+    seed: (db: Db) => Promise<void> = async () => {},
+    reference = aReferenceSet(),
+  ) {
+    const db = await testDb(reference);
     await seed(db);
     const { cookie, user } = await loggedInAs(db, 'hr_admin');
     app = testApp({ db });
@@ -587,5 +590,85 @@ describe('POST /api/employees (E3)', () => {
         name_search: 'meera iyer',
       },
     ]);
+  });
+
+  describe('rules', () => {
+    const problemOf = (response: { statusCode: number; json: () => unknown }) => ({
+      status: response.statusCode,
+      code: (response.json() as { code: string }).code,
+    });
+    const employeeCount = async (db: Db) =>
+      (await rows(db, 'SELECT count(*) AS n FROM employees'))[0]?.n;
+
+    it('rejects a hire date after today with 422 DATE_IN_FUTURE', async () => {
+      const { db, post } = await setup();
+
+      const response = await post({ ...validBody, hireDate: '2026-10-10' });
+
+      expect(problemOf(response)).toEqual({ status: 422, code: 'DATE_IN_FUTURE' });
+      expect(await employeeCount(db)).toBe(0);
+    });
+
+    it('accepts a hire date of today', async () => {
+      const { post } = await setup();
+
+      const response = await post({ ...validBody, hireDate: '2026-10-09' });
+
+      expect(response.statusCode).toBe(201);
+    });
+
+    it('rejects a salary in the wrong currency with 422 SALARY_CURRENCY_MISMATCH', async () => {
+      const { db, post } = await setup();
+
+      const response = await post({
+        ...validBody,
+        startingSalary: { amountMinor: bandMid, currency: 'USD' },
+      });
+
+      expect(problemOf(response)).toEqual({ status: 422, code: 'SALARY_CURRENCY_MISMATCH' });
+      expect(await employeeCount(db)).toBe(0);
+    });
+
+    it('rejects a position with no band with 422 NO_PAY_BAND', async () => {
+      const { db, post } = await setup(
+        async () => {},
+        aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L3'),
+      );
+
+      const response = await post();
+
+      expect(problemOf(response)).toEqual({ status: 422, code: 'NO_PAY_BAND' });
+      expect(await employeeCount(db)).toBe(0);
+    });
+
+    it('checks the create rules in order: future date, then currency, then band', async () => {
+      const { post } = await setup(
+        async () => {},
+        aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L3'),
+      );
+      const wrongCurrency = { amountMinor: bandMid, currency: 'USD' };
+
+      const allThree = await post({
+        ...validBody,
+        hireDate: '2026-10-10',
+        startingSalary: wrongCurrency,
+      });
+      const currencyAndBand = await post({ ...validBody, startingSalary: wrongCurrency });
+
+      expect(problemOf(allThree).code).toBe('DATE_IN_FUTURE');
+      expect(problemOf(currencyAndBand).code).toBe('SALARY_CURRENCY_MISMATCH');
+    });
+
+    it('allows a starting salary outside the band', async () => {
+      const { post } = await setup();
+
+      const response = await post({
+        ...validBody,
+        startingSalary: { amountMinor: 1, currency: 'INR' },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({ bandPosition: 'below' });
+    });
   });
 });
