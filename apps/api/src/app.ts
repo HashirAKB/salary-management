@@ -4,6 +4,7 @@ import type { Config } from './config.ts';
 import type { Db } from './db/client.ts';
 import type { Clock } from './domain/clock.ts';
 import { registerErrorHandling } from './http/error-handler.ts';
+import { loggerOptions } from './http/logger.ts';
 import { registerRouteCatalog } from './http/route-catalog.ts';
 import { registerStatic } from './http/static.ts';
 import { registerAuth } from './modules/auth/plugin.ts';
@@ -22,7 +23,10 @@ export type AppDeps = {
 
 // The composition root used by main.ts and every test (03 section 6, rule 1).
 export function buildApp(deps: AppDeps): FastifyInstance {
-  const app = Fastify({ logger: { level: deps.config.logLevel }, trustProxy: true });
+  const app = Fastify({
+    logger: loggerOptions(deps.config, deps.logStream),
+    trustProxy: true,
+  });
   // Step 5 of the request pipeline (04 section 4.3): zod validation of params, query and body.
   app.setValidatorCompiler(validatorCompiler);
   registerRouteCatalog(app);

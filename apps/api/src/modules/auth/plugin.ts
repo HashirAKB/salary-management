@@ -24,4 +24,9 @@ export function registerAuth(app: FastifyInstance, { db, clock }: { db: Db; cloc
       ? { id: user.id, email: user.email, displayName: user.displayName, role: user.role }
       : null;
   });
+
+  // Salary data must not sit in shared or disk caches (04 section 4.1).
+  app.addHook('onSend', async (request, reply) => {
+    if (request.viewer) reply.header('cache-control', 'no-store');
+  });
 }
