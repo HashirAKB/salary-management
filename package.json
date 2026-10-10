@@ -17,6 +17,7 @@
     "test": "TZ=UTC vitest run",
     "test:coverage": "TZ=UTC vitest run --coverage",
     "lint": "eslint .",
+    "seed": "node --conditions=source --env-file-if-exists=.env apps/api/src/seed/cli.ts",
     "prepare": "husky"
   },
   "lint-staged": {
