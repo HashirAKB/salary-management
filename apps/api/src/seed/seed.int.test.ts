@@ -8,6 +8,9 @@ import { generateReferenceData } from './reference.ts';
 import { writeDataset, type SeedUser } from './write.ts';
 
 // The one file that writes the full seed (05 section 4.1). Read-only checks share one write.
+// A full write takes 1 to 4 s locally under coverage, so these tests get more than Vitest's
+// default 5 s on slower CI runners. The limit is a time budget, not part of any assertion.
+const FULL_SEED_TIMEOUT_MS = 30_000;
 
 const users = (hashSuffix: string): SeedUser[] => [
   {
@@ -72,7 +75,7 @@ const snapshot = async (db: Db) => {
 const count = async (db: Db, table: string) =>
   Number((await db.$client.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0]?.n);
 
-describe('writeDataset (seed.int)', () => {
+describe('writeDataset (seed.int)', { timeout: FULL_SEED_TIMEOUT_MS }, () => {
   it("after writeDataset, every employee's current-salary columns equal their latest history row, and foreign keys are on", async () => {
     const db = await seededDb();
 
@@ -135,7 +138,7 @@ describe('writeDataset (seed.int)', () => {
   });
 });
 
-describe('seed CLI (seed.int)', () => {
+describe('seed CLI (seed.int)', { timeout: FULL_SEED_TIMEOUT_MS }, () => {
   it('the seed CLI migrates, writes the dataset, stores scrypt hashes for the demo users and prints the report', async () => {
     const db = createDb(':memory:');
     const output: string[] = [];
