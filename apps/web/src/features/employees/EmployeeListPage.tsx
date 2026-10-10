@@ -18,7 +18,7 @@ import {
 } from '@mantine/core';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState, type ReactElement } from 'react';
-import { Link } from 'react-router';
+import { Link, useLocation } from 'react-router';
 import { ApiError, apiDownload, apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
@@ -115,6 +115,7 @@ export function EmployeeListPage(): ReactElement {
     data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
   const showTable = !empty && (data !== undefined || !employees.isError);
   const permissions = useViewer().permissions;
+  const { search } = useLocation();
   const canAdd = permissions.includes('employee.write');
   const canExport = permissions.includes('export.employees');
   const [exporting, setExporting] = useState(false);
@@ -142,7 +143,7 @@ export function EmployeeListPage(): ReactElement {
     }
   };
   const addButton = (
-    <Button component={Link} to="/employees/new">
+    <Button component={Link} to="/employees/new" state={{ from: search }}>
       Add employee
     </Button>
   );
