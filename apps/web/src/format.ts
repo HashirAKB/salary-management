@@ -31,9 +31,12 @@ const dateFormatter = new Intl.DateTimeFormat('en-GB', {
   timeZone: 'UTC',
 });
 
-/** `2026-10-09` to `9 Oct 2026`, in UTC whatever the machine's zone. */
+/**
+ * `2026-10-09` to `9 Oct 2026`, in UTC whatever the machine's zone. ICU's en-GB writes September
+ * as `Sept`; 04 section 8.4 shows `Sep`, so the month is normalised.
+ */
 export function formatDate(isoDate: string): string {
-  return dateFormatter.format(new Date(`${isoDate}T00:00:00Z`));
+  return dateFormatter.format(new Date(`${isoDate}T00:00:00Z`)).replace(' Sept ', ' Sep ');
 }
 
 /** Parses major units ("20480.50") to minor units by string parsing; null when invalid. */
