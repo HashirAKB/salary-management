@@ -13,6 +13,10 @@ export const employeeListQuerySchema = z.strictObject({
 
 export type EmployeeListQuery = z.infer<typeof employeeListQuerySchema>;
 
+export function serializeEmployeeListQuery(_query: EmployeeListQuery): string {
+  throw new Error('not implemented');
+}
+
 const codeName = z.object({ code: z.string(), name: z.string() });
 const idName = z.object({ id: z.number().int(), name: z.string() });
 

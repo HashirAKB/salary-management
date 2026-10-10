@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { employeeListQuerySchema } from './employee.ts';
+import { employeeListQuerySchema, serializeEmployeeListQuery } from './employee.ts';
 
 describe('employeeListQuerySchema', () => {
   it('applies defaults page 1, pageSize 50 and status active', () => {
@@ -39,5 +39,103 @@ describe('employeeListQuerySchema', () => {
 
   it('rejects an unknown status', () => {
     expect(employeeListQuerySchema.safeParse({ status: 'gone' }).success).toBe(false);
+  });
+
+  it('splits, trims and de-duplicates comma lists, dropping empty values', () => {
+    const result = employeeListQuerySchema.safeParse({
+      country: 'IN, US,,IN,',
+      department: ',',
+      jobTitle: '3,4',
+      level: 'L3',
+      gender: 'female,male',
+    });
+
+    expect(result.data).toEqual({
+      page: 1,
+      pageSize: 50,
+      status: 'active',
+      country: ['IN', 'US'],
+      department: [],
+      jobTitle: ['3', '4'],
+      level: ['L3'],
+      gender: ['female', 'male'],
+    });
+  });
+
+  it('trims q and accepts 1 to 100 characters', () => {
+    expect(employeeListQuerySchema.safeParse({ q: '  nair ' }).data?.q).toBe('nair');
+    expect(employeeListQuerySchema.safeParse({ q: 'a'.repeat(100) }).success).toBe(true);
+  });
+
+  it.each(['', '   ', 'a'.repeat(101)])('rejects q %j', (q) => {
+    expect(employeeListQuerySchema.safeParse({ q }).success).toBe(false);
+  });
+
+  it.each(['below', 'above', 'outside', 'inside'])('accepts band %s', (band) => {
+    expect(employeeListQuerySchema.safeParse({ band }).data).toMatchObject({ band });
+  });
+
+  it.each([
+    { band: 'under' },
+    { sort: 'salary' },
+    { order: 'up' },
+    { salaryUnchangedSince: '2026-13-01' },
+    { salaryUnchangedSince: 'yesterday' },
+  ])('rejects %j', (bad) => {
+    expect(employeeListQuerySchema.safeParse(bad).success).toBe(false);
+  });
+
+  it('accepts sort, order and a salaryUnchangedSince date', () => {
+    const result = employeeListQuerySchema.safeParse({
+      sort: 'salaryUsd',
+      order: 'desc',
+      salaryUnchangedSince: '2025-10-09',
+    });
+
+    expect(result.data).toMatchObject({
+      sort: 'salaryUsd',
+      order: 'desc',
+      salaryUnchangedSince: '2025-10-09',
+    });
+  });
+});
+
+describe('serializeEmployeeListQuery', () => {
+  const parse = (raw: Record<string, string>) => employeeListQuerySchema.safeParse(raw);
+
+  it('round-trips every filter through the URL serializer', () => {
+    const first = parse({
+      page: '3',
+      pageSize: '25',
+      status: 'all',
+      q: 'mü ller',
+      country: 'IN,US',
+      department: '2,5',
+      jobTitle: '7',
+      level: 'L3,L4',
+      gender: 'non_binary',
+      band: 'outside',
+      salaryUnchangedSince: '2025-10-09',
+      sort: 'hireDate',
+      order: 'desc',
+    });
+    expect(first.success).toBe(true);
+
+    const search = serializeEmployeeListQuery(first.data!);
+    const second = parse(Object.fromEntries(new URLSearchParams(search)));
+
+    expect(second.data).toEqual(first.data);
+  });
+
+  it('leaves defaults and empty lists out of the URL', () => {
+    const parsed = parse({ country: ',', status: 'active', page: '1', pageSize: '50' });
+
+    expect(serializeEmployeeListQuery(parsed.data!)).toBe('');
+  });
+
+  it('writes lists comma-separated without spaces', () => {
+    const parsed = parse({ country: 'IN,US', level: 'L3,L4' });
+
+    expect(serializeEmployeeListQuery(parsed.data!)).toBe('country=IN,US&level=L3,L4');
   });
 });
