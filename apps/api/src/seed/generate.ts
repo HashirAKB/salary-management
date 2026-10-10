@@ -13,6 +13,7 @@ import type { employees, Gender, LevelCode, salaryChanges } from '../db/schema.t
 import { nameSearch } from '../domain/name-search.ts';
 import { createRandom, largestRemainder, type Random } from './random.ts';
 import {
+  ACCOUNT_EXECUTIVE,
   COUNTRIES,
   generateReferenceData,
   JOB_TITLES,
@@ -20,6 +21,7 @@ import {
   type CountrySpec,
   type PayBandRow,
   type ReferenceData,
+  SOFTWARE_ENGINEER,
 } from './reference.ts';
 
 export const SEED = 20261011;
@@ -33,11 +35,34 @@ export type Dataset = ReferenceData & {
   salaryChanges: SalaryChangeRow[];
 };
 
-export type SeedConfig = {
-  terminatedCount: number;
+export type GapTarget = {
+  countryCode: string;
+  jobTitleId: number;
+  levelCode: LevelCode;
+  gapPct: number;
 };
 
-export const SEED_CONFIG: SeedConfig = { terminatedCount: 250 };
+export type SeedConfig = {
+  terminatedCount: number;
+  /** Realised gender gaps for named cohorts (02 section 7.6 step 2). */
+  gapTargets: readonly GapTarget[];
+  /** Every other eligible cohort draws its gap uniformly in [-x, +x]. */
+  otherGapRangePct: number;
+  /** Share of active employees outside the target cohorts moved below band, and again above. */
+  outlierShare: number;
+};
+
+export const SEED_CONFIG: SeedConfig = {
+  terminatedCount: 250,
+  gapTargets: [
+    { countryCode: 'IN', jobTitleId: SOFTWARE_ENGINEER, levelCode: 'L3', gapPct: 8.0 },
+    { countryCode: 'US', jobTitleId: ACCOUNT_EXECUTIVE, levelCode: 'L2', gapPct: 6.0 },
+    { countryCode: 'GB', jobTitleId: SOFTWARE_ENGINEER, levelCode: 'L4', gapPct: 5.3 },
+    { countryCode: 'DE', jobTitleId: SOFTWARE_ENGINEER, levelCode: 'L2', gapPct: 4.7 },
+  ],
+  otherGapRangePct: 2.0,
+  outlierShare: 0.03,
+};
 
 const LOCALES: Record<CountrySpec['locale'], LocaleDefinition> = { en_CA, de, en_GB, en_IN, en_US };
 
@@ -105,15 +130,6 @@ function allocateActive(seed: number, refDate: string, bands: Map<string, PayBan
   return people;
 }
 
-// 02 section 7.6 step 2: realised gaps for the four named cohorts; every other eligible cohort
-// draws its target uniformly in [-2.0, +2.0].
-const GAP_TARGETS: Record<string, number> = {
-  'IN/1/L3': 8.0,
-  'US/5/L2': 6.0,
-  'GB/1/L4': 5.3,
-  'DE/1/L2': 4.7,
-};
-
 const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
 
 /** Salary rounding step in minor units: 100 major units, 1,000 for INR (02 section 7.6 step 4). */
@@ -126,15 +142,18 @@ const roundSalary = (amountMinor: number, currencyCode: string) => {
 
 // 02 section 7.6: compa-ratio draws, outliers outside the target cohorts, then one factor on
 // women's pay per eligible cohort so the realised gap meets its target, then rounding.
-function shapeSalaries(people: Person[], random: Random): void {
+function shapeSalaries(people: Person[], random: Random, config: SeedConfig): void {
+  const targets = new Map(
+    config.gapTargets.map((t) => [bandKey(t.countryCode, t.jobTitleId, t.levelCode), t.gapPct]),
+  );
   const compa = people.map(() => Math.min(1.16, Math.max(0.84, random.normal(1, 0.06))));
 
   const outlierPool = random.shuffle(
     people.flatMap((p, i) =>
-      bandKey(p.countryCode, p.jobTitleId, p.levelCode) in GAP_TARGETS ? [] : [i],
+      targets.has(bandKey(p.countryCode, p.jobTitleId, p.levelCode)) ? [] : [i],
     ),
   );
-  const outliers = Math.round(outlierPool.length * 0.03);
+  const outliers = Math.round(outlierPool.length * config.outlierShare);
   outlierPool.slice(0, outliers).forEach((i) => (compa[i] = random.uniform(0.65, 0.76)));
   outlierPool.slice(outliers, 2 * outliers).forEach((i) => (compa[i] = random.uniform(1.25, 1.4)));
 
@@ -150,7 +169,8 @@ function shapeSalaries(people: Person[], random: Random): void {
   });
   for (const [key, { women, men }] of cohorts) {
     if (women.length < 5 || men.length < 5) continue;
-    const target = GAP_TARGETS[key] ?? random.uniform(-2, 2);
+    const target =
+      targets.get(key) ?? random.uniform(-config.otherGapRangePct, config.otherGapRangePct);
     const meanMen = mean(men.map((i) => raw[i] ?? 0));
     const meanWomen = mean(women.map((i) => raw[i] ?? 0));
     const factor = (meanMen * (1 - target / 100)) / meanWomen;
@@ -207,14 +227,14 @@ function toRows(people: Person[], random: Random, refDate: string) {
 }
 
 // generateDataset: pure, no DB, no clock, no env (02 section 7.1).
-export function generateDataset(_config: SeedConfig, seed: number, refDate: string): Dataset {
+export function generateDataset(config: SeedConfig, seed: number, refDate: string): Dataset {
   const reference = generateReferenceData();
   const bands = new Map(
     reference.payBands.map((b) => [bandKey(b.countryCode, b.jobTitleId, b.levelCode), b]),
   );
   const random = createRandom(seed);
   const people = allocateActive(seed, refDate, bands);
-  shapeSalaries(people, random);
+  shapeSalaries(people, random, config);
   const { employeeRows, changeRows } = toRows(people, random, refDate);
   return { ...reference, employees: employeeRows, salaryChanges: changeRows };
 }

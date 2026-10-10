@@ -110,6 +110,7 @@ export type JobTitleSpec = JobTitleRow & {
 };
 
 export const SOFTWARE_ENGINEER = 1;
+export const ACCOUNT_EXECUTIVE = 5;
 
 export const JOB_TITLES: readonly JobTitleSpec[] = [
   {
@@ -138,7 +139,7 @@ export const JOB_TITLES: readonly JobTitleSpec[] = [
     womenShare: 0.45,
   },
   {
-    id: 5,
+    id: ACCOUNT_EXECUTIVE,
     name: 'Account Executive',
     departmentId: 3,
     share: 0.15,
