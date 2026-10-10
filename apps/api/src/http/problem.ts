@@ -19,9 +19,11 @@ export type ProblemInput = Omit<Problem, 'type' | 'title'>;
 export class AppError extends Error {
   readonly status: number;
   readonly code: string;
+  readonly errors: ProblemFieldError[] | undefined;
 
-  constructor(status: number, code: string, detail: string) {
+  constructor(status: number, code: string, detail: string, errors?: ProblemFieldError[]) {
     super(detail);
+    this.errors = errors;
     this.name = 'AppError';
     this.status = status;
     this.code = code;

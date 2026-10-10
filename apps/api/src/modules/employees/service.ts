@@ -1,9 +1,12 @@
 import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
-import { and, asc, count, eq, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, inArray, sql, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { usdMinorSql } from '../../db/money-sql.ts';
 import {
+  type Gender,
+  type LevelCode,
   countries,
+  genders,
   departments,
   employees,
   fxRates,
@@ -12,7 +15,40 @@ import {
   payBands,
 } from '../../db/schema.ts';
 import { parseSearch } from '../../domain/employee-search.ts';
+import { AppError, type ProblemFieldError } from '../../http/problem.ts';
 import { fxAsOf } from '../auth/sessions.ts';
+
+// Values in the list filters must exist in the reference tables (brief ruling 1); the shared
+// schema only checks their shape. The path names the offending item, e.g. `country[1]`.
+async function checkListValues(db: Db, query: EmployeeListQuery): Promise<void> {
+  const [countryRows, levelRows, departmentRows, titleRows] = await Promise.all([
+    db.select({ key: countries.code }).from(countries),
+    db.select({ key: levels.code }).from(levels),
+    db.select({ key: departments.id }).from(departments),
+    db.select({ key: jobTitles.id }).from(jobTitles),
+  ]);
+  const known = (rows: { key: string | number }[]) => new Set(rows.map((r) => String(r.key)));
+  const checks = [
+    ['country', query.country, known(countryRows)],
+    ['department', query.department, known(departmentRows)],
+    ['jobTitle', query.jobTitle, known(titleRows)],
+    ['level', query.level, known(levelRows)],
+    ['gender', query.gender, new Set<string>(genders)],
+  ] as const;
+  const errors: ProblemFieldError[] = [];
+  for (const [name, values, allowed] of checks) {
+    values?.forEach((value, index) => {
+      if (!allowed.has(value)) {
+        errors.push({ path: `${name}[${index}]`, message: `Unknown ${name} "${value}".` });
+      }
+    });
+  }
+  if (errors.length > 0) {
+    const detail =
+      errors.length === 1 ? '1 field is invalid.' : `${errors.length} fields are invalid.`;
+    throw new AppError(400, 'VALIDATION_FAILED', detail, errors);
+  }
+}
 
 // E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
 export async function listEmployees(
@@ -20,6 +56,7 @@ export async function listEmployees(
   query: EmployeeListQuery,
 ): Promise<EmployeeListResponse> {
   const { page, pageSize, status, q } = query;
+  await checkListValues(db, query);
   const conditions: (SQL | undefined)[] = [
     status === 'all' ? undefined : eq(employees.status, status),
   ];
@@ -29,6 +66,26 @@ export async function listEmployees(
       search.kind === 'code'
         ? eq(employees.employeeCode, search.code)
         : sql`instr(${employees.nameSearch}, ${search.text}) > 0`,
+    );
+  }
+  if (query.country?.length) conditions.push(inArray(employees.countryCode, query.country));
+  if (query.level?.length)
+    conditions.push(inArray(employees.levelCode, query.level as LevelCode[]));
+  if (query.gender?.length) {
+    conditions.push(inArray(employees.gender, query.gender as Gender[]));
+  }
+  if (query.jobTitle?.length) {
+    conditions.push(inArray(employees.jobTitleId, query.jobTitle.map(Number)));
+  }
+  if (query.department?.length) {
+    conditions.push(
+      inArray(
+        employees.jobTitleId,
+        db
+          .select({ id: jobTitles.id })
+          .from(jobTitles)
+          .where(inArray(jobTitles.departmentId, query.department.map(Number))),
+      ),
     );
   }
   const where = and(...conditions);
