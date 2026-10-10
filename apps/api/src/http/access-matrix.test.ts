@@ -17,6 +17,7 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
   'GET /api/pay-bands/:countryCode/:jobTitleId/:levelCode': 'reference.read',
   'GET /api/employees': 'employee.read',
   'GET /api/employees/:id': 'employee.read',
+  'POST /api/employees': 'employee.write',
   'GET /api/exports/employees.csv': 'export.employees',
 };
 

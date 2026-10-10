@@ -486,3 +486,106 @@ describe('GET /api/employees/:id (E2)', () => {
     expect(zero.statusCode).toBe(400);
   });
 });
+
+describe('POST /api/employees (E3)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  const bandMid = generateBands().find(
+    (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+  )!.midMinor;
+  const validBody = {
+    firstName: 'Meera',
+    lastName: 'Iyer',
+    gender: 'female',
+    countryCode: 'IN',
+    jobTitleId: SOFTWARE_ENGINEER,
+    levelCode: 'L3',
+    hireDate: '2026-10-01',
+    startingSalary: { amountMinor: bandMid, currency: 'INR' },
+  };
+
+  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
+    const db = await testDb();
+    await seed(db);
+    const { cookie, user } = await loggedInAs(db, 'hr_admin');
+    app = testApp({ db });
+    return {
+      db,
+      user,
+      post: (body: object = validBody) =>
+        app!.inject({ method: 'POST', url: '/api/employees', headers: { cookie }, payload: body }),
+    };
+  }
+
+  const rows = async (db: Db, sql: string) =>
+    (await db.$client.execute(sql)).rows.map((row) => ({ ...row }));
+
+  it('creating an employee returns 201 with Location, the next employee code, and a hire history row on the hire date', async () => {
+    const { db, user, post } = await setup(async (db) => {
+      await anEmployee().insert(db);
+      await anEmployee().insert(db);
+    });
+
+    const response = await post();
+
+    expect(response.statusCode).toBe(201);
+    expect(response.headers.location).toBe('/api/employees/3');
+    expect(response.json()).toMatchObject({
+      id: 3,
+      employeeCode: 'E000003',
+      firstName: 'Meera',
+      lastName: 'Iyer',
+      status: 'active',
+      terminationDate: null,
+      hireDate: '2026-10-01',
+      salary: { amountMinor: bandMid, currency: 'INR' },
+      salaryEffectiveDate: '2026-10-01',
+      compaRatio: 1,
+      bandPosition: 'inside',
+    });
+    expect(
+      await rows(
+        db,
+        'SELECT effective_date, amount_minor, currency_code, job_title_id, level_code, reason, changed_by_user_id FROM salary_changes WHERE employee_id = 3',
+      ),
+    ).toEqual([
+      {
+        effective_date: '2026-10-01',
+        amount_minor: bandMid,
+        currency_code: 'INR',
+        job_title_id: SOFTWARE_ENGINEER,
+        level_code: 'L3',
+        reason: 'hire',
+        changed_by_user_id: user.id,
+      },
+    ]);
+  });
+
+  it("the new employee's current-salary columns equal the hire row", async () => {
+    const { db, post } = await setup();
+
+    await post({ ...validBody, startingSalary: { amountMinor: bandMid + 777, currency: 'INR' } });
+
+    expect(
+      await rows(
+        db,
+        `SELECT e.salary_minor, e.salary_currency, e.salary_effective_date, e.name_search
+         FROM employees e JOIN salary_changes s ON s.employee_id = e.id
+         WHERE s.reason = 'hire' AND e.salary_minor = s.amount_minor
+           AND e.salary_currency = s.currency_code AND e.salary_effective_date = s.effective_date`,
+      ),
+    ).toEqual([
+      {
+        salary_minor: bandMid + 777,
+        salary_currency: 'INR',
+        salary_effective_date: '2026-10-01',
+        name_search: 'meera iyer',
+      },
+    ]);
+  });
+});

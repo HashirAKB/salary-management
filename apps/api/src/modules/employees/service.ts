@@ -1,5 +1,6 @@
 import {
   compaRatio,
+  type CreateEmployeeBody,
   type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListItem,
@@ -282,4 +283,13 @@ export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
   };
+}
+
+// E3 (04 section 5.4): one write transaction inserts the employee and its hire history row.
+export async function createEmployee(
+  _db: Db,
+  _body: CreateEmployeeBody,
+  _context: { today: string; now: string; userId: number },
+): Promise<EmployeeDetail> {
+  throw new Error('not implemented');
 }
