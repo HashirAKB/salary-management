@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { formatDate, formatMoney, parseMajorToMinor } from './format.ts';
+import {
+  formatChangePct,
+  formatCompaRatio,
+  formatDate,
+  formatGapPct,
+  formatMoney,
+  formatSharePct,
+  parseMajorToMinor,
+} from './format.ts';
 
 describe('formatMoney (04 section 8.4)', () => {
   it.each([
@@ -39,5 +47,44 @@ describe('parseMajorToMinor (04 section 8.4)', () => {
 
   it.each(['1.234', '', 'abc', '-1', '1.'])('rejects %j', (input) => {
     expect(parseMajorToMinor(input)).toBeNull();
+  });
+});
+
+describe('percentages and compa-ratio (04 section 8.4.1)', () => {
+  it.each<[number | null, string]>([
+    [4.2, '+4.2%'],
+    [-1.0, '-1.0%'],
+    [0, '0.0%'],
+    [-0, '0.0%'],
+    [0.04, '0.0%'],
+    [-0.04, '0.0%'],
+    [null, 'n/a'],
+    [0.05, '+0.1%'],
+    [-0.05, '-0.1%'],
+  ])('shows a salary change of %s as %s', (value, expected) => {
+    expect(formatChangePct(value)).toBe(expected);
+  });
+
+  it.each<[number | null, string]>([
+    [8.0, '8.0%'],
+    [-1.2, '-1.2%'],
+    [0.04, '0.0%'],
+    [-0.04, '0.0%'],
+    [null, 'Too few to compare'],
+  ])('shows a gender gap of %s as %s', (value, expected) => {
+    expect(formatGapPct(value)).toBe(expected);
+  });
+
+  it.each<[number | null, string]>([
+    [40, '40.0%'],
+    [0.04, '0.0%'],
+    [null, 'n/a'],
+  ])('shows a share of %s as %s', (value, expected) => {
+    expect(formatSharePct(value)).toBe(expected);
+  });
+
+  it('shows a compa-ratio to two decimals', () => {
+    expect(formatCompaRatio(0.97)).toBe('0.97');
+    expect(formatCompaRatio(1)).toBe('1.00');
   });
 });

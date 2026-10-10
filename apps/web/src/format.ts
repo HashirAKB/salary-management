@@ -43,3 +43,23 @@ export function parseMajorToMinor(input: string): number | null {
   const [, whole, fraction = ''] = match;
   return Number(whole + fraction.padEnd(2, '0'));
 }
+
+export function formatPct(_value: number, _options?: { signed?: boolean }): string {
+  throw new Error('not implemented');
+}
+
+export function formatChangePct(_value: number | null): string {
+  throw new Error('not implemented');
+}
+
+export function formatGapPct(_value: number | null): string {
+  throw new Error('not implemented');
+}
+
+export function formatSharePct(_value: number | null): string {
+  throw new Error('not implemented');
+}
+
+export function formatCompaRatio(_value: number): string {
+  throw new Error('not implemented');
+}
