@@ -16,6 +16,8 @@ export type AppDeps = {
   config: Config;
   /** Folder with the web build; static serving with an SPA fallback is on when set. */
   staticRoot?: string;
+  /** Where log lines go; stdout when absent. Tests capture it (05 section 5.0). */
+  logStream?: { write(line: string): void };
 };
 
 // The composition root used by main.ts and every test (03 section 6, rule 1).
