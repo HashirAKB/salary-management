@@ -5,6 +5,7 @@ import { PlaceholderPage } from './components/PlaceholderPage.tsx';
 import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
 import { Shell, useViewer } from './components/Shell.tsx';
 import { EmployeeDetailPage } from './features/employees/EmployeeDetailPage.tsx';
+import { NewEmployeePage } from './features/employees/NewEmployeePage.tsx';
 import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
 import { LoginPage } from './features/auth/LoginPage.tsx';
 import { landingPath } from './features/auth/useSession.ts';
@@ -13,6 +14,7 @@ import { ROUTES } from './routes.ts';
 // Screens built so far, by path; every other route shows a placeholder.
 const SCREENS: Record<string, ComponentType> = {
   '/employees': EmployeeListPage,
+  '/employees/new': NewEmployeePage,
   '/employees/:id': EmployeeDetailPage,
 };
 
