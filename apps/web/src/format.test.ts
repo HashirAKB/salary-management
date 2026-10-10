@@ -26,6 +26,10 @@ describe('formatDate (04 section 8.4)', () => {
     expect(formatDate('2026-10-09')).toBe('9 Oct 2026');
   });
 
+  it('writes September as Sep, not the ICU "Sept"', () => {
+    expect(formatDate('2026-09-30')).toBe('30 Sep 2026');
+  });
+
   it.each(['Pacific/Kiritimati', 'Pacific/Pago_Pago'])(
     'does not shift the day in the %s zone',
     (zone) => {
