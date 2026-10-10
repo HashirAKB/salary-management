@@ -1,7 +1,8 @@
 import { Alert, Button, Container, PasswordInput, Stack, TextInput, Title } from '@mantine/core';
 import { useState, type FormEvent, type ReactElement } from 'react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate, useSearchParams } from 'react-router';
 import { ApiError } from '../../api/client.ts';
+import { mayOpen } from '../../routes.ts';
 import { landingPath, useLogin } from './useSession.ts';
 
 function errorMessage(error: unknown): string {
@@ -17,13 +18,21 @@ function errorMessage(error: unknown): string {
 // S-1 (04 section 8.5).
 export function LoginPage(): ReactElement {
   const navigate = useNavigate();
+  const location = useLocation();
+  const [searchParams] = useSearchParams();
+  const next = searchParams.get('next');
+  const sessionExpired = (location.state as { sessionExpired?: boolean } | null)?.sessionExpired;
   const login = useLogin();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
 
   function submit(event: FormEvent) {
     event.preventDefault();
-    login.mutate({ email, password }, { onSuccess: (me) => navigate(landingPath(me)) });
+    login.mutate(
+      { email, password },
+      // ?next= only when the viewer may open that route (04 section 8.1).
+      { onSuccess: (me) => navigate(next && mayOpen(me, next) ? next : landingPath(me)) },
+    );
   }
 
   return (
@@ -31,6 +40,9 @@ export function LoginPage(): ReactElement {
       <Title order={1}>ACME Salary Manager</Title>
       <form onSubmit={submit}>
         <Stack mt="lg">
+          {sessionExpired && !login.isError && (
+            <Alert color="yellow">Your session expired. Log in again.</Alert>
+          )}
           {login.isError && (
             <Alert color="red" role="alert">
               {errorMessage(login.error)}

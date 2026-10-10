@@ -1,8 +1,17 @@
 import type { Action, MeResponse, Role } from '@acme/shared';
 import { AppShell, Badge, Button, Center, Group, Loader, Menu, Title } from '@mantine/core';
-import type { ReactElement } from 'react';
-import { NavLink, Outlet, useNavigate, useOutletContext } from 'react-router';
-import { useLogout, useMe } from '../features/auth/useSession.ts';
+import { useQueryClient } from '@tanstack/react-query';
+import { useEffect, type ReactElement } from 'react';
+import {
+  Navigate,
+  NavLink,
+  Outlet,
+  useLocation,
+  useNavigate,
+  useOutletContext,
+} from 'react-router';
+import { onUnauthenticated } from '../api/client.ts';
+import { ME_KEY, useLogout, useMe } from '../features/auth/useSession.ts';
 
 const NAV: { to: string; label: string; action: Action }[] = [
   { to: '/employees', label: 'Employees', action: 'employee.read' },
@@ -46,6 +55,24 @@ function UserMenu({ me }: { me: MeResponse }): ReactElement {
 // Header with the app name, nav gated by `me.permissions` and the user menu (04 section 8.1).
 export function Shell(): ReactElement {
   const me = useMe();
+  const queryClient = useQueryClient();
+  const navigate = useNavigate();
+  const location = useLocation();
+  const loginWithNext = `/login?next=${encodeURIComponent(location.pathname + location.search)}`;
+
+  // Session expired: any 401 after login clears the cache and asks to log in again (04 8.2).
+  useEffect(
+    () =>
+      onUnauthenticated(() => {
+        if (!queryClient.getQueryData(ME_KEY)) return;
+        queryClient.clear();
+        navigate(loginWithNext, { state: { sessionExpired: true } });
+      }),
+    [queryClient, navigate, loginWithNext],
+  );
+
+  // Logged out: `me` returned 401 (04 section 8.2).
+  if (me.isError) return <Navigate to={loginWithNext} replace />;
 
   if (!me.data) {
     return (

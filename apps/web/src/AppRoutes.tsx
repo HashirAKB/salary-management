@@ -5,6 +5,7 @@ import { PlaceholderPage } from './components/PlaceholderPage.tsx';
 import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
 import { Shell, useViewer } from './components/Shell.tsx';
 import { LoginPage } from './features/auth/LoginPage.tsx';
+import { ROUTES } from './routes.ts';
 
 function Gated({ action, title }: { action: Action; title: string }): ReactElement {
   const me = useViewer();
@@ -25,17 +26,9 @@ export function AppRoutes(): ReactElement {
     <Routes>
       <Route path="/login" element={<LoginPage />} />
       <Route element={<Shell />}>
-        <Route path="/employees" element={<Gated action="employee.read" title="Employees" />} />
-        <Route
-          path="/employees/new"
-          element={<Gated action="employee.write" title="Add employee" />}
-        />
-        <Route path="/employees/:id" element={<Gated action="employee.read" title="Employee" />} />
-        <Route path="/insights" element={<Gated action="insights.read" title="Insights" />} />
-        <Route
-          path="/insights/pay-equity"
-          element={<Gated action="insights.read" title="Pay equity" />}
-        />
+        {ROUTES.map(({ path, action, title }) => (
+          <Route key={path} path={path} element={<Gated action={action} title={title} />} />
+        ))}
         <Route path="*" element={<NotFound />} />
       </Route>
     </Routes>
