@@ -1,5 +1,7 @@
-import type { SQL, SQLWrapper } from 'drizzle-orm';
+import { sql, type SQL, type SQLWrapper } from 'drizzle-orm';
 
-export function usdMinorSql(_amountMinor: SQLWrapper, _usdPerUnitMicros: SQLWrapper): SQL<number> {
-  throw new Error('not implemented');
+// The SQL form of toUsdMinor for sorting by USD (02 section 4). Integer division of positive
+// integers gives the same half-up result as Math.round in TypeScript.
+export function usdMinorSql(amountMinor: SQLWrapper, usdPerUnitMicros: SQLWrapper): SQL<number> {
+  return sql<number>`((${amountMinor} * ${usdPerUnitMicros} + 500000) / 1000000)`;
 }
