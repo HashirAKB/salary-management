@@ -123,3 +123,16 @@ export type EmployeeDetail = z.infer<typeof employeeDetailSchema>;
 export const employeeIdParamsSchema = z.strictObject({
   id: z.coerce.number().int().min(1),
 });
+
+// 04 section 5.4 E3 to E5 bodies.
+export const createEmployeeBodySchema: z.ZodType<unknown> = z.custom(() => {
+  throw new Error('not implemented');
+});
+
+export const updateEmployeeBodySchema: z.ZodType<unknown> = z.custom(() => {
+  throw new Error('not implemented');
+});
+
+export const terminateBodySchema: z.ZodType<unknown> = z.custom(() => {
+  throw new Error('not implemented');
+});

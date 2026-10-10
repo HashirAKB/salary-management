@@ -9,3 +9,8 @@ export type Role = z.infer<typeof roleSchema>;
 export const isoDateSchema = z.iso.date();
 
 export type IsoDate = z.infer<typeof isoDateSchema>;
+
+// 04 section 4.7: trimmed, 1 to 100 characters, no leading formula character.
+export const personNameSchema: z.ZodType<string> = z.custom<string>(() => {
+  throw new Error('not implemented');
+});
