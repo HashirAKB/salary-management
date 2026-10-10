@@ -1,5 +1,5 @@
 import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
-import { and, asc, count, eq, inArray, sql, type SQL } from 'drizzle-orm';
+import { and, asc, count, eq, gt, gte, inArray, lt, lte, or, sql, type SQL } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { usdMinorSql } from '../../db/money-sql.ts';
 import {
@@ -88,7 +88,35 @@ export async function listEmployees(
       ),
     );
   }
+  // Equal to min or max is inside (02 section 4).
+  if (query.band === 'below') conditions.push(lt(employees.salaryMinor, payBands.minMinor));
+  if (query.band === 'above') conditions.push(gt(employees.salaryMinor, payBands.maxMinor));
+  if (query.band === 'outside') {
+    conditions.push(
+      or(
+        lt(employees.salaryMinor, payBands.minMinor),
+        gt(employees.salaryMinor, payBands.maxMinor),
+      ),
+    );
+  }
+  if (query.band === 'inside') {
+    conditions.push(
+      and(
+        gte(employees.salaryMinor, payBands.minMinor),
+        lte(employees.salaryMinor, payBands.maxMinor),
+      ),
+    );
+  }
+  if (query.salaryUnchangedSince) {
+    conditions.push(lt(employees.salaryEffectiveDate, query.salaryUnchangedSince));
+  }
   const where = and(...conditions);
+  // Every employee has a band (02 section 3); the band filters read its columns.
+  const bandJoin = and(
+    eq(payBands.countryCode, employees.countryCode),
+    eq(payBands.jobTitleId, employees.jobTitleId),
+    eq(payBands.levelCode, employees.levelCode),
+  );
 
   const [rows, [totals], asOf] = await Promise.all([
     db
@@ -107,20 +135,12 @@ export async function listEmployees(
       .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
       .innerJoin(levels, eq(levels.code, employees.levelCode))
       .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
-      // Every employee has a band (02 section 3).
-      .innerJoin(
-        payBands,
-        and(
-          eq(payBands.countryCode, employees.countryCode),
-          eq(payBands.jobTitleId, employees.jobTitleId),
-          eq(payBands.levelCode, employees.levelCode),
-        ),
-      )
+      .innerJoin(payBands, bandJoin)
       .where(where)
       .orderBy(asc(employees.lastName), asc(employees.firstName), asc(employees.id))
       .limit(pageSize)
       .offset((page - 1) * pageSize),
-    db.select({ total: count() }).from(employees).where(where),
+    db.select({ total: count() }).from(employees).innerJoin(payBands, bandJoin).where(where),
     fxAsOf(db),
   ]);
   const total = totals?.total ?? 0;
