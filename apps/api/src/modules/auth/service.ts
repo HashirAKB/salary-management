@@ -4,10 +4,25 @@ import type { Config } from '../../config.ts';
 import type { Db } from '../../db/client.ts';
 import type { Clock } from '../../domain/clock.ts';
 import { can, permissionsFor } from '../../domain/permissions.ts';
+import { AppError } from '../../http/problem.ts';
 import { SESSION_SECONDS } from './cookie.ts';
+import { hashPassword, verifyPassword, type ScryptParams } from './password.ts';
 import { findUserByEmail, fxAsOf, insertSession, type UserRow } from './sessions.ts';
 
 export type AuthDeps = { db: Db; clock: Clock; config: Config };
+
+// An unknown email is still compared against a hash of the configured cost, so timing doesn't
+// reveal which emails exist (04 A2). One dummy hash per cost, made on first use.
+const dummyHashes = new Map<string, Promise<string>>();
+function dummyHash(params: ScryptParams): Promise<string> {
+  const key = `${params.N}$${params.r}$${params.p}`;
+  let hash = dummyHashes.get(key);
+  if (!hash) {
+    hash = hashPassword(randomBytes(16).toString('base64'), params);
+    dummyHashes.set(key, hash);
+  }
+  return hash;
+}
 
 export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
 
@@ -28,10 +43,16 @@ export async function meFor(
 export async function login(
   deps: AuthDeps,
   email: string,
-  _password: string,
+  password: string,
 ): Promise<{ token: string; me: MeResponse }> {
   const user = await findUserByEmail(deps.db, email);
-  if (!user) throw new Error(`no user ${email}`);
+  const matches = await verifyPassword(
+    password,
+    user?.passwordHash ?? (await dummyHash(deps.config.scrypt)),
+  );
+  if (!user || !matches) {
+    throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
+  }
   const token = randomBytes(32).toString('base64url');
   const now = deps.clock.now();
   await insertSession(deps.db, {
