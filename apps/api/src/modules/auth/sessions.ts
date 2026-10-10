@@ -19,3 +19,13 @@ export async function fxAsOf(db: Db): Promise<string> {
   const [row] = await db.select({ asOf: fxRates.asOfDate }).from(fxRates).limit(1);
   return row?.asOf ?? '';
 }
+
+/** The user a session token hash belongs to: one primary-key lookup (04 section 4.3). */
+export async function findSessionUser(db: Db, tokenHash: string): Promise<UserRow | undefined> {
+  const [row] = await db
+    .select({ user: users })
+    .from(sessions)
+    .innerJoin(users, eq(users.id, sessions.userId))
+    .where(eq(sessions.tokenHash, tokenHash));
+  return row?.user;
+}

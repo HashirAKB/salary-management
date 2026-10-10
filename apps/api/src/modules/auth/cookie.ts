@@ -7,3 +7,12 @@ export function sessionCookie(token: string, { secure }: { secure: boolean }): s
   if (secure) attributes.push('Secure');
   return [`${SESSION_COOKIE}=${token}`, ...attributes].join('; ');
 }
+
+/** The `sid` value from a Cookie request header, if present. */
+export function readSid(header: string | undefined): string | undefined {
+  for (const pair of (header ?? '').split(';')) {
+    const [name, ...value] = pair.trim().split('=');
+    if (name === SESSION_COOKIE) return value.join('=') || undefined;
+  }
+  return undefined;
+}
