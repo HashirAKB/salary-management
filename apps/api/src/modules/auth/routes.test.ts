@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { aUser } from '../../../test/builders/index.ts';
+import { aUser, loggedInAs } from '../../../test/builders/index.ts';
 import { testApp, testConfig, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
 
@@ -178,6 +178,61 @@ describe('POST /api/auth/login (A2)', () => {
       const otherClient = await attemptFrom('198.51.100.9');
 
       expect(otherClient.statusCode).toBe(401);
+    });
+  });
+});
+
+describe('GET /api/auth/me (A4)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  const me = (cookie?: string) =>
+    app!.inject({ method: 'GET', url: '/api/auth/me', headers: cookie ? { cookie } : {} });
+
+  it("me returns the role's permissions, today from the clock, and askEnabled false without an API key", async () => {
+    const db = await testDb();
+    const { cookie, user } = await loggedInAs(db, 'finance');
+    app = testApp({ db });
+
+    const response = await me(cookie);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      user: { id: user.id, email: user.email, displayName: 'Finance (test)', role: 'finance' },
+      permissions: ['reference.read', 'insights.read', 'ask.use'],
+      askEnabled: false,
+      today: '2026-10-09',
+      fxAsOf: '2026-09-30',
+    });
+  });
+
+  it('me returns askEnabled true when an API key is set', async () => {
+    const db = await testDb();
+    const { cookie } = await loggedInAs(db, 'hr_viewer');
+    app = testApp({ db, config: { ...testConfig, anthropicApiKey: 'sk-test' } });
+
+    const response = await me(cookie);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ askEnabled: true });
+  });
+
+  it('me without a session returns 401 UNAUTHENTICATED', async () => {
+    app = testApp();
+
+    const response = await me();
+
+    expect(response.statusCode).toBe(401);
+    expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
+    expect(response.json()).toMatchObject({
+      title: 'Unauthorized',
+      status: 401,
+      code: 'UNAUTHENTICATED',
+      instance: '/api/auth/me',
     });
   });
 });
