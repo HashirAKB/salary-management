@@ -38,7 +38,7 @@ const TENURE_BUCKETS = [
 
 const toDays = (date: string) => Date.parse(`${date}T00:00:00.000Z`) / DAY_MS;
 const fromDays = (days: number) => new Date(days * DAY_MS).toISOString().slice(0, 10);
-const addDays = (date: string, days: number) => fromDays(toDays(date) + days);
+export const addDays = (date: string, days: number) => fromDays(toDays(date) + days);
 const addMonths = (date: string, months: number) => {
   const d = new Date(`${date}T00:00:00.000Z`);
   d.setUTCMonth(d.getUTCMonth() + months);

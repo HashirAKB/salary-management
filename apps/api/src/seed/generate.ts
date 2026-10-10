@@ -11,7 +11,7 @@ import {
 } from '@faker-js/faker';
 import type { employees, Gender, LevelCode, salaryChanges } from '../db/schema.ts';
 import { nameSearch } from '../domain/name-search.ts';
-import { buildHistory, drawHireDate, roundSalary, tenureYears } from './history.ts';
+import { addDays, buildHistory, drawHireDate, roundSalary, tenureYears } from './history.ts';
 import { createRandom, largestRemainder, type Random } from './random.ts';
 import {
   ACCOUNT_EXECUTIVE,
@@ -186,12 +186,7 @@ function generateTerminated(
       const gender = GENDERS[pickWeighted(random, [0.97 * w, 0.97 * (1 - w), 0.01, 0.02])]!;
       const band = bands.get(bandKey(country.code, title.id, level.code))!;
       const compa = Math.min(1.16, Math.max(0.84, random.normal(1, 0.06)));
-      const terminationDate = new Date(
-        Date.parse(`${TERMINATION_FROM}T00:00:00.000Z`) +
-          random.int(0, TERMINATION_DAYS - 1) * 86_400_000,
-      )
-        .toISOString()
-        .slice(0, 10);
+      const terminationDate = addDays(TERMINATION_FROM, random.int(0, TERMINATION_DAYS - 1));
       people.push({
         countryCode: country.code,
         jobTitleId: title.id,
