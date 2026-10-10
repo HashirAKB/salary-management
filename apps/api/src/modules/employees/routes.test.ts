@@ -794,3 +794,102 @@ describe('PATCH /api/employees/:id (E4)', () => {
     });
   });
 });
+
+describe('POST /api/employees/:id/termination (E5)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
+    const db = await testDb();
+    await seed(db);
+    const { cookie } = await loggedInAs(db, 'hr_admin');
+    app = testApp({ db });
+    const inject = (method: 'GET' | 'POST', url: string, payload?: object) =>
+      app!.inject({ method, url, headers: { cookie }, ...(payload && { payload }) });
+    return {
+      terminate: (terminationDate: string, id: number | string = 1) =>
+        inject('POST', `/api/employees/${id}/termination`, { terminationDate }),
+      list: async (query = '') =>
+        ((await inject('GET', `/api/employees${query}`)).json().items as { id: number }[]).map(
+          (item) => item.id,
+        ),
+    };
+  }
+
+  const problemOf = (response: { statusCode: number; json: () => unknown }) => ({
+    status: response.statusCode,
+    code: (response.json() as { code: string }).code,
+  });
+
+  it('terminating sets status and date and removes the employee from the default list', async () => {
+    const { terminate, list } = await setup(async (db) => {
+      await anEmployee().insert(db);
+      await anEmployee().insert(db);
+    });
+
+    const response = await terminate('2026-10-05');
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: 1,
+      status: 'terminated',
+      terminationDate: '2026-10-05',
+      updatedAt: '2026-10-09T09:00:00.000Z',
+    });
+    expect(await list()).toEqual([2]);
+    expect(await list('?status=terminated')).toEqual([1]);
+  });
+
+  it('accepts today and the hire date as the termination date', async () => {
+    const { terminate } = await setup(async (db) => {
+      await anEmployee().hiredOn('2026-09-01').insert(db);
+      await anEmployee().hiredOn('2026-09-01').insert(db);
+    });
+
+    const today = await terminate('2026-10-09', 1);
+    const hireDay = await terminate('2026-09-01', 2);
+
+    expect([today.statusCode, hireDay.statusCode]).toEqual([200, 200]);
+  });
+
+  it('rejects terminating twice, before the hire date, or after today, each with its code', async () => {
+    const { terminate } = await setup(async (db) => {
+      await anEmployee().insert(db);
+      await anEmployee().terminatedOn('2025-01-31').insert(db);
+    });
+
+    const twice = await terminate('2026-10-05', 2);
+    const future = await terminate('2026-10-10', 1);
+    const beforeHire = await terminate('2022-01-09', 1);
+
+    expect(problemOf(twice)).toEqual({ status: 422, code: 'EMPLOYEE_ALREADY_TERMINATED' });
+    expect(problemOf(future)).toEqual({ status: 422, code: 'DATE_IN_FUTURE' });
+    expect(problemOf(beforeHire)).toEqual({ status: 422, code: 'TERMINATION_BEFORE_HIRE' });
+  });
+
+  it('leaves the employee active after a rejected termination', async () => {
+    const { terminate, list } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    await terminate('2026-10-10');
+
+    expect(await list()).toEqual([1]);
+  });
+
+  it('returns 404 for an unknown id and 400 for a malformed date', async () => {
+    const { terminate } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    const missing = await terminate('2026-10-05', 999);
+    const malformed = await terminate('05/10/2026');
+
+    expect(problemOf(missing)).toEqual({ status: 404, code: 'EMPLOYEE_NOT_FOUND' });
+    expect(problemOf(malformed)).toEqual({ status: 400, code: 'VALIDATION_FAILED' });
+  });
+});

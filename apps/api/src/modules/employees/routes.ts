@@ -3,12 +3,14 @@ import {
   createEmployeeBodySchema,
   employeeIdParamsSchema,
   employeeListQuerySchema,
+  terminateBodySchema,
   updateEmployeeBodySchema,
   type CreateEmployeeBody,
   type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListQuery,
   type EmployeeListResponse,
+  type TerminateBody,
   type UpdateEmployeeBody,
 } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
@@ -20,6 +22,7 @@ import {
   exportEmployees,
   getEmployee,
   listEmployees,
+  terminateEmployee,
   updateEmployee,
 } from './service.ts';
 
@@ -67,6 +70,22 @@ export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Cloc
         (request.params as { id: number }).id,
         request.body as UpdateEmployeeBody,
         deps.clock.now().toISOString(),
+      ),
+  );
+
+  // E5 (04 section 5.4).
+  app.post(
+    '/api/employees/:id/termination',
+    {
+      onRequest: requires('employee.write'),
+      schema: { params: employeeIdParamsSchema, body: terminateBodySchema },
+    },
+    async (request): Promise<EmployeeDetail> =>
+      terminateEmployee(
+        deps.db,
+        (request.params as { id: number }).id,
+        request.body as TerminateBody,
+        { today: deps.clock.today(), now: deps.clock.now().toISOString() },
       ),
   );
 

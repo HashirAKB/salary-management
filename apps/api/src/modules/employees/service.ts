@@ -6,6 +6,7 @@ import {
   type EmployeeListItem,
   type EmployeeListQuery,
   type EmployeeListResponse,
+  type TerminateBody,
   type UpdateEmployeeBody,
 } from '@acme/shared';
 import {
@@ -399,4 +400,14 @@ export async function updateEmployee(
     })
     .where(eq(employees.id, id));
   return getEmployee(db, id);
+}
+
+// E5 (04 section 5.4): the employee leaves current lists; the record and history stay.
+export async function terminateEmployee(
+  _db: Db,
+  _id: number,
+  _body: TerminateBody,
+  _context: { today: string; now: string },
+): Promise<EmployeeDetail> {
+  throw new Error('not implemented');
 }
