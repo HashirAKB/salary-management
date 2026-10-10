@@ -331,7 +331,7 @@ refactor(web): extract api client problem parsing
 - Web: Mantine theme (`createTheme` with violet primary, `md` radius and striped table defaults) and `ColorSchemeScript` wired into `main.tsx`; dark mode toggle `ActionIcon` in the app shell user menu (`Shell.tsx`), colour scheme persisted in `localStorage` via `localStorageColorSchemeManager`. All from the already-installed `@mantine/core@9.7.1`.
 
 **Test list.**
-- 05 section 5.3: U rows 1 and 2; I rows 1, 2 and 12 (default list, past-the-end page, item fields); C rows 1, 6 and 7 (rows and count line, error, role buttons).
+- 05 section 5.3: U rows 1 and 2; I rows 1, 2 and 12 (default list, past-the-end page, item fields); C rows 1, 6 and 7 (rows and count line, error, role buttons). U row 1 covers defaults and unknown params only; comma lists come with the S4 list filters. C row 7 covers "Add employee" only; its "Export CSV" half moves to S4 with the export button.
 - 05 section 5.9: the five U formatting rows.
 - 05 section 5.6: the TS and SQL USD conversion agreement row (needed for the list's USD column).
 - Dark mode toggle: C, `Shell` renders a toggle that switches and persists the colour scheme (no 05 row; behaviour introduced by this slice).
@@ -375,7 +375,7 @@ feat(web): add employee list page
 - Web: filter bar, `useEmployeeFilters` (URL state), sort headers, "Export CSV".
 
 **Test list.**
-- 05 section 5.3: all rows not done in S3.
+- 05 section 5.3: all rows not done in S3, including the comma-list part of U row 1 and the "Export CSV" half of C row 7 ("Export CSV" shown to both HR roles).
 - 05 section 5.7: all rows.
 
 **Acceptance.** Every filter combination the UI can produce round-trips through the URL; the export matches the screen's filtered rows and order.
