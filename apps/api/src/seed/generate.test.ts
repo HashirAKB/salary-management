@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { generateDataset, REF_DATE, SEED, SEED_CONFIG, type Dataset } from './generate.ts';
 import { SOFTWARE_ENGINEER } from './reference.ts';
@@ -238,5 +239,33 @@ describe('generateDataset: terminated employees (02 section 7.8)', () => {
     expect(codes).toEqual(
       Array.from({ length: 250 }, (_, i) => `E${String(10_001 + i).padStart(6, '0')}`),
     );
+  });
+});
+
+// Recorded from the generator at 327bd9b; CI must reproduce it (06 S1 acceptance).
+const RECORDED_HASH = 'd865363a8a3ee8aae37fd10fadf0112e2241c039ac0b456c2e3e1477ccb220bb';
+
+const TABLES = [
+  'fxRates',
+  'countries',
+  'departments',
+  'jobTitles',
+  'levels',
+  'payBands',
+  'employees',
+  'salaryChanges',
+] as const;
+
+const hashRows = (d: Dataset) =>
+  createHash('sha256')
+    .update(JSON.stringify(TABLES.map((table) => d[table])))
+    .digest('hex');
+
+describe('generateDataset: determinism (02 section 7.2)', () => {
+  it('the same seed gives a deep-equal dataset, and the hash of its ordered rows matches the recorded value', () => {
+    const again = generateDataset(SEED_CONFIG, SEED, REF_DATE);
+
+    expect(again).toEqual(dataset());
+    expect(hashRows(again)).toBe(RECORDED_HASH);
   });
 });
