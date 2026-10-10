@@ -1,4 +1,4 @@
-import { loginBodySchema, type MeResponse } from '@acme/shared';
+import { loginBodySchema, type LoginBody, type MeResponse } from '@acme/shared';
 import rateLimit from '@fastify/rate-limit';
 import type { FastifyInstance } from 'fastify';
 import { requires } from '../../http/guard.ts';
@@ -27,9 +27,13 @@ export function authRoutes(app: FastifyInstance, deps: AuthDeps) {
 
     scope.post(
       '/api/auth/login',
-      { onRequest: requires('public'), config: { rateLimit: LOGIN_RATE_LIMIT } },
+      {
+        onRequest: requires('public'),
+        schema: { body: loginBodySchema },
+        config: { rateLimit: LOGIN_RATE_LIMIT },
+      },
       async (request, reply): Promise<MeResponse> => {
-        const body = loginBodySchema.parse(request.body);
+        const body = request.body as LoginBody;
         const { token, me } = await login(deps, body.email, body.password);
         reply.header('set-cookie', sessionCookie(token, { secure }));
         return me;
