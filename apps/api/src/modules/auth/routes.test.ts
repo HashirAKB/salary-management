@@ -114,4 +114,28 @@ describe('POST /api/auth/login (A2)', () => {
     ]);
     expect(rows[0]?.token_hash).not.toContain(token);
   });
+
+  it('a wrong password and an unknown email return the same 401 body', async () => {
+    db = await testDb();
+    const user = await aUser('hr_admin').insert(db);
+    app = testApp({ db });
+
+    const wrongPassword = await login(user.email, 'not-the-password');
+    const unknownEmail = await login('nobody@test.local', user.password);
+
+    expect(wrongPassword.statusCode).toBe(401);
+    expect(unknownEmail.statusCode).toBe(401);
+    expect(wrongPassword.headers['content-type']).toMatch(/^application\/problem\+json/);
+    expect(wrongPassword.json()).toEqual({
+      type: 'about:blank',
+      title: 'Unauthorized',
+      status: 401,
+      detail: 'Email or password is incorrect.',
+      code: 'INVALID_CREDENTIALS',
+      instance: '/api/auth/login',
+    });
+    expect(unknownEmail.json()).toEqual(wrongPassword.json());
+    expect(wrongPassword.headers['set-cookie']).toBeUndefined();
+    expect(await db.all('SELECT * FROM sessions')).toEqual([]);
+  });
 });
