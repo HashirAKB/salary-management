@@ -113,6 +113,47 @@ describe('GET /api/employees (E1)', () => {
     }
   });
 
+  describe('search q', () => {
+    const namesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
+      employeeListResponseSchema
+        .parse((await get(`?q=${encodeURIComponent(q)}`)).json())
+        .items.map((item) => item.lastName);
+
+    it('finds "Müller" when searching for "muller"', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().named('Jörg', 'Müller').insert(db);
+        await anEmployee().named('Ann', 'Other').insert(db);
+      });
+
+      expect(await namesOf(get, 'muller')).toEqual(['Müller']);
+      expect(await namesOf(get, '  JÖRG  mül')).toEqual(['Müller']);
+    });
+
+    it.each(['2', 'E2', 'e000002', '000002'])(
+      'finds an employee by code written as %s',
+      async (q) => {
+        const get = await setup(async (db) => {
+          await anEmployee().named('Ann', 'First').insert(db);
+          await anEmployee().named('Bob', 'Second').insert(db);
+          await anEmployee().named('Cy', 'Third').insert(db);
+        });
+
+        expect(await namesOf(get, q)).toEqual(['Second']);
+      },
+    );
+
+    it('treats % and _ in the search text as literal characters', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().named('Ann', '100%Real').insert(db);
+        await anEmployee().named('Bob', 'Under_score').insert(db);
+        await anEmployee().named('Cy', 'Plain').insert(db);
+      });
+
+      expect(await namesOf(get, '%')).toEqual(['100%Real']);
+      expect(await namesOf(get, '_')).toEqual(['Under_score']);
+    });
+  });
+
   describe('salary in local currency and USD, with compa-ratio and band position', () => {
     const band = generateBands().find(
       (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',

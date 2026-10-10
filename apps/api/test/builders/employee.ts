@@ -2,6 +2,7 @@ import type { Gender, LevelCode, SalaryChangeReason } from '../../src/db/schema.
 import { employees, salaryChanges } from '../../src/db/schema.ts';
 import { COUNTRIES, generateBands, SOFTWARE_ENGINEER } from '../../src/seed/reference.ts';
 import { nextId, type DbOrTx } from './db.ts';
+import { nameSearch } from '../../src/domain/name-search.ts';
 
 export type HistoryEntry = {
   reason: Exclude<SalaryChangeReason, 'hire'>;
@@ -124,7 +125,7 @@ class EmployeeBuilder {
       employeeCode,
       firstName: this.#firstName,
       lastName: this.#lastName,
-      nameSearch: `${this.#firstName} ${this.#lastName}`.toLowerCase(),
+      nameSearch: nameSearch(this.#firstName, this.#lastName),
       gender: this.#gender,
       countryCode: this.#countryCode,
       jobTitleId: this.#jobTitleId,
