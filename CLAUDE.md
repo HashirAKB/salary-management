@@ -11,7 +11,8 @@ The spec lives in `docs/`. Find the current slice in `docs/06-build-plan.md` and
 - `npm run e2e`: Playwright smoke test against the built app
 - `npm run eval`: Ask eval against the real model. Manual only, needs `ANTHROPIC_API_KEY`, never in CI
 ## Rules
-- IMPORTANT: test first. Write a failing test, run it, see it fail, write the minimum code to pass, refactor only on green. Build slices with `/tdd-slice S<n>`.
+- IMPORTANT: test first. Write a failing test, run it, see it fail, write the minimum code to pass, refactor only on green. Build slices with `/tdd-plan S<n>` (Opus, plan mode) then `/tdd-build S<n> <cycles>` (Sonnet, effort medium, one cycle group per session) then `/tdd-finish S<n>` (Sonnet). Use `/clear` between sessions; never switch model mid-session. Build sessions read `.ai-notes/Sn/brief.md`, not `docs/04` or `docs/05` directly.
+- When compacting mid-session set `/compact` focus to: current slice, branch, open cycles, ticked test rows, last commit hash, and any BLOCKED: questions.
 - Commit after each step, as Conventional Commits `type(scope): subject`, lower case, under 72 characters:
   - red `test(scope)`: tests plus `throw new Error('not implemented')` stubs. Green `feat(scope)` or `fix(scope)`: production code only. `refactor(scope)`: tests unchanged and green. Config and wiring: `chore`, `build`, `ci`.
   - Scopes: api, web, shared, db, seed, auth, employees, salary, insights, export, ask, e2e, deploy, docs.

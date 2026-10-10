@@ -1,3 +1,4 @@
+import { request } from 'node:http';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loggedInAs } from '../../test/builders/index.ts';
@@ -58,5 +59,46 @@ describe('logging and caching (05 section 5.0)', () => {
     expect(output).not.toContain('hunter2-secret');
     expect(output).not.toContain('4242424');
     expect(output).not.toContain('7373737');
+  });
+
+  // app.inject() fakes the socket, so the cyclic request object only shows up on a real request.
+  it('logs a real HTTP request without crashing and without the cookie value', async () => {
+    const lines: string[] = [];
+    app = testApp({
+      config: { ...testConfig, logLevel: 'info' },
+      logStream: { write: (line) => void lines.push(line) },
+    });
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    const { port } = app.server.address() as { port: number };
+
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const call = request(
+        {
+          host: '127.0.0.1',
+          port,
+          path: '/api/health',
+          headers: { cookie: 'sid=secret-session-token' },
+        },
+        (res) => {
+          res.resume();
+          res.on('end', () => resolve(res.statusCode));
+        },
+      );
+      call.on('error', reject);
+      // A crashed server never answers; report no status instead of hanging the test.
+      call.setTimeout(2000, () => {
+        call.destroy();
+        resolve(undefined);
+      });
+      call.end();
+    });
+    await app.close();
+    app = undefined;
+
+    expect(status).toBe(200);
+    const entries = lines.map((line) => JSON.parse(line));
+    expect(entries.some((entry) => entry.msg === 'incoming request')).toBe(true);
+    expect(entries.some((entry) => entry.msg === 'request completed')).toBe(true);
+    expect(lines.join('')).not.toContain('secret-session-token');
   });
 });
