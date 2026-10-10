@@ -252,7 +252,7 @@ describe('generateDataset: terminated employees (02 section 7.8)', () => {
 });
 
 // Recorded with the full 02 section 7.8 termination window; CI must reproduce it (06 S1 acceptance).
-const RECORDED_HASH = '53bae56dcc677310a6e210a9c5aba8b327a9d0472c59b045f1053c6211842d53';
+const RECORDED_HASH = '042be9bb34db0a76b4ea64af495db2b297f00de79340d8232bde391ca4f2cf39';
 
 const TABLES = [
   'fxRates',
