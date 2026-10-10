@@ -24,7 +24,11 @@ export default defineConfig({
     ],
     coverage: {
       provider: 'v8',
-      include: ['packages/shared/src/**', 'apps/api/src/**', 'apps/web/src/**'],
+      include: [
+        'packages/shared/src/**/*.ts',
+        'apps/api/src/**/*.ts',
+        'apps/web/src/**/*.{ts,tsx}',
+      ],
       thresholds: {
         'apps/api/src/domain/**': { lines: 90, branches: 85 },
         'packages/shared/src/**': { lines: 90, branches: 85 },

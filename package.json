@@ -12,11 +12,12 @@
   ],
   "scripts": {
     "dev": "npm run dev -w @acme/api & npm run dev -w @acme/web & wait",
-    "build": "tsc -b apps/api/tsconfig.build.json && npm run build -w @acme/web",
+    "build": "tsc -b apps/api/tsconfig.build.json && cp -r apps/api/src/db/migrations apps/api/dist/db/ && npm run build -w @acme/web",
     "typecheck": "tsc -p packages/shared && tsc -p apps/api && tsc -p apps/web",
     "test": "TZ=UTC vitest run",
     "test:coverage": "TZ=UTC vitest run --coverage",
     "lint": "eslint .",
+    "seed": "node --conditions=source --env-file-if-exists=.env apps/api/src/seed/cli.ts",
     "prepare": "husky"
   },
   "lint-staged": {
