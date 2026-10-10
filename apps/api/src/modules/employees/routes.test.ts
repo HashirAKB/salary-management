@@ -154,6 +154,83 @@ describe('GET /api/employees (E1)', () => {
     });
   });
 
+  describe('filters', () => {
+    const lastNamesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
+      employeeListResponseSchema.parse((await get(q)).json()).items.map((item) => item.lastName);
+
+    // Differs from the default employee (IN, Software Engineer, L3, female) on every filter.
+    async function seedTargetAndOther(db: Db) {
+      await anEmployee()
+        .named('Tara', 'Target')
+        .inCountry('US')
+        .withTitle(3)
+        .atLevel('L4')
+        .withGender('male')
+        .insert(db);
+      await anEmployee().named('Olive', 'Other').insert(db);
+    }
+
+    it.each([
+      ['country', '?country=US'],
+      ['department', '?department=2'],
+      ['job title', '?jobTitle=3'],
+      ['level', '?level=L4'],
+      ['gender', '?gender=male'],
+    ])('filters by %s', async (_name, query) => {
+      const get = await setup(seedTargetAndOther);
+
+      expect(await lastNamesOf(get, query)).toEqual(['Target']);
+    });
+
+    it('combines department and job title with AND', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().named('Pam', 'Manager').withTitle(3).insert(db);
+        await anEmployee().named('Dee', 'Designer').withTitle(4).insert(db);
+      });
+
+      expect(await lastNamesOf(get, '?department=2&jobTitle=4')).toEqual(['Designer']);
+      expect(await lastNamesOf(get, '?department=1&jobTitle=4')).toEqual([]);
+    });
+
+    it('counts the filtered total, not the whole table', async () => {
+      const get = await setup(seedTargetAndOther);
+
+      const body = employeeListResponseSchema.parse((await get('?country=US')).json());
+
+      expect(body).toMatchObject({ total: 1, totalPages: 1 });
+    });
+
+    it('combines different filters with AND and values within one filter with OR', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().named('A', 'InL3').inCountry('IN').atLevel('L3').insert(db);
+        await anEmployee().named('B', 'UsL3').inCountry('US').atLevel('L3').insert(db);
+        await anEmployee().named('C', 'UsL4').inCountry('US').atLevel('L4').insert(db);
+        await anEmployee().named('D', 'DeL3').inCountry('DE').atLevel('L3').insert(db);
+      });
+
+      expect(await lastNamesOf(get, '?country=IN,US&level=L3')).toEqual(['InL3', 'UsL3']);
+      expect(await lastNamesOf(get, '?level=L3,L4&country=US')).toEqual(['UsL3', 'UsL4']);
+    });
+
+    it.each([
+      ['?country=IN,XX', 'country[1]'],
+      ['?level=L3,L9', 'level[1]'],
+      ['?department=1,99', 'department[1]'],
+      ['?jobTitle=abc', 'jobTitle[0]'],
+      ['?gender=female,robot', 'gender[1]'],
+    ])('rejects an unknown value in %s with 400 and path %s', async (query, path) => {
+      const get = await setup(async () => {});
+
+      const response = await get(query);
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        errors: [{ path }],
+      });
+    });
+  });
+
   describe('salary in local currency and USD, with compa-ratio and band position', () => {
     const band = generateBands().find(
       (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
