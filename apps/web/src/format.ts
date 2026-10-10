@@ -44,22 +44,36 @@ export function parseMajorToMinor(input: string): number | null {
   return Number(whole + fraction.padEnd(2, '0'));
 }
 
-export function formatPct(_value: number, _options?: { signed?: boolean }): string {
-  throw new Error('not implemented');
+const pctFormatters = {
+  signed: new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    signDisplay: 'exceptZero',
+  }),
+  unsigned: new Intl.NumberFormat('en-US', {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 1,
+    signDisplay: 'negative',
+  }),
+};
+
+/** One decimal; a value that rounds to zero shows `0.0%` with no sign (04 section 8.4.1). */
+export function formatPct(value: number, { signed = false }: { signed?: boolean } = {}): string {
+  return `${pctFormatters[signed ? 'signed' : 'unsigned'].format(value)}%`;
 }
 
-export function formatChangePct(_value: number | null): string {
-  throw new Error('not implemented');
-}
+export const formatChangePct = (value: number | null): string =>
+  value === null ? 'n/a' : formatPct(value, { signed: true });
 
-export function formatGapPct(_value: number | null): string {
-  throw new Error('not implemented');
-}
+export const formatGapPct = (value: number | null): string =>
+  value === null ? 'Too few to compare' : formatPct(value);
 
-export function formatSharePct(_value: number | null): string {
-  throw new Error('not implemented');
-}
+export const formatSharePct = (value: number | null): string =>
+  value === null ? 'n/a' : formatPct(value);
 
-export function formatCompaRatio(_value: number): string {
-  throw new Error('not implemented');
-}
+const compaFormatter = new Intl.NumberFormat('en-US', {
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+
+export const formatCompaRatio = (value: number): string => compaFormatter.format(value);
