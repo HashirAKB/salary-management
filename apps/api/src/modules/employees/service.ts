@@ -404,10 +404,33 @@ export async function updateEmployee(
 
 // E5 (04 section 5.4): the employee leaves current lists; the record and history stay.
 export async function terminateEmployee(
-  _db: Db,
-  _id: number,
-  _body: TerminateBody,
-  _context: { today: string; now: string },
+  db: Db,
+  id: number,
+  body: TerminateBody,
+  context: { today: string; now: string },
 ): Promise<EmployeeDetail> {
-  throw new Error('not implemented');
+  const [current] = await db.select().from(employees).where(eq(employees.id, id));
+  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+  if (current.status === 'terminated') {
+    throw new AppError(
+      422,
+      'EMPLOYEE_ALREADY_TERMINATED',
+      `${current.firstName} ${current.lastName} is already terminated.`,
+    );
+  }
+  if (body.terminationDate > context.today) {
+    throw new AppError(422, 'DATE_IN_FUTURE', "Termination date can't be in the future.");
+  }
+  if (body.terminationDate < current.hireDate) {
+    throw new AppError(
+      422,
+      'TERMINATION_BEFORE_HIRE',
+      "Termination date can't be before the hire date.",
+    );
+  }
+  await db
+    .update(employees)
+    .set({ status: 'terminated', terminationDate: body.terminationDate, updatedAt: context.now })
+    .where(eq(employees.id, id));
+  return getEmployee(db, id);
 }
