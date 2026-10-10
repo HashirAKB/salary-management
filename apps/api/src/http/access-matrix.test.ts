@@ -13,6 +13,7 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
   'POST /api/auth/login': 'public',
   'POST /api/auth/logout': 'public',
   'GET /api/auth/me': 'authenticated',
+  'GET /api/reference': 'reference.read',
 };
 
 const ROLES: Role[] = ['hr_admin', 'hr_viewer', 'finance'];
