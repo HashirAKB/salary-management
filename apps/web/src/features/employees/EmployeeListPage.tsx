@@ -3,8 +3,10 @@ import { employeeListResponseSchema } from '@acme/shared';
 import {
   Alert,
   Badge,
+  Button,
   Group,
   Pagination,
+  Select,
   Skeleton,
   Stack,
   Table,
@@ -18,6 +20,7 @@ import { apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
+import { useEmployeeFilters } from './useEmployeeFilters.ts';
 
 const BAND_LABELS = { below: 'Below', inside: 'Inside', above: 'Above' } as const;
 const BAND_COLORS = { below: 'orange', inside: 'green', above: 'blue' } as const;
@@ -32,6 +35,7 @@ const COLUMNS = [
   'Hire date',
 ];
 const SKELETON_ROWS = 10;
+const PAGE_SIZES = ['25', '50', '100'];
 const count = new Intl.NumberFormat('en-US');
 
 function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement {
@@ -69,7 +73,8 @@ function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement
 
 /** S-2 Employees list (04 section 8.5). */
 export function EmployeeListPage(): ReactElement {
-  const query = { page: 1, pageSize: 50 };
+  const { page, pageSize, setPage, setPageSize } = useEmployeeFilters();
+  const query = { page, pageSize };
   const employees = useQuery({
     queryKey: ['employees', query],
     queryFn: () =>
@@ -80,17 +85,28 @@ export function EmployeeListPage(): ReactElement {
     placeholderData: keepPreviousData,
   });
   const data = employees.data;
+  const pastTheEnd = data !== undefined && data.items.length === 0 && data.page > data.totalPages;
 
   return (
     <Stack>
       <Title order={1}>Employees</Title>
       {employees.isError && <Alert color="red">{employees.error.message}</Alert>}
-      {data && (
+      {data && !pastTheEnd && (
         <Text>
           {`Showing ${count.format((data.page - 1) * data.pageSize + 1)} to ${count.format(
             Math.min(data.page * data.pageSize, data.total),
           )} of ${count.format(data.total)} employees`}
         </Text>
+      )}
+      {data && pastTheEnd && (
+        <Alert color="yellow">
+          <Group justify="space-between">
+            <Text>This page is past the end of the results.</Text>
+            <Button variant="light" onClick={() => setPage(data.totalPages)}>
+              Go to last page
+            </Button>
+          </Group>
+        </Alert>
       )}
       <Table striped>
         <Table.Thead>
@@ -116,7 +132,15 @@ export function EmployeeListPage(): ReactElement {
       </Table>
       {data && (
         <Group justify="space-between">
-          <Pagination value={data.page} total={data.totalPages} />
+          <Pagination value={data.page} total={data.totalPages} onChange={setPage} />
+          <Select
+            aria-label="Page size"
+            w={90}
+            allowDeselect={false}
+            data={PAGE_SIZES}
+            value={String(pageSize)}
+            onChange={(value) => value && setPageSize(Number(value))}
+          />
           <FxAsOf date={data.fxAsOf} />
         </Group>
       )}
