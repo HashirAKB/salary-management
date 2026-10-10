@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { aUser, loggedInAs } from '../../../test/builders/index.ts';
 import { testApp, testConfig, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
+import { fixedClock } from '../../domain/clock.ts';
 
 const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
 
@@ -234,5 +235,59 @@ describe('GET /api/auth/me (A4)', () => {
       code: 'UNAUTHENTICATED',
       instance: '/api/auth/me',
     });
+  });
+});
+
+describe('session expiry and POST /api/auth/logout (A3)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  const me = (cookie: string) =>
+    app!.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } });
+
+  it('a session older than 8 hours returns 401', async () => {
+    const db = await testDb();
+    const { cookie } = await loggedInAs(db, 'hr_admin');
+    const clock = fixedClock('2026-10-09T09:00:00.000Z');
+    app = testApp({ db, clock });
+
+    clock.advance(8 * 60 * 60 * 1000 - 1);
+    const lastMoment = await me(cookie);
+    clock.advance(1);
+    const expired = await me(cookie);
+
+    expect(lastMoment.statusCode).toBe(200);
+    expect(expired.statusCode).toBe(401);
+    expect(expired.json()).toMatchObject({ code: 'UNAUTHENTICATED' });
+  });
+
+  it('logout deletes the session, and the old cookie then returns 401', async () => {
+    const db = await testDb();
+    const { cookie } = await loggedInAs(db, 'hr_viewer');
+    app = testApp({ db });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/auth/logout',
+      headers: { cookie },
+      payload: {},
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(String(response.headers['set-cookie'])).toMatch(/^sid=; .*Max-Age=0/);
+    expect(await db.all('SELECT * FROM sessions')).toEqual([]);
+    expect((await me(cookie)).statusCode).toBe(401);
+  });
+
+  it('logout without a session returns 204', async () => {
+    app = testApp();
+
+    const response = await app.inject({ method: 'POST', url: '/api/auth/logout' });
+
+    expect(response.statusCode).toBe(204);
   });
 });
