@@ -53,3 +53,38 @@ describe('checkSalaryChange: dates (D-022)', () => {
     );
   });
 });
+
+describe.each(['merit', 'market_adjustment'] as const)(
+  'checkSalaryChange: %s (D-022)',
+  (reason) => {
+    it('accepts a higher amount with the same title and level', () => {
+      expect(checkSalaryChange(context({ change: { reason } }))).toBeNull();
+    });
+
+    it.each([
+      { case: 'an equal amount', amountMinor: 200_000_000 },
+      { case: 'a lower amount', amountMinor: 190_000_000 },
+    ])('requires a raise: $case', ({ amountMinor }) => {
+      const change = { reason, amount: { amountMinor, currency: 'INR' } };
+      expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
+    });
+
+    it.each([
+      { case: 'a new title', change: { jobTitleId: 2 } },
+      { case: 'a new level', change: { levelRank: 3 } },
+    ])('keeps the position: $case', ({ change }) => {
+      expect(checkSalaryChange(context({ change: { reason, ...change } }))).toBe(
+        'POSITION_MUST_NOT_CHANGE',
+      );
+    });
+
+    it('reports the raise before the position', () => {
+      const change = {
+        reason,
+        amount: { amountMinor: 200_000_000, currency: 'INR' },
+        jobTitleId: 2,
+      };
+      expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
+    });
+  },
+);
