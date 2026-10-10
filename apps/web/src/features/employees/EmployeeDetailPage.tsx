@@ -1,12 +1,14 @@
 import { employeeDetailSchema, type EmployeeDetail } from '@acme/shared';
 import { Alert, Badge, Button, Group, Paper, Skeleton, Stack, Text, Title } from '@mantine/core';
 import { useQuery } from '@tanstack/react-query';
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { Link, useParams } from 'react-router';
 import { ApiError, apiFetch } from '../../api/client.ts';
 import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
+import { EditEmployeeModal } from './EditEmployeeModal.tsx';
+import { TerminateModal } from './TerminateModal.tsx';
 
 const BAND_TEXT = { below: 'Below band', above: 'Above band' } as const;
 const GENDERS = {
@@ -88,6 +90,7 @@ function DetailsCard({ employee }: { employee: EmployeeDetail }): ReactElement {
 export function EmployeeDetailPage(): ReactElement {
   const me = useViewer();
   const { id } = useParams();
+  const [modal, setModal] = useState<'edit' | 'terminate'>();
   const employee = useQuery({
     queryKey: ['employee', id],
     queryFn: () => apiFetch(`/api/employees/${id}`, { schema: employeeDetailSchema }),
@@ -144,8 +147,14 @@ export function EmployeeDetailPage(): ReactElement {
         </Stack>
         {canWrite && (
           <Group>
-            <Button variant="default">Edit details</Button>
-            {!terminated && <Button color="red">Terminate</Button>}
+            <Button variant="default" onClick={() => setModal('edit')}>
+              Edit details
+            </Button>
+            {!terminated && (
+              <Button color="red" onClick={() => setModal('terminate')}>
+                Terminate
+              </Button>
+            )}
           </Group>
         )}
       </Group>
@@ -156,6 +165,20 @@ export function EmployeeDetailPage(): ReactElement {
       )}
       <SalaryCard employee={data} />
       <DetailsCard employee={data} />
+      {canWrite && (
+        <>
+          <EditEmployeeModal
+            employee={data}
+            opened={modal === 'edit'}
+            onClose={() => setModal(undefined)}
+          />
+          <TerminateModal
+            employee={data}
+            opened={modal === 'terminate'}
+            onClose={() => setModal(undefined)}
+          />
+        </>
+      )}
     </Stack>
   );
 }
