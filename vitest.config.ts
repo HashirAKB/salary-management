@@ -19,6 +19,8 @@ export default defineConfig({
           root: 'apps/web',
           environment: 'jsdom',
           setupFiles: ['test/setup.ts'],
+          // A 50-row Mantine table renders slowly in jsdom when workers compete (about 5 s).
+          testTimeout: 15_000,
         },
       },
     ],
