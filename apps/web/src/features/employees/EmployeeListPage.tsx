@@ -19,7 +19,7 @@ import {
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState, type ReactElement } from 'react';
 import { Link } from 'react-router';
-import { apiDownload, apiFetch } from '../../api/client.ts';
+import { ApiError, apiDownload, apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
@@ -118,8 +118,10 @@ export function EmployeeListPage(): ReactElement {
   const canAdd = permissions.includes('employee.write');
   const canExport = permissions.includes('export.employees');
   const [exporting, setExporting] = useState(false);
+  const [exportError, setExportError] = useState<string>();
   const exportCsv = async () => {
     setExporting(true);
+    setExportError(undefined);
     try {
       const exportQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
       const { blob, filename } = await apiDownload(
@@ -131,6 +133,10 @@ export function EmployeeListPage(): ReactElement {
       link.download = filename;
       link.click();
       URL.revokeObjectURL(url);
+    } catch (error) {
+      // A 401 is handled for every call by the session listener.
+      if (!(error instanceof ApiError && error.code === 'UNAUTHENTICATED'))
+        setExportError(error instanceof Error ? error.message : 'The export failed.');
     } finally {
       setExporting(false);
     }
@@ -165,6 +171,16 @@ export function EmployeeListPage(): ReactElement {
         </Alert>
       )}
       <EmployeeFilterBar filters={filters} />
+      {exportError && (
+        <Alert color="red">
+          <Group justify="space-between">
+            <Text>{exportError}</Text>
+            <Button variant="light" onClick={() => void exportCsv()}>
+              Retry
+            </Button>
+          </Group>
+        </Alert>
+      )}
       {employees.isError && (
         <Alert color="red">
           <Group justify="space-between">
