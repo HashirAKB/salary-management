@@ -52,6 +52,7 @@ type Person = {
   firstName: string;
   lastName: string;
   band: PayBandRow;
+  salaryMinor: number;
 };
 
 const bandKey = (countryCode: string, jobTitleId: number, levelCode: string) =>
@@ -94,6 +95,7 @@ function allocateActive(seed: number, refDate: string, bands: Map<string, PayBan
               gender,
               ...nameOf(gender),
               band,
+              salaryMinor: band.midMinor,
             });
           }
         });
@@ -101,6 +103,63 @@ function allocateActive(seed: number, refDate: string, bands: Map<string, PayBan
     }
   });
   return people;
+}
+
+// 02 section 7.6 step 2: realised gaps for the four named cohorts; every other eligible cohort
+// draws its target uniformly in [-2.0, +2.0].
+const GAP_TARGETS: Record<string, number> = {
+  'IN/1/L3': 8.0,
+  'US/5/L2': 6.0,
+  'GB/1/L4': 5.3,
+  'DE/1/L2': 4.7,
+};
+
+const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
+
+/** Salary rounding step in minor units: 100 major units, 1,000 for INR (02 section 7.6 step 4). */
+const salaryStepMinor = (currencyCode: string) => (currencyCode === 'INR' ? 1000 : 100) * 100;
+
+const roundSalary = (amountMinor: number, currencyCode: string) => {
+  const step = salaryStepMinor(currencyCode);
+  return Math.round(amountMinor / step) * step;
+};
+
+// 02 section 7.6: compa-ratio draws, outliers outside the target cohorts, then one factor on
+// women's pay per eligible cohort so the realised gap meets its target, then rounding.
+function shapeSalaries(people: Person[], random: Random): void {
+  const compa = people.map(() => Math.min(1.16, Math.max(0.84, random.normal(1, 0.06))));
+
+  const outlierPool = random.shuffle(
+    people.flatMap((p, i) =>
+      bandKey(p.countryCode, p.jobTitleId, p.levelCode) in GAP_TARGETS ? [] : [i],
+    ),
+  );
+  const outliers = Math.round(outlierPool.length * 0.03);
+  outlierPool.slice(0, outliers).forEach((i) => (compa[i] = random.uniform(0.65, 0.76)));
+  outlierPool.slice(outliers, 2 * outliers).forEach((i) => (compa[i] = random.uniform(1.25, 1.4)));
+
+  const raw = people.map((p, i) => (compa[i] ?? 1) * p.band.midMinor);
+
+  const cohorts = new Map<string, { women: number[]; men: number[] }>();
+  people.forEach((p, i) => {
+    const key = bandKey(p.countryCode, p.jobTitleId, p.levelCode);
+    const cohort = cohorts.get(key) ?? { women: [], men: [] };
+    if (p.gender === 'female') cohort.women.push(i);
+    if (p.gender === 'male') cohort.men.push(i);
+    cohorts.set(key, cohort);
+  });
+  for (const [key, { women, men }] of cohorts) {
+    if (women.length < 5 || men.length < 5) continue;
+    const target = GAP_TARGETS[key] ?? random.uniform(-2, 2);
+    const meanMen = mean(men.map((i) => raw[i] ?? 0));
+    const meanWomen = mean(women.map((i) => raw[i] ?? 0));
+    const factor = (meanMen * (1 - target / 100)) / meanWomen;
+    for (const i of women) raw[i] = (raw[i] ?? 0) * factor;
+  }
+
+  people.forEach((p, i) => {
+    p.salaryMinor = roundSalary(raw[i] ?? 0, p.band.currencyCode);
+  });
 }
 
 const code = (n: number) => `E${String(n).padStart(6, '0')}`;
@@ -125,7 +184,7 @@ function toRows(people: Person[], random: Random, refDate: string) {
       hireDate,
       status: 'active',
       terminationDate: null,
-      salaryMinor: person.band.midMinor,
+      salaryMinor: person.salaryMinor,
       salaryCurrency: person.band.currencyCode,
       salaryEffectiveDate: hireDate,
       createdAt,
@@ -135,7 +194,7 @@ function toRows(people: Person[], random: Random, refDate: string) {
       id: changeRows.length + 1,
       employeeId: id,
       effectiveDate: hireDate,
-      amountMinor: person.band.midMinor,
+      amountMinor: person.salaryMinor,
       currencyCode: person.band.currencyCode,
       jobTitleId: person.jobTitleId,
       levelCode: person.levelCode,
@@ -155,6 +214,7 @@ export function generateDataset(_config: SeedConfig, seed: number, refDate: stri
   );
   const random = createRandom(seed);
   const people = allocateActive(seed, refDate, bands);
+  shapeSalaries(people, random);
   const { employeeRows, changeRows } = toRows(people, random, refDate);
   return { ...reference, employees: employeeRows, salaryChanges: changeRows };
 }
