@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { ScryptParams } from './modules/auth/password.ts';
+import { PRODUCTION_SCRYPT, type ScryptParams } from './modules/auth/password.ts';
 
 export type Config = {
   nodeEnv: 'development' | 'production' | 'test';
@@ -81,10 +81,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     askUserDailyLimit: e.ASK_USER_DAILY_LIMIT,
     askGlobalDailyLimit: e.ASK_GLOBAL_DAILY_LIMIT,
     logLevel: e.LOG_LEVEL,
-    scrypt: defaultScrypt(),
+    scrypt: PRODUCTION_SCRYPT,
   };
-}
-
-function defaultScrypt(): ScryptParams {
-  throw new Error('not implemented');
 }
