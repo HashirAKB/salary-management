@@ -40,6 +40,14 @@ export const employeeListQuerySchema = z.strictObject({
 
 export type EmployeeListQuery = z.infer<typeof employeeListQuerySchema>;
 
+// 04 section 5.7 X1 takes the list filters and sort, but no paging.
+export const employeeExportQuerySchema = employeeListQuerySchema.omit({
+  page: true,
+  pageSize: true,
+});
+
+export type EmployeeExportQuery = z.infer<typeof employeeExportQuerySchema>;
+
 const LIST_KEYS = ['country', 'department', 'jobTitle', 'level', 'gender'] as const;
 const SCALAR_KEYS = ['q', 'band', 'salaryUnchangedSince', 'sort', 'order'] as const;
 

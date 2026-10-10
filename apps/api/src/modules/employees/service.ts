@@ -1,4 +1,10 @@
-import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
+import {
+  compaRatio,
+  type EmployeeExportQuery,
+  type EmployeeListItem,
+  type EmployeeListQuery,
+  type EmployeeListResponse,
+} from '@acme/shared';
 import {
   and,
   asc,
@@ -31,6 +37,7 @@ import {
 import { parseSearch } from '../../domain/employee-search.ts';
 import { AppError, type ProblemFieldError } from '../../http/problem.ts';
 import { fxAsOf } from '../auth/sessions.ts';
+import { buildEmployeesCsv } from './csv.ts';
 
 // Values in the list filters must exist in the reference tables (brief ruling 1); the shared
 // schema only checks their shape. The path names the offending item, e.g. `country[1]`.
@@ -78,13 +85,9 @@ function orderBy({ sort = 'name', order = 'asc' }: EmployeeListQuery): SQL[] {
   return [...keys, employees.id].map((key) => dir(key));
 }
 
-// E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
-export async function listEmployees(
-  db: Db,
-  query: EmployeeListQuery,
-): Promise<EmployeeListResponse> {
-  const { page, pageSize, status, q } = query;
-  await checkListValues(db, query);
+// The conditions every filter in E1 and X1 shares; (04 section 5.4).
+function filterConditions(db: Db, query: EmployeeListQuery): SQL | undefined {
+  const { status, q } = query;
   const conditions: (SQL | undefined)[] = [
     status === 'all' ? undefined : eq(employees.status, status),
   ];
@@ -138,78 +141,96 @@ export async function listEmployees(
   if (query.salaryUnchangedSince) {
     conditions.push(lt(employees.salaryEffectiveDate, query.salaryUnchangedSince));
   }
-  const where = and(...conditions);
-  // Every employee has a band (02 section 3); the band filters read its columns.
-  const bandJoin = and(
-    eq(payBands.countryCode, employees.countryCode),
-    eq(payBands.jobTitleId, employees.jobTitleId),
-    eq(payBands.levelCode, employees.levelCode),
-  );
+  return and(...conditions);
+}
 
-  const [rows, [totals], asOf] = await Promise.all([
+// Every employee has a band (02 section 3); the band filters read its columns.
+const bandJoin = and(
+  eq(payBands.countryCode, employees.countryCode),
+  eq(payBands.jobTitleId, employees.jobTitleId),
+  eq(payBands.levelCode, employees.levelCode),
+);
+
+// Rows in the query's sort order; a limit pages them, no limit returns all of them.
+async function selectItems(
+  db: Db,
+  query: EmployeeListQuery,
+  paging?: { limit: number; offset: number },
+): Promise<EmployeeListItem[]> {
+  const select = db
+    .select({
+      employee: employees,
+      country: countries,
+      jobTitle: jobTitles,
+      department: departments,
+      level: levels,
+      band: payBands,
+      salaryUsdMinor: usdSalary,
+    })
+    .from(employees)
+    .innerJoin(countries, eq(countries.code, employees.countryCode))
+    .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
+    .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
+    .innerJoin(levels, eq(levels.code, employees.levelCode))
+    .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
+    .innerJoin(payBands, bandJoin)
+    .where(filterConditions(db, query))
+    .orderBy(...orderBy(query))
+    .$dynamic();
+  const rows = await (paging ? select.limit(paging.limit).offset(paging.offset) : select);
+  return rows.map(
+    ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
+      id: e.id,
+      employeeCode: e.employeeCode,
+      firstName: e.firstName,
+      lastName: e.lastName,
+      gender: e.gender,
+      country: { code: country.code, name: country.name },
+      department: { id: department.id, name: department.name },
+      jobTitle: { id: jobTitle.id, name: jobTitle.name },
+      level: { code: level.code, name: level.name },
+      status: e.status,
+      hireDate: e.hireDate,
+      terminationDate: e.terminationDate,
+      salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
+      salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
+      salaryEffectiveDate: e.salaryEffectiveDate,
+      compaRatio: compaRatio(e.salaryMinor, band.midMinor),
+      // Equal to min or max is inside (02 section 4).
+      bandPosition:
+        e.salaryMinor < band.minMinor
+          ? 'below'
+          : e.salaryMinor > band.maxMinor
+            ? 'above'
+            : 'inside',
+    }),
+  );
+}
+
+// E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
+export async function listEmployees(
+  db: Db,
+  query: EmployeeListQuery,
+): Promise<EmployeeListResponse> {
+  const { page, pageSize } = query;
+  await checkListValues(db, query);
+  const [items, [totals], asOf] = await Promise.all([
+    selectItems(db, query, { limit: pageSize, offset: (page - 1) * pageSize }),
     db
-      .select({
-        employee: employees,
-        country: countries,
-        jobTitle: jobTitles,
-        department: departments,
-        level: levels,
-        band: payBands,
-        salaryUsdMinor: usdSalary,
-      })
+      .select({ total: count() })
       .from(employees)
-      .innerJoin(countries, eq(countries.code, employees.countryCode))
-      .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
-      .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
-      .innerJoin(levels, eq(levels.code, employees.levelCode))
-      .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
       .innerJoin(payBands, bandJoin)
-      .where(where)
-      .orderBy(...orderBy(query))
-      .limit(pageSize)
-      .offset((page - 1) * pageSize),
-    db.select({ total: count() }).from(employees).innerJoin(payBands, bandJoin).where(where),
+      .where(filterConditions(db, query)),
     fxAsOf(db),
   ]);
   const total = totals?.total ?? 0;
-
-  return {
-    items: rows.map(
-      ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
-        id: e.id,
-        employeeCode: e.employeeCode,
-        firstName: e.firstName,
-        lastName: e.lastName,
-        gender: e.gender,
-        country: { code: country.code, name: country.name },
-        department: { id: department.id, name: department.name },
-        jobTitle: { id: jobTitle.id, name: jobTitle.name },
-        level: { code: level.code, name: level.name },
-        status: e.status,
-        hireDate: e.hireDate,
-        terminationDate: e.terminationDate,
-        salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
-        salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
-        salaryEffectiveDate: e.salaryEffectiveDate,
-        compaRatio: compaRatio(e.salaryMinor, band.midMinor),
-        // Equal to min or max is inside (02 section 4).
-        bandPosition:
-          e.salaryMinor < band.minMinor
-            ? 'below'
-            : e.salaryMinor > band.maxMinor
-              ? 'above'
-              : 'inside',
-      }),
-    ),
-    page,
-    pageSize,
-    total,
-    totalPages: Math.ceil(total / pageSize),
-    fxAsOf: asOf,
-  };
+  return { items, page, pageSize, total, totalPages: Math.ceil(total / pageSize), fxAsOf: asOf };
 }
 
 // X1 (04 section 5.7): every row matching the filters, in the list's sort order, as CSV.
-export async function exportEmployees(_db: Db, _query: EmployeeListQuery): Promise<string> {
-  throw new Error('not implemented');
+export async function exportEmployees(db: Db, query: EmployeeExportQuery): Promise<string> {
+  const listQuery = { ...query, page: 1, pageSize: 50 } as EmployeeListQuery;
+  await checkListValues(db, listQuery);
+  const [items, asOf] = await Promise.all([selectItems(db, listQuery), fxAsOf(db)]);
+  return buildEmployeesCsv(items, asOf);
 }
