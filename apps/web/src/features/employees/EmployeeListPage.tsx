@@ -1,5 +1,5 @@
 import type { EmployeeListItem } from '@acme/shared';
-import { employeeListResponseSchema } from '@acme/shared';
+import { employeeListResponseSchema, serializeEmployeeListQuery } from '@acme/shared';
 import {
   Alert,
   Badge,
@@ -23,6 +23,7 @@ import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
+import { EmployeeFilterBar } from './EmployeeFilterBar.tsx';
 import { useEmployeeFilters } from './useEmployeeFilters.ts';
 
 const BAND_LABELS = { below: 'Below', inside: 'Inside', above: 'Above' } as const;
@@ -76,14 +77,17 @@ function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement
 
 /** S-2 Employees list (04 section 8.5). */
 export function EmployeeListPage(): ReactElement {
-  const { page, pageSize, setPage, setPageSize } = useEmployeeFilters();
-  const query = { page, pageSize };
+  const filters = useEmployeeFilters();
+  const { query, page, pageSize, setPage, setPageSize } = filters;
+  // page and pageSize are always sent; the serializer leaves out every default.
+  const filterQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
   const employees = useQuery({
     queryKey: ['employees', query],
     queryFn: () =>
-      apiFetch(`/api/employees?page=${query.page}&pageSize=${query.pageSize}`, {
-        schema: employeeListResponseSchema,
-      }),
+      apiFetch(
+        `/api/employees?page=${page}&pageSize=${pageSize}${filterQuery && `&${filterQuery}`}`,
+        { schema: employeeListResponseSchema },
+      ),
     staleTime: 30_000,
     placeholderData: keepPreviousData,
   });
@@ -106,6 +110,7 @@ export function EmployeeListPage(): ReactElement {
         <Title order={1}>Employees</Title>
         {canAdd && !empty && addButton}
       </Group>
+      <EmployeeFilterBar filters={filters} />
       {employees.isError && (
         <Alert color="red">
           <Group justify="space-between">
@@ -177,7 +182,7 @@ export function EmployeeListPage(): ReactElement {
             allowDeselect={false}
             data={PAGE_SIZES}
             value={String(pageSize)}
-            onChange={(value) => value && setPageSize(Number(value))}
+            onChange={(value) => value && setPageSize(Number(value) as 25 | 50 | 100)}
           />
           <FxAsOf date={data.fxAsOf} />
         </Group>
