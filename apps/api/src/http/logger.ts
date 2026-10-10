@@ -4,17 +4,35 @@ import type { Config } from '../config.ts';
 const REDACTED = '[Redacted]';
 const SECRET_KEYS = new Set(['cookie', 'set-cookie', 'password']);
 
+const MAX_DEPTH = 8;
+
+const isPlain = (value: object): boolean => {
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+};
+
 // Salary amounts (`*Minor`), passwords and the session cookie never reach the logs, at any depth
-// (05 section 5.0).
-function redact(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(redact);
+// (05 section 5.0). Pino runs this before Fastify's serializers, so a log call can hand it live
+// objects with cycles (the request, its socket). Only plain objects and arrays are walked; class
+// instances are left to the serializers, and a depth cap and a visited set stop any cycle.
+function redact(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (value === null || typeof value !== 'object') return value;
-  return Object.fromEntries(
-    Object.entries(value).map(([key, inner]) => [
-      key,
-      SECRET_KEYS.has(key.toLowerCase()) || key.endsWith('Minor') ? REDACTED : redact(inner),
-    ]),
-  );
+  const walkable = Array.isArray(value) || isPlain(value);
+  if (!walkable || depth >= MAX_DEPTH || seen.has(value)) return walkable ? '[Circular]' : value;
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) return value.map((inner) => redact(inner, depth + 1, seen));
+    return Object.fromEntries(
+      Object.entries(value).map(([key, inner]) => [
+        key,
+        SECRET_KEYS.has(key.toLowerCase()) || key.endsWith('Minor')
+          ? REDACTED
+          : redact(inner, depth + 1, seen),
+      ]),
+    );
+  } finally {
+    seen.delete(value);
+  }
 }
 
 export function loggerOptions(
