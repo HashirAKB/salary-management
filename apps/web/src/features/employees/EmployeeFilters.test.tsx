@@ -1,4 +1,4 @@
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { useLocation, useNavigationType } from 'react-router';
@@ -151,5 +151,88 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
     );
     expect(screen.getByPlaceholderText('Search name or employee ID')).toHaveValue('');
     expect(pill('India')).not.toBeInTheDocument();
+  });
+});
+
+describe('sorting, unrecognised URL values and the empty filtered state (04 section 8.5)', () => {
+  const header = (name: string) => screen.getByRole('columnheader', { name });
+
+  it('clicking a sortable header sets sort and order in the URL', async () => {
+    const requests: URLSearchParams[] = [];
+    servesEmployees(requests);
+    const user = userEvent.setup();
+    renderList('/employees');
+    await screen.findByText('Showing 1 to 50 of 120 employees');
+    expect(header('Name')).toHaveAttribute('aria-sort', 'ascending');
+
+    await user.click(screen.getByRole('button', { name: 'Salary' }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees\?sort=salaryUsd$/),
+    );
+    expect(screen.getByLabelText('location')).toHaveAttribute('data-navigation', 'PUSH');
+    expect(header('Salary')).toHaveAttribute('aria-sort', 'ascending');
+    await waitFor(() => expect(requests.at(-1)?.get('sort')).toBe('salaryUsd'));
+
+    await user.click(screen.getByRole('button', { name: 'Salary' }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('location')).toHaveTextContent(
+        /^\/employees\?sort=salaryUsd&order=desc$/,
+      ),
+    );
+    expect(header('Salary')).toHaveAttribute('aria-sort', 'descending');
+    await waitFor(() => expect(requests.at(-1)?.get('order')).toBe('desc'));
+
+    await user.click(screen.getByRole('button', { name: 'Hire date' }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees\?sort=hireDate$/),
+    );
+    expect(header('Salary')).not.toHaveAttribute('aria-sort', 'descending');
+  });
+
+  it('drops unknown URL values, rewrites the URL and shows the notice', async () => {
+    const requests: URLSearchParams[] = [];
+    servesEmployees(requests);
+    renderList('/employees?country=IN,XX&level=L9&band=sideways&sort=bogus&nope=1&status=all');
+
+    expect(
+      await screen.findByText("Some filters in this link weren't recognised and were removed."),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByLabelText('location')).toHaveTextContent(
+        /^\/employees\?status=all&country=IN$/,
+      ),
+    );
+    expect(screen.getByLabelText('location')).toHaveAttribute('data-navigation', 'REPLACE');
+    await screen.findByText('Showing 1 to 50 of 120 employees');
+    for (const request of requests) {
+      expect(request.get('country')).toBe('IN');
+      expect(request.get('level')).toBeNull();
+      expect(request.get('band')).toBeNull();
+      expect(request.get('sort')).toBeNull();
+      expect(request.get('nope')).toBeNull();
+    }
+  });
+
+  it('shows "No employees match these filters." with "Clear filters" for an empty filtered result', async () => {
+    servesEmployees([]);
+    server.use(
+      http.get('/api/employees', () =>
+        HttpResponse.json(anEmployeeListResponse({ items: [], total: 0, totalPages: 0 })),
+      ),
+    );
+    const user = userEvent.setup();
+    renderList('/employees?country=IN');
+
+    const message = await screen.findByText('No employees match these filters.');
+    expect(screen.queryByText('No employees yet.')).not.toBeInTheDocument();
+
+    await user.click(within(message.parentElement!).getByRole('button', { name: 'Clear filters' }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/),
+    );
   });
 });
