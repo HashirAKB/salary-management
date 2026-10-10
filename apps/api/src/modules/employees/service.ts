@@ -1,5 +1,19 @@
 import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
-import { and, asc, count, eq, gt, gte, inArray, lt, lte, or, sql, type SQL } from 'drizzle-orm';
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  gt,
+  gte,
+  inArray,
+  lt,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { usdMinorSql } from '../../db/money-sql.ts';
 import {
@@ -48,6 +62,20 @@ async function checkListValues(db: Db, query: EmployeeListQuery): Promise<void> 
       errors.length === 1 ? '1 field is invalid.' : `${errors.length} fields are invalid.`;
     throw new AppError(400, 'VALIDATION_FAILED', detail, errors);
   }
+}
+
+const usdSalary = usdMinorSql(employees.salaryMinor, fxRates.usdPerUnitMicros);
+
+// Every sort ends with id so that pages never repeat or skip a row; id follows the order.
+function orderBy({ sort = 'name', order = 'asc' }: EmployeeListQuery): SQL[] {
+  const dir = order === 'asc' ? asc : desc;
+  const keys =
+    sort === 'salaryUsd'
+      ? [usdSalary]
+      : sort === 'hireDate'
+        ? [employees.hireDate]
+        : [employees.lastName, employees.firstName];
+  return [...keys, employees.id].map((key) => dir(key));
 }
 
 // E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
@@ -127,7 +155,7 @@ export async function listEmployees(
         department: departments,
         level: levels,
         band: payBands,
-        salaryUsdMinor: usdMinorSql(employees.salaryMinor, fxRates.usdPerUnitMicros),
+        salaryUsdMinor: usdSalary,
       })
       .from(employees)
       .innerJoin(countries, eq(countries.code, employees.countryCode))
@@ -137,7 +165,7 @@ export async function listEmployees(
       .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
       .innerJoin(payBands, bandJoin)
       .where(where)
-      .orderBy(asc(employees.lastName), asc(employees.firstName), asc(employees.id))
+      .orderBy(...orderBy(query))
       .limit(pageSize)
       .offset((page - 1) * pageSize),
     db.select({ total: count() }).from(employees).innerJoin(payBands, bandJoin).where(where),
