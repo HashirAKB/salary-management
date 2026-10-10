@@ -9,6 +9,7 @@ import {
   anEmployeeListResponse,
   someEmployees,
 } from '../../../test/fixtures/employees.ts';
+import { aProblem } from '../../../test/fixtures/problem.ts';
 import { aMeResponse } from '../../../test/fixtures/me.ts';
 import { render } from '../../../test/render.tsx';
 import { server } from '../../../test/server.ts';
@@ -168,5 +169,59 @@ describe('employee list page (04 section 8.5)', () => {
     expect(await screen.findByText('Showing 101 to 120 of 120 employees')).toBeInTheDocument();
     expect(screen.getByLabelText('location')).toHaveTextContent('/employees?page=3');
     expect(screen.queryByText('This page is past the end of the results.')).not.toBeInTheDocument();
+  });
+
+  it('shows the error alert with "Retry" on a 500 problem', async () => {
+    loggedInAs('hr_viewer');
+    let calls = 0;
+    server.use(
+      http.get('/api/employees', () => {
+        calls += 1;
+        return calls === 1
+          ? HttpResponse.json(
+              aProblem({ status: 500, code: 'INTERNAL', detail: 'The server hit a snag.' }),
+              { status: 500, headers: { 'content-type': 'application/problem+json' } },
+            )
+          : HttpResponse.json(anEmployeeListResponse());
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AppRoutes />, { route: '/employees' });
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The server hit a snag.');
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    expect(await screen.findByText('Priya Nair')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
+
+  it('shows "No employees yet." with "Add employee" for HR Admin', async () => {
+    loggedInAs('hr_admin');
+    server.use(
+      http.get('/api/employees', () =>
+        HttpResponse.json(anEmployeeListResponse({ items: [], total: 0, totalPages: 0 })),
+      ),
+    );
+    render(<AppRoutes />, { route: '/employees' });
+
+    expect(await screen.findByText('No employees yet.')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'Add employee' })).toHaveLength(1);
+    expect(screen.queryByText('This page is past the end of the results.')).not.toBeInTheDocument();
+  });
+
+  it.each<[Role, boolean]>([
+    ['hr_admin', true],
+    ['hr_viewer', false],
+  ])('shows "Add employee" to HR Admin only (%s)', async (role, shown) => {
+    loggedInAs(role);
+    server.use(http.get('/api/employees', () => HttpResponse.json(anEmployeeListResponse())));
+    render(<AppRoutes />, { route: '/employees' });
+    await screen.findByText('Priya Nair');
+
+    const link = screen.queryByRole('link', { name: 'Add employee' });
+
+    if (shown) expect(link).toHaveAttribute('href', '/employees/new');
+    else expect(link).not.toBeInTheDocument();
   });
 });
