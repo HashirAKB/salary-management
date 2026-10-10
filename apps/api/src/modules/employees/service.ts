@@ -18,6 +18,7 @@ import {
   inArray,
   lt,
   lte,
+  max,
   or,
   sql,
   type SQL,
@@ -35,7 +36,9 @@ import {
   jobTitles,
   levels,
   payBands,
+  salaryChanges,
 } from '../../db/schema.ts';
+import { nameSearch } from '../../domain/name-search.ts';
 import { parseSearch } from '../../domain/employee-search.ts';
 import { AppError, type ProblemFieldError } from '../../http/problem.ts';
 import { fxAsOf } from '../auth/sessions.ts';
@@ -287,9 +290,51 @@ export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
 
 // E3 (04 section 5.4): one write transaction inserts the employee and its hire history row.
 export async function createEmployee(
-  _db: Db,
-  _body: CreateEmployeeBody,
-  _context: { today: string; now: string; userId: number },
+  db: Db,
+  body: CreateEmployeeBody,
+  context: { today: string; now: string; userId: number },
 ): Promise<EmployeeDetail> {
-  throw new Error('not implemented');
+  const { startingSalary: salary } = body;
+  const id = await db.transaction(async (tx) => {
+    const [maxes] = await tx
+      .select({
+        employee: max(employees.id),
+        change: sql<number>`(SELECT max(id) FROM ${salaryChanges})`,
+      })
+      .from(employees);
+    const id = (maxes?.employee ?? 0) + 1;
+    await tx.insert(employees).values({
+      id,
+      employeeCode: `E${String(id).padStart(6, '0')}`,
+      firstName: body.firstName,
+      lastName: body.lastName,
+      nameSearch: nameSearch(body.firstName, body.lastName),
+      gender: body.gender,
+      countryCode: body.countryCode,
+      jobTitleId: body.jobTitleId,
+      levelCode: body.levelCode,
+      hireDate: body.hireDate,
+      status: 'active',
+      terminationDate: null,
+      salaryMinor: salary.amountMinor,
+      salaryCurrency: salary.currency,
+      salaryEffectiveDate: body.hireDate,
+      createdAt: context.now,
+      updatedAt: context.now,
+    });
+    await tx.insert(salaryChanges).values({
+      id: (maxes?.change ?? 0) + 1,
+      employeeId: id,
+      effectiveDate: body.hireDate,
+      amountMinor: salary.amountMinor,
+      currencyCode: salary.currency,
+      jobTitleId: body.jobTitleId,
+      levelCode: body.levelCode,
+      reason: 'hire',
+      changedByUserId: context.userId,
+      createdAt: context.now,
+    });
+    return id;
+  });
+  return getEmployee(db, id);
 }
