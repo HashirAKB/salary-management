@@ -1,5 +1,6 @@
 import {
   compaRatio,
+  type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListItem,
   type EmployeeListQuery,
@@ -233,4 +234,52 @@ export async function exportEmployees(db: Db, query: EmployeeExportQuery): Promi
   await checkListValues(db, listQuery);
   const [items, asOf] = await Promise.all([selectItems(db, listQuery), fxAsOf(db)]);
   return buildEmployeesCsv(items, asOf);
+}
+
+// E2 (04 section 5.4): one employee with its pay band.
+export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
+  const [row] = await db
+    .select({
+      employee: employees,
+      country: countries,
+      jobTitle: jobTitles,
+      department: departments,
+      level: levels,
+      band: payBands,
+      salaryUsdMinor: usdSalary,
+    })
+    .from(employees)
+    .innerJoin(countries, eq(countries.code, employees.countryCode))
+    .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
+    .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
+    .innerJoin(levels, eq(levels.code, employees.levelCode))
+    .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
+    .innerJoin(payBands, bandJoin)
+    .where(eq(employees.id, id));
+  if (!row) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+  const { employee: e, country, jobTitle, department, level, band } = row;
+  const money = (amountMinor: number) => ({ amountMinor, currency: e.salaryCurrency });
+  return {
+    id: e.id,
+    employeeCode: e.employeeCode,
+    firstName: e.firstName,
+    lastName: e.lastName,
+    gender: e.gender,
+    country: { code: country.code, name: country.name },
+    department: { id: department.id, name: department.name },
+    jobTitle: { id: jobTitle.id, name: jobTitle.name },
+    level: { code: level.code, name: level.name },
+    status: e.status,
+    hireDate: e.hireDate,
+    terminationDate: e.terminationDate,
+    salary: money(e.salaryMinor),
+    salaryUsd: { amountMinor: row.salaryUsdMinor, currency: 'USD' },
+    salaryEffectiveDate: e.salaryEffectiveDate,
+    compaRatio: compaRatio(e.salaryMinor, band.midMinor),
+    bandPosition:
+      e.salaryMinor < band.minMinor ? 'below' : e.salaryMinor > band.maxMinor ? 'above' : 'inside',
+    band: { min: money(band.minMinor), mid: money(band.midMinor), max: money(band.maxMinor) },
+    createdAt: e.createdAt,
+    updatedAt: e.updatedAt,
+  };
 }

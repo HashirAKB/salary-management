@@ -1,6 +1,8 @@
 import {
   employeeExportQuerySchema,
+  employeeIdParamsSchema,
   employeeListQuerySchema,
+  type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListQuery,
   type EmployeeListResponse,
@@ -9,7 +11,7 @@ import type { FastifyInstance } from 'fastify';
 import type { Db } from '../../db/client.ts';
 import type { Clock } from '../../domain/clock.ts';
 import { requires } from '../../http/guard.ts';
-import { exportEmployees, listEmployees } from './service.ts';
+import { exportEmployees, getEmployee, listEmployees } from './service.ts';
 
 // E1 (04 section 5.4).
 export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Clock }) {
@@ -18,6 +20,14 @@ export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Cloc
     { onRequest: requires('employee.read'), schema: { querystring: employeeListQuerySchema } },
     async (request): Promise<EmployeeListResponse> =>
       listEmployees(deps.db, request.query as EmployeeListQuery),
+  );
+
+  // E2 (04 section 5.4).
+  app.get(
+    '/api/employees/:id',
+    { onRequest: requires('employee.read'), schema: { params: employeeIdParamsSchema } },
+    async (request): Promise<EmployeeDetail> =>
+      getEmployee(deps.db, (request.params as { id: number }).id),
   );
 
   // X1 (04 section 5.7).

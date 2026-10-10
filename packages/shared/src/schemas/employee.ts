@@ -109,3 +109,17 @@ export const employeeListResponseSchema = z.object({
 
 export type EmployeeListItem = z.infer<typeof employeeListItemSchema>;
 export type EmployeeListResponse = z.infer<typeof employeeListResponseSchema>;
+
+// 04 section 5.4 E2: the list item plus the band and timestamps.
+export const employeeDetailSchema = employeeListItemSchema.extend({
+  band: z.object({ min: moneySchema, mid: moneySchema, max: moneySchema }),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export type EmployeeDetail = z.infer<typeof employeeDetailSchema>;
+
+// 04 section 5.4 E2 to E5 path.
+export const employeeIdParamsSchema = z.strictObject({
+  id: z.coerce.number().int().min(1),
+});
