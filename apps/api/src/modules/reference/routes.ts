@@ -1,10 +1,19 @@
-import type { ReferenceResponse } from '@acme/shared';
-import { asc } from 'drizzle-orm';
+import { payBandParamsSchema, type PayBandResponse, type ReferenceResponse } from '@acme/shared';
+import { and, asc, eq } from 'drizzle-orm';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../../db/client.ts';
-import { countries, departments, fxRates, jobTitles, levels } from '../../db/schema.ts';
+import {
+  type LevelCode,
+  countries,
+  departments,
+  fxRates,
+  jobTitles,
+  levels,
+  payBands,
+} from '../../db/schema.ts';
 import { GENDERS } from '../../domain/genders.ts';
 import { requires } from '../../http/guard.ts';
+import { AppError } from '../../http/problem.ts';
 import { fxAsOf } from '../auth/sessions.ts';
 
 // Static in v1 (04 section 5.3). `hire` is written by the system, so it is not a UI reason.
@@ -51,6 +60,45 @@ export function referenceRoutes(app: FastifyInstance, deps: { db: Db }) {
             usdPerUnit: microsToDisplay(r.usdPerUnitMicros),
           })),
         },
+      };
+    },
+  );
+
+  // R2 (04 section 5.3).
+  app.get(
+    '/api/pay-bands/:countryCode/:jobTitleId/:levelCode',
+    { onRequest: requires('reference.read'), schema: { params: payBandParamsSchema } },
+    async (request): Promise<PayBandResponse> => {
+      const { countryCode, jobTitleId, levelCode } = request.params as {
+        countryCode: string;
+        jobTitleId: number;
+        levelCode: LevelCode;
+      };
+      const [band] = await deps.db
+        .select()
+        .from(payBands)
+        .where(
+          and(
+            eq(payBands.countryCode, countryCode),
+            eq(payBands.jobTitleId, jobTitleId),
+            eq(payBands.levelCode, levelCode),
+          ),
+        );
+      if (!band) {
+        throw new AppError(
+          404,
+          'PAY_BAND_NOT_FOUND',
+          "There's no pay band for this country, job title and level.",
+        );
+      }
+      const money = (amountMinor: number) => ({ amountMinor, currency: band.currencyCode });
+      return {
+        countryCode,
+        jobTitleId,
+        levelCode,
+        min: money(band.minMinor),
+        mid: money(band.midMinor),
+        max: money(band.maxMinor),
       };
     },
   );

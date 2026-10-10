@@ -1,15 +1,30 @@
 import {
   employeeExportQuerySchema,
+  createEmployeeBodySchema,
+  employeeIdParamsSchema,
   employeeListQuerySchema,
+  terminateBodySchema,
+  updateEmployeeBodySchema,
+  type CreateEmployeeBody,
+  type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListQuery,
   type EmployeeListResponse,
+  type TerminateBody,
+  type UpdateEmployeeBody,
 } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../../db/client.ts';
 import type { Clock } from '../../domain/clock.ts';
 import { requires } from '../../http/guard.ts';
-import { exportEmployees, listEmployees } from './service.ts';
+import {
+  createEmployee,
+  exportEmployees,
+  getEmployee,
+  listEmployees,
+  terminateEmployee,
+  updateEmployee,
+} from './service.ts';
 
 // E1 (04 section 5.4).
 export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Clock }) {
@@ -18,6 +33,60 @@ export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Cloc
     { onRequest: requires('employee.read'), schema: { querystring: employeeListQuerySchema } },
     async (request): Promise<EmployeeListResponse> =>
       listEmployees(deps.db, request.query as EmployeeListQuery),
+  );
+
+  // E2 (04 section 5.4).
+  app.get(
+    '/api/employees/:id',
+    { onRequest: requires('employee.read'), schema: { params: employeeIdParamsSchema } },
+    async (request): Promise<EmployeeDetail> =>
+      getEmployee(deps.db, (request.params as { id: number }).id),
+  );
+
+  // E3 (04 section 5.4).
+  app.post(
+    '/api/employees',
+    { onRequest: requires('employee.write'), schema: { body: createEmployeeBodySchema } },
+    async (request, reply): Promise<EmployeeDetail> => {
+      const created = await createEmployee(deps.db, request.body as CreateEmployeeBody, {
+        today: deps.clock.today(),
+        now: deps.clock.now().toISOString(),
+        userId: request.viewer!.id,
+      });
+      return reply.code(201).header('Location', `/api/employees/${created.id}`).send(created);
+    },
+  );
+
+  // E4 (04 section 5.4).
+  app.patch(
+    '/api/employees/:id',
+    {
+      onRequest: requires('employee.write'),
+      schema: { params: employeeIdParamsSchema, body: updateEmployeeBodySchema },
+    },
+    async (request): Promise<EmployeeDetail> =>
+      updateEmployee(
+        deps.db,
+        (request.params as { id: number }).id,
+        request.body as UpdateEmployeeBody,
+        deps.clock.now().toISOString(),
+      ),
+  );
+
+  // E5 (04 section 5.4).
+  app.post(
+    '/api/employees/:id/termination',
+    {
+      onRequest: requires('employee.write'),
+      schema: { params: employeeIdParamsSchema, body: terminateBodySchema },
+    },
+    async (request): Promise<EmployeeDetail> =>
+      terminateEmployee(
+        deps.db,
+        (request.params as { id: number }).id,
+        request.body as TerminateBody,
+        { today: deps.clock.today(), now: deps.clock.now().toISOString() },
+      ),
   );
 
   // X1 (04 section 5.7).

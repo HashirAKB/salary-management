@@ -14,7 +14,12 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
   'POST /api/auth/logout': 'public',
   'GET /api/auth/me': 'authenticated',
   'GET /api/reference': 'reference.read',
+  'GET /api/pay-bands/:countryCode/:jobTitleId/:levelCode': 'reference.read',
   'GET /api/employees': 'employee.read',
+  'GET /api/employees/:id': 'employee.read',
+  'POST /api/employees': 'employee.write',
+  'PATCH /api/employees/:id': 'employee.write',
+  'POST /api/employees/:id/termination': 'employee.write',
   'GET /api/exports/employees.csv': 'export.employees',
 };
 

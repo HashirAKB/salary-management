@@ -1,6 +1,8 @@
 import {
+  employeeDetailSchema,
   employeeListItemSchema,
   employeeListResponseSchema,
+  type EmployeeDetail,
   type EmployeeListItem,
   type EmployeeListResponse,
 } from '@acme/shared';
@@ -51,3 +53,16 @@ export const someEmployees = (count: number, firstId = 1): EmployeeListItem[] =>
       lastName: `Last${firstId + index}`,
     }),
   );
+
+export const anEmployeeDetail = (overrides: Partial<EmployeeDetail> = {}): EmployeeDetail =>
+  employeeDetailSchema.parse({
+    ...anEmployeeListItem(),
+    band: {
+      min: { amountMinor: 160000000, currency: 'INR' },
+      mid: { amountMinor: 204000000, currency: 'INR' },
+      max: { amountMinor: 250000000, currency: 'INR' },
+    },
+    createdAt: '2021-07-12T09:00:00.000Z',
+    updatedAt: '2026-04-01T09:00:00.000Z',
+    ...overrides,
+  });

@@ -24,6 +24,7 @@ import {
 } from 'react-router';
 import { onUnauthenticated } from '../api/client.ts';
 import { ME_KEY, useLogout, useMe } from '../features/auth/useSession.ts';
+import { ToastProvider } from './Toasts.tsx';
 
 const NAV: { to: string; label: string; action: Action }[] = [
   { to: '/employees', label: 'Employees', action: 'employee.read' },
@@ -153,7 +154,9 @@ export function Shell(): ReactElement {
         </Group>
       </AppShell.Header>
       <AppShell.Main>
-        <Outlet context={me.data} />
+        <ToastProvider>
+          <Outlet context={me.data} />
+        </ToastProvider>
       </AppShell.Main>
     </AppShell>
   );

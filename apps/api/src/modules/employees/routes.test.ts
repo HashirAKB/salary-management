@@ -1,7 +1,7 @@
 import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
+import { aReferenceSet, anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
 import { testApp, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
 import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
@@ -410,5 +410,486 @@ describe('GET /api/employees (E1)', () => {
         items.map((item: { salaryUsd: { amountMinor: number } }) => item.salaryUsd.amountMinor),
       ).toEqual([toUsdMinor(44, INR_MICROS), toUsdMinor(43, INR_MICROS)]);
     });
+  });
+});
+
+const INR_MICROS = 11_500;
+
+describe('GET /api/employees/:id (E2)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function setup(seed: (db: Db) => Promise<number | void>) {
+    const db = await testDb();
+    const id = await seed(db);
+    const { cookie } = await loggedInAs(db, 'hr_viewer');
+    app = testApp({ db });
+    return {
+      id,
+      get: (path: string | number | void = id) =>
+        app!.inject({ method: 'GET', url: `/api/employees/${path}`, headers: { cookie } }),
+    };
+  }
+
+  it('returns one employee with band min, mid and max, compa-ratio and timestamps', async () => {
+    const band = generateBands().find(
+      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+    )!;
+    const { get } = await setup(async (db) => (await anEmployee().insert(db)).id);
+
+    const response = await get();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      id: 1,
+      employeeCode: 'E000001',
+      firstName: 'Asha',
+      lastName: 'Rao',
+      gender: 'female',
+      country: { code: 'IN', name: 'India' },
+      department: { id: expect.any(Number), name: 'Engineering' },
+      jobTitle: { id: SOFTWARE_ENGINEER, name: 'Software Engineer' },
+      level: { code: 'L3', name: 'Senior' },
+      status: 'active',
+      hireDate: '2022-01-10',
+      terminationDate: null,
+      salary: { amountMinor: band.midMinor, currency: 'INR' },
+      salaryUsd: { amountMinor: toUsdMinor(band.midMinor, INR_MICROS), currency: 'USD' },
+      salaryEffectiveDate: '2022-01-10',
+      compaRatio: 1,
+      bandPosition: 'inside',
+      band: {
+        min: { amountMinor: band.minMinor, currency: 'INR' },
+        mid: { amountMinor: band.midMinor, currency: 'INR' },
+        max: { amountMinor: band.maxMinor, currency: 'INR' },
+      },
+      createdAt: '2022-01-10T00:00:00.000Z',
+      updatedAt: '2022-01-10T00:00:00.000Z',
+    });
+  });
+
+  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown id and 400 for a non-integer id', async () => {
+    const { get } = await setup(async (db) => (await anEmployee().insert(db)).id);
+
+    const missing = await get(999);
+    const malformed = await get('abc');
+    const zero = await get(0);
+
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: 'EMPLOYEE_NOT_FOUND' });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(zero.statusCode).toBe(400);
+  });
+});
+
+describe('POST /api/employees (E3)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  const bandMid = generateBands().find(
+    (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+  )!.midMinor;
+  const validBody = {
+    firstName: 'Meera',
+    lastName: 'Iyer',
+    gender: 'female',
+    countryCode: 'IN',
+    jobTitleId: SOFTWARE_ENGINEER,
+    levelCode: 'L3',
+    hireDate: '2026-10-01',
+    startingSalary: { amountMinor: bandMid, currency: 'INR' },
+  };
+
+  async function setup(
+    seed: (db: Db) => Promise<void> = async () => {},
+    reference = aReferenceSet(),
+  ) {
+    const db = await testDb(reference);
+    await seed(db);
+    const { cookie, user } = await loggedInAs(db, 'hr_admin');
+    app = testApp({ db });
+    return {
+      db,
+      user,
+      post: (body: object = validBody) =>
+        app!.inject({ method: 'POST', url: '/api/employees', headers: { cookie }, payload: body }),
+    };
+  }
+
+  const rows = async (db: Db, sql: string) =>
+    (await db.$client.execute(sql)).rows.map((row) => ({ ...row }));
+
+  it('creating an employee returns 201 with Location, the next employee code, and a hire history row on the hire date', async () => {
+    const { db, user, post } = await setup(async (db) => {
+      await anEmployee().insert(db);
+      await anEmployee().insert(db);
+    });
+
+    const response = await post();
+
+    expect(response.statusCode).toBe(201);
+    expect(response.headers.location).toBe('/api/employees/3');
+    expect(response.json()).toMatchObject({
+      id: 3,
+      employeeCode: 'E000003',
+      firstName: 'Meera',
+      lastName: 'Iyer',
+      status: 'active',
+      terminationDate: null,
+      hireDate: '2026-10-01',
+      salary: { amountMinor: bandMid, currency: 'INR' },
+      salaryEffectiveDate: '2026-10-01',
+      compaRatio: 1,
+      bandPosition: 'inside',
+    });
+    expect(
+      await rows(
+        db,
+        'SELECT effective_date, amount_minor, currency_code, job_title_id, level_code, reason, changed_by_user_id FROM salary_changes WHERE employee_id = 3',
+      ),
+    ).toEqual([
+      {
+        effective_date: '2026-10-01',
+        amount_minor: bandMid,
+        currency_code: 'INR',
+        job_title_id: SOFTWARE_ENGINEER,
+        level_code: 'L3',
+        reason: 'hire',
+        changed_by_user_id: user.id,
+      },
+    ]);
+  });
+
+  it("the new employee's current-salary columns equal the hire row", async () => {
+    const { db, post } = await setup();
+
+    await post({ ...validBody, startingSalary: { amountMinor: bandMid + 777, currency: 'INR' } });
+
+    expect(
+      await rows(
+        db,
+        `SELECT e.salary_minor, e.salary_currency, e.salary_effective_date, e.name_search
+         FROM employees e JOIN salary_changes s ON s.employee_id = e.id
+         WHERE s.reason = 'hire' AND e.salary_minor = s.amount_minor
+           AND e.salary_currency = s.currency_code AND e.salary_effective_date = s.effective_date`,
+      ),
+    ).toEqual([
+      {
+        salary_minor: bandMid + 777,
+        salary_currency: 'INR',
+        salary_effective_date: '2026-10-01',
+        name_search: 'meera iyer',
+      },
+    ]);
+  });
+
+  describe('rules', () => {
+    const problemOf = (response: { statusCode: number; json: () => unknown }) => ({
+      status: response.statusCode,
+      code: (response.json() as { code: string }).code,
+    });
+    const employeeCount = async (db: Db) =>
+      (await rows(db, 'SELECT count(*) AS n FROM employees'))[0]?.n;
+
+    it('rejects a hire date after today with 422 DATE_IN_FUTURE', async () => {
+      const { db, post } = await setup();
+
+      const response = await post({ ...validBody, hireDate: '2026-10-10' });
+
+      expect(problemOf(response)).toEqual({ status: 422, code: 'DATE_IN_FUTURE' });
+      expect(await employeeCount(db)).toBe(0);
+    });
+
+    it('accepts a hire date of today', async () => {
+      const { post } = await setup();
+
+      const response = await post({ ...validBody, hireDate: '2026-10-09' });
+
+      expect(response.statusCode).toBe(201);
+    });
+
+    it('rejects a salary in the wrong currency with 422 SALARY_CURRENCY_MISMATCH', async () => {
+      const { db, post } = await setup();
+
+      const response = await post({
+        ...validBody,
+        startingSalary: { amountMinor: bandMid, currency: 'USD' },
+      });
+
+      expect(problemOf(response)).toEqual({ status: 422, code: 'SALARY_CURRENCY_MISMATCH' });
+      expect(await employeeCount(db)).toBe(0);
+    });
+
+    it('rejects a position with no band with 422 NO_PAY_BAND', async () => {
+      const { db, post } = await setup(
+        async () => {},
+        aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L3'),
+      );
+
+      const response = await post();
+
+      expect(problemOf(response)).toEqual({ status: 422, code: 'NO_PAY_BAND' });
+      expect(await employeeCount(db)).toBe(0);
+    });
+
+    it('checks the create rules in order: future date, then currency, then band', async () => {
+      const { post } = await setup(
+        async () => {},
+        aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L3'),
+      );
+      const wrongCurrency = { amountMinor: bandMid, currency: 'USD' };
+
+      const allThree = await post({
+        ...validBody,
+        hireDate: '2026-10-10',
+        startingSalary: wrongCurrency,
+      });
+      const currencyAndBand = await post({ ...validBody, startingSalary: wrongCurrency });
+
+      expect(problemOf(allThree).code).toBe('DATE_IN_FUTURE');
+      expect(problemOf(currencyAndBand).code).toBe('SALARY_CURRENCY_MISMATCH');
+    });
+
+    it('allows a starting salary outside the band', async () => {
+      const { post } = await setup();
+
+      const response = await post({
+        ...validBody,
+        startingSalary: { amountMinor: 1, currency: 'INR' },
+      });
+
+      expect(response.statusCode).toBe(201);
+      expect(response.json()).toMatchObject({ bandPosition: 'below' });
+    });
+  });
+});
+
+describe('PATCH /api/employees/:id (E4)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
+    const db = await testDb();
+    await seed(db);
+    const { cookie } = await loggedInAs(db, 'hr_admin');
+    app = testApp({ db });
+    return {
+      db,
+      patch: (body: object, id: number | string = 1) =>
+        app!.inject({
+          method: 'PATCH',
+          url: `/api/employees/${id}`,
+          headers: { cookie },
+          payload: body,
+        }),
+      search: async (q: string) =>
+        (
+          await app!.inject({
+            method: 'GET',
+            url: `/api/employees?q=${encodeURIComponent(q)}`,
+            headers: { cookie },
+          })
+        ).json().items as { id: number }[],
+    };
+  }
+
+  it('editing the last name updates name_search, so a search finds the new name', async () => {
+    const { patch, search } = await setup(async (db) => {
+      await anEmployee().named('Asha', 'Rao').insert(db);
+    });
+
+    const response = await patch({ lastName: 'Müller' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: 1,
+      firstName: 'Asha',
+      lastName: 'Müller',
+      updatedAt: '2026-10-09T09:00:00.000Z',
+    });
+    expect((await search('muller')).map((item) => item.id)).toEqual([1]);
+    expect(await search('rao')).toEqual([]);
+  });
+
+  it('changes gender without touching the names', async () => {
+    const { patch } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    const response = await patch({ gender: 'not_disclosed' });
+
+    expect(response.json()).toMatchObject({
+      firstName: 'Asha',
+      lastName: 'Rao',
+      gender: 'not_disclosed',
+    });
+  });
+
+  it.each(['jobTitleId', 'levelCode', 'countryCode'])(
+    'rejects a PATCH containing %s with 400 naming the key',
+    async (key) => {
+      const { patch, db } = await setup(async (db) => {
+        await anEmployee().insert(db);
+      });
+
+      const response = await patch({ lastName: 'Changed', [key]: 'L4' });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe('VALIDATION_FAILED');
+      expect(JSON.stringify(response.json().errors)).toContain(key);
+      expect(
+        (await db.$client.execute('SELECT last_name FROM employees WHERE id = 1')).rows[0]
+          ?.last_name,
+      ).toBe('Rao');
+    },
+  );
+
+  it('rejects an empty body and a formula-leading name with 400', async () => {
+    const { patch } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    const empty = await patch({});
+    const formula = await patch({ firstName: '=cmd' });
+
+    expect(empty.statusCode).toBe(400);
+    expect(formula.statusCode).toBe(400);
+    expect(formula.json().errors[0].path).toBe('firstName');
+  });
+
+  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown id', async () => {
+    const { patch } = await setup();
+
+    const response = await patch({ lastName: 'Rao' }, 999);
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json().code).toBe('EMPLOYEE_NOT_FOUND');
+  });
+
+  it("edits a terminated employee's details", async () => {
+    const { patch } = await setup(async (db) => {
+      await anEmployee().terminatedOn('2025-01-31').insert(db);
+    });
+
+    const response = await patch({ firstName: 'Ashaa' });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      firstName: 'Ashaa',
+      status: 'terminated',
+      terminationDate: '2025-01-31',
+    });
+  });
+});
+
+describe('POST /api/employees/:id/termination (E5)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
+    const db = await testDb();
+    await seed(db);
+    const { cookie } = await loggedInAs(db, 'hr_admin');
+    app = testApp({ db });
+    const inject = (method: 'GET' | 'POST', url: string, payload?: object) =>
+      app!.inject({ method, url, headers: { cookie }, ...(payload && { payload }) });
+    return {
+      terminate: (terminationDate: string, id: number | string = 1) =>
+        inject('POST', `/api/employees/${id}/termination`, { terminationDate }),
+      list: async (query = '') =>
+        ((await inject('GET', `/api/employees${query}`)).json().items as { id: number }[]).map(
+          (item) => item.id,
+        ),
+    };
+  }
+
+  const problemOf = (response: { statusCode: number; json: () => unknown }) => ({
+    status: response.statusCode,
+    code: (response.json() as { code: string }).code,
+  });
+
+  it('terminating sets status and date and removes the employee from the default list', async () => {
+    const { terminate, list } = await setup(async (db) => {
+      await anEmployee().insert(db);
+      await anEmployee().insert(db);
+    });
+
+    const response = await terminate('2026-10-05');
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      id: 1,
+      status: 'terminated',
+      terminationDate: '2026-10-05',
+      updatedAt: '2026-10-09T09:00:00.000Z',
+    });
+    expect(await list()).toEqual([2]);
+    expect(await list('?status=terminated')).toEqual([1]);
+  });
+
+  it('accepts today and the hire date as the termination date', async () => {
+    const { terminate } = await setup(async (db) => {
+      await anEmployee().hiredOn('2026-09-01').insert(db);
+      await anEmployee().hiredOn('2026-09-01').insert(db);
+    });
+
+    const today = await terminate('2026-10-09', 1);
+    const hireDay = await terminate('2026-09-01', 2);
+
+    expect([today.statusCode, hireDay.statusCode]).toEqual([200, 200]);
+  });
+
+  it('rejects terminating twice, before the hire date, or after today, each with its code', async () => {
+    const { terminate } = await setup(async (db) => {
+      await anEmployee().insert(db);
+      await anEmployee().terminatedOn('2025-01-31').insert(db);
+    });
+
+    const twice = await terminate('2026-10-05', 2);
+    const future = await terminate('2026-10-10', 1);
+    const beforeHire = await terminate('2022-01-09', 1);
+
+    expect(problemOf(twice)).toEqual({ status: 422, code: 'EMPLOYEE_ALREADY_TERMINATED' });
+    expect(problemOf(future)).toEqual({ status: 422, code: 'DATE_IN_FUTURE' });
+    expect(problemOf(beforeHire)).toEqual({ status: 422, code: 'TERMINATION_BEFORE_HIRE' });
+  });
+
+  it('leaves the employee active after a rejected termination', async () => {
+    const { terminate, list } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    await terminate('2026-10-10');
+
+    expect(await list()).toEqual([1]);
+  });
+
+  it('returns 404 for an unknown id and 400 for a malformed date', async () => {
+    const { terminate } = await setup(async (db) => {
+      await anEmployee().insert(db);
+    });
+
+    const missing = await terminate('2026-10-05', 999);
+    const malformed = await terminate('05/10/2026');
+
+    expect(problemOf(missing)).toEqual({ status: 404, code: 'EMPLOYEE_NOT_FOUND' });
+    expect(problemOf(malformed)).toEqual({ status: 400, code: 'VALIDATION_FAILED' });
   });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { isoDateSchema } from './common.ts';
+import { isoDateSchema, personNameSchema } from './common.ts';
 
 // 04 section 4.6: a list is one comma-separated param; trim, drop empties, de-duplicate.
 // Shape only: whether a country or level exists is checked against the reference tables.
@@ -75,6 +75,8 @@ const idName = z.object({ id: z.number().int(), name: z.string() });
 
 export const moneySchema = z.object({ amountMinor: z.number().int(), currency: z.string() });
 
+const genderSchema = z.enum(['female', 'male', 'non_binary', 'not_disclosed']);
+
 export const bandPositionSchema = z.enum(['below', 'inside', 'above']);
 
 // 04 section 5.4 E1 item.
@@ -83,7 +85,7 @@ export const employeeListItemSchema = z.object({
   employeeCode: z.string(),
   firstName: z.string(),
   lastName: z.string(),
-  gender: z.enum(['female', 'male', 'non_binary', 'not_disclosed']),
+  gender: genderSchema,
   country: codeName,
   department: idName,
   jobTitle: idName,
@@ -109,3 +111,51 @@ export const employeeListResponseSchema = z.object({
 
 export type EmployeeListItem = z.infer<typeof employeeListItemSchema>;
 export type EmployeeListResponse = z.infer<typeof employeeListResponseSchema>;
+
+// 04 section 5.4 E2: the list item plus the band and timestamps.
+export const employeeDetailSchema = employeeListItemSchema.extend({
+  band: z.object({ min: moneySchema, mid: moneySchema, max: moneySchema }),
+  createdAt: z.string(),
+  updatedAt: z.string(),
+});
+
+export type EmployeeDetail = z.infer<typeof employeeDetailSchema>;
+
+// 04 section 5.4 E2 to E5 path.
+export const employeeIdParamsSchema = z.strictObject({
+  id: z.coerce.number().int().min(1),
+});
+
+// 04 section 5.4 E3 to E5 bodies.
+export const createEmployeeBodySchema = z.strictObject({
+  firstName: personNameSchema,
+  lastName: personNameSchema,
+  gender: genderSchema,
+  countryCode: z.string().regex(/^[A-Z]{2}$/, 'Country is required.'),
+  jobTitleId: z.number().int().min(1),
+  levelCode: z.enum(['L1', 'L2', 'L3', 'L4', 'L5']),
+  hireDate: isoDateSchema.refine((date) => date >= '1990-01-01', {
+    message: "Hire date can't be before 1990-01-01.",
+  }),
+  startingSalary: z.strictObject({
+    amountMinor: z.number().int().min(1).max(1_000_000_000_000),
+    currency: z.string().regex(/^[A-Z]{3}$/),
+  }),
+});
+
+export type CreateEmployeeBody = z.infer<typeof createEmployeeBodySchema>;
+
+export const updateEmployeeBodySchema = z
+  .strictObject({
+    firstName: personNameSchema,
+    lastName: personNameSchema,
+    gender: genderSchema,
+  })
+  .partial()
+  .refine((body) => Object.keys(body).length > 0, { message: 'Change at least one field.' });
+
+export type UpdateEmployeeBody = z.infer<typeof updateEmployeeBodySchema>;
+
+export const terminateBodySchema = z.strictObject({ terminationDate: isoDateSchema });
+
+export type TerminateBody = z.infer<typeof terminateBodySchema>;

@@ -1,9 +1,13 @@
 import {
   compaRatio,
+  type CreateEmployeeBody,
+  type EmployeeDetail,
   type EmployeeExportQuery,
   type EmployeeListItem,
   type EmployeeListQuery,
   type EmployeeListResponse,
+  type TerminateBody,
+  type UpdateEmployeeBody,
 } from '@acme/shared';
 import {
   and,
@@ -16,6 +20,7 @@ import {
   inArray,
   lt,
   lte,
+  max,
   or,
   sql,
   type SQL,
@@ -33,7 +38,9 @@ import {
   jobTitles,
   levels,
   payBands,
+  salaryChanges,
 } from '../../db/schema.ts';
+import { nameSearch } from '../../domain/name-search.ts';
 import { parseSearch } from '../../domain/employee-search.ts';
 import { AppError, type ProblemFieldError } from '../../http/problem.ts';
 import { fxAsOf } from '../auth/sessions.ts';
@@ -151,13 +158,11 @@ const bandJoin = and(
   eq(payBands.levelCode, employees.levelCode),
 );
 
-// Rows in the query's sort order; a limit pages them, no limit returns all of them.
-async function selectItems(
-  db: Db,
-  query: EmployeeListQuery,
-  paging?: { limit: number; offset: number },
-): Promise<EmployeeListItem[]> {
-  const select = db
+type EmployeeRow = Awaited<ReturnType<typeof selectEmployeeRows>>[number];
+
+// An employee with everything its list item and detail need, before any filter.
+function selectEmployeeRows(db: Db) {
+  return db
     .select({
       employee: employees,
       country: countries,
@@ -173,38 +178,54 @@ async function selectItems(
     .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
     .innerJoin(levels, eq(levels.code, employees.levelCode))
     .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
-    .innerJoin(payBands, bandJoin)
+    .innerJoin(payBands, bandJoin);
+}
+
+// The fields the list and the detail share.
+function toListItem({
+  employee: e,
+  country,
+  jobTitle,
+  department,
+  level,
+  band,
+  salaryUsdMinor,
+}: EmployeeRow): EmployeeListItem {
+  return {
+    id: e.id,
+    employeeCode: e.employeeCode,
+    firstName: e.firstName,
+    lastName: e.lastName,
+    gender: e.gender,
+    country: { code: country.code, name: country.name },
+    department: { id: department.id, name: department.name },
+    jobTitle: { id: jobTitle.id, name: jobTitle.name },
+    level: { code: level.code, name: level.name },
+    status: e.status,
+    hireDate: e.hireDate,
+    terminationDate: e.terminationDate,
+    salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
+    salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
+    salaryEffectiveDate: e.salaryEffectiveDate,
+    compaRatio: compaRatio(e.salaryMinor, band.midMinor),
+    // Equal to min or max is inside (02 section 4).
+    bandPosition:
+      e.salaryMinor < band.minMinor ? 'below' : e.salaryMinor > band.maxMinor ? 'above' : 'inside',
+  };
+}
+
+// Rows in the query's sort order; a limit pages them, no limit returns all of them.
+async function selectItems(
+  db: Db,
+  query: EmployeeListQuery,
+  paging?: { limit: number; offset: number },
+): Promise<EmployeeListItem[]> {
+  const select = selectEmployeeRows(db)
     .where(filterConditions(db, query))
     .orderBy(...orderBy(query))
     .$dynamic();
   const rows = await (paging ? select.limit(paging.limit).offset(paging.offset) : select);
-  return rows.map(
-    ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
-      id: e.id,
-      employeeCode: e.employeeCode,
-      firstName: e.firstName,
-      lastName: e.lastName,
-      gender: e.gender,
-      country: { code: country.code, name: country.name },
-      department: { id: department.id, name: department.name },
-      jobTitle: { id: jobTitle.id, name: jobTitle.name },
-      level: { code: level.code, name: level.name },
-      status: e.status,
-      hireDate: e.hireDate,
-      terminationDate: e.terminationDate,
-      salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
-      salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
-      salaryEffectiveDate: e.salaryEffectiveDate,
-      compaRatio: compaRatio(e.salaryMinor, band.midMinor),
-      // Equal to min or max is inside (02 section 4).
-      bandPosition:
-        e.salaryMinor < band.minMinor
-          ? 'below'
-          : e.salaryMinor > band.maxMinor
-            ? 'above'
-            : 'inside',
-    }),
-  );
+  return rows.map(toListItem);
 }
 
 // E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
@@ -233,4 +254,163 @@ export async function exportEmployees(db: Db, query: EmployeeExportQuery): Promi
   await checkListValues(db, listQuery);
   const [items, asOf] = await Promise.all([selectItems(db, listQuery), fxAsOf(db)]);
   return buildEmployeesCsv(items, asOf);
+}
+
+// E2 (04 section 5.4): one employee with its pay band.
+export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
+  const [row] = await selectEmployeeRows(db).where(eq(employees.id, id));
+  if (!row) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+  const { employee: e, band } = row;
+  const money = (amountMinor: number) => ({ amountMinor, currency: e.salaryCurrency });
+  return {
+    ...toListItem(row),
+    band: { min: money(band.minMinor), mid: money(band.midMinor), max: money(band.maxMinor) },
+    createdAt: e.createdAt,
+    updatedAt: e.updatedAt,
+  };
+}
+
+// E3 rules, in the order 04 section 5.4 lists them. An unknown country, title or level has no
+// band, so it ends as NO_PAY_BAND. A starting salary outside the band is allowed.
+async function checkCreateRules(db: Db, body: CreateEmployeeBody, today: string): Promise<void> {
+  if (body.hireDate > today) {
+    throw new AppError(422, 'DATE_IN_FUTURE', "Hire date can't be in the future.");
+  }
+  const [band] = await db
+    .select({ currency: payBands.currencyCode })
+    .from(payBands)
+    .where(
+      and(
+        eq(payBands.countryCode, body.countryCode),
+        eq(payBands.jobTitleId, body.jobTitleId),
+        eq(payBands.levelCode, body.levelCode),
+      ),
+    );
+  const [country] = await db
+    .select({ currency: countries.currencyCode })
+    .from(countries)
+    .where(eq(countries.code, body.countryCode));
+  if (country && country.currency !== body.startingSalary.currency) {
+    throw new AppError(
+      422,
+      'SALARY_CURRENCY_MISMATCH',
+      `Salary must be in ${country.currency} for this country.`,
+    );
+  }
+  if (!band) {
+    throw new AppError(
+      422,
+      'NO_PAY_BAND',
+      "There's no pay band for this country, job title and level.",
+    );
+  }
+}
+
+// E3 (04 section 5.4): one write transaction inserts the employee and its hire history row.
+export async function createEmployee(
+  db: Db,
+  body: CreateEmployeeBody,
+  context: { today: string; now: string; userId: number },
+): Promise<EmployeeDetail> {
+  const { startingSalary: salary } = body;
+  await checkCreateRules(db, body, context.today);
+  const id = await db.transaction(async (tx) => {
+    const [maxes] = await tx
+      .select({
+        employee: max(employees.id),
+        change: sql<number>`(SELECT max(id) FROM ${salaryChanges})`,
+      })
+      .from(employees);
+    const id = (maxes?.employee ?? 0) + 1;
+    await tx.insert(employees).values({
+      id,
+      employeeCode: `E${String(id).padStart(6, '0')}`,
+      firstName: body.firstName,
+      lastName: body.lastName,
+      nameSearch: nameSearch(body.firstName, body.lastName),
+      gender: body.gender,
+      countryCode: body.countryCode,
+      jobTitleId: body.jobTitleId,
+      levelCode: body.levelCode,
+      hireDate: body.hireDate,
+      status: 'active',
+      terminationDate: null,
+      salaryMinor: salary.amountMinor,
+      salaryCurrency: salary.currency,
+      salaryEffectiveDate: body.hireDate,
+      createdAt: context.now,
+      updatedAt: context.now,
+    });
+    await tx.insert(salaryChanges).values({
+      id: (maxes?.change ?? 0) + 1,
+      employeeId: id,
+      effectiveDate: body.hireDate,
+      amountMinor: salary.amountMinor,
+      currencyCode: salary.currency,
+      jobTitleId: body.jobTitleId,
+      levelCode: body.levelCode,
+      reason: 'hire',
+      changedByUserId: context.userId,
+      createdAt: context.now,
+    });
+    return id;
+  });
+  return getEmployee(db, id);
+}
+
+// E4 (04 section 5.4): names and gender only; allowed on terminated employees.
+export async function updateEmployee(
+  db: Db,
+  id: number,
+  body: UpdateEmployeeBody,
+  now: string,
+): Promise<EmployeeDetail> {
+  const [current] = await db.select().from(employees).where(eq(employees.id, id));
+  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+  const firstName = body.firstName ?? current.firstName;
+  const lastName = body.lastName ?? current.lastName;
+  await db
+    .update(employees)
+    .set({
+      firstName,
+      lastName,
+      gender: body.gender ?? current.gender,
+      nameSearch: nameSearch(firstName, lastName),
+      updatedAt: now,
+    })
+    .where(eq(employees.id, id));
+  return getEmployee(db, id);
+}
+
+// E5 (04 section 5.4): the employee leaves current lists; the record and history stay.
+export async function terminateEmployee(
+  db: Db,
+  id: number,
+  body: TerminateBody,
+  context: { today: string; now: string },
+): Promise<EmployeeDetail> {
+  const [current] = await db.select().from(employees).where(eq(employees.id, id));
+  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+  if (current.status === 'terminated') {
+    throw new AppError(
+      422,
+      'EMPLOYEE_ALREADY_TERMINATED',
+      `${current.firstName} ${current.lastName} is already terminated.`,
+    );
+  }
+  if (body.terminationDate > context.today) {
+    throw new AppError(422, 'DATE_IN_FUTURE', "Termination date can't be in the future.");
+  }
+  if (body.terminationDate < current.hireDate) {
+    throw new AppError(
+      422,
+      'TERMINATION_BEFORE_HIRE',
+      "Termination date can't be before the hire date.",
+    );
+  }
+  await db
+    .update(employees)
+    .set({ status: 'terminated', terminationDate: body.terminationDate, updatedAt: context.now })
+    .where(eq(employees.id, id));
+  return getEmployee(db, id);
 }
