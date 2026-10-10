@@ -187,6 +187,16 @@ describe('POST /api/auth/login (A2)', () => {
       expect(retryAfter).toBeLessThanOrEqual(60);
     });
 
+    it('ignores X-Forwarded-For entries the client added before the proxy', async () => {
+      app = testApp();
+
+      // Render appends the real client address; anything to its left came from the client.
+      for (let i = 0; i < 10; i++) await attemptFrom(`10.0.0.${i}, 203.0.113.7`);
+      const response = await attemptFrom('10.0.0.99, 203.0.113.7');
+
+      expect(response.statusCode).toBe(429);
+    });
+
     it('counts login attempts per client IP taken from X-Forwarded-For', async () => {
       app = testApp();
 
