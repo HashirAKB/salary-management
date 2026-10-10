@@ -412,3 +412,77 @@ describe('GET /api/employees (E1)', () => {
     });
   });
 });
+
+const INR_MICROS = 11_500;
+
+describe('GET /api/employees/:id (E2)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function setup(seed: (db: Db) => Promise<number | void>) {
+    const db = await testDb();
+    const id = await seed(db);
+    const { cookie } = await loggedInAs(db, 'hr_viewer');
+    app = testApp({ db });
+    return {
+      id,
+      get: (path: string | number | void = id) =>
+        app!.inject({ method: 'GET', url: `/api/employees/${path}`, headers: { cookie } }),
+    };
+  }
+
+  it('returns one employee with band min, mid and max, compa-ratio and timestamps', async () => {
+    const band = generateBands().find(
+      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+    )!;
+    const { get } = await setup(async (db) => (await anEmployee().insert(db)).id);
+
+    const response = await get();
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      id: 1,
+      employeeCode: 'E000001',
+      firstName: 'Asha',
+      lastName: 'Rao',
+      gender: 'female',
+      country: { code: 'IN', name: 'India' },
+      department: { id: expect.any(Number), name: 'Engineering' },
+      jobTitle: { id: SOFTWARE_ENGINEER, name: 'Software Engineer' },
+      level: { code: 'L3', name: 'Senior' },
+      status: 'active',
+      hireDate: '2022-01-10',
+      terminationDate: null,
+      salary: { amountMinor: band.midMinor, currency: 'INR' },
+      salaryUsd: { amountMinor: toUsdMinor(band.midMinor, INR_MICROS), currency: 'USD' },
+      salaryEffectiveDate: '2022-01-10',
+      compaRatio: 1,
+      bandPosition: 'inside',
+      band: {
+        min: { amountMinor: band.minMinor, currency: 'INR' },
+        mid: { amountMinor: band.midMinor, currency: 'INR' },
+        max: { amountMinor: band.maxMinor, currency: 'INR' },
+      },
+      createdAt: '2022-01-10T00:00:00.000Z',
+      updatedAt: '2022-01-10T00:00:00.000Z',
+    });
+  });
+
+  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown id and 400 for a non-integer id', async () => {
+    const { get } = await setup(async (db) => (await anEmployee().insert(db)).id);
+
+    const missing = await get(999);
+    const malformed = await get('abc');
+    const zero = await get(0);
+
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: 'EMPLOYEE_NOT_FOUND' });
+    expect(malformed.statusCode).toBe(400);
+    expect(malformed.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
+    expect(zero.statusCode).toBe(400);
+  });
+});
