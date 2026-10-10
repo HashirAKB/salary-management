@@ -4,3 +4,8 @@ import { z } from 'zod';
 export const roleSchema = z.enum(['hr_admin', 'hr_viewer', 'finance']);
 
 export type Role = z.infer<typeof roleSchema>;
+
+// 04 section 4.2: YYYY-MM-DD, no time zone.
+export const isoDateSchema = z.iso.date();
+
+export type IsoDate = z.infer<typeof isoDateSchema>;

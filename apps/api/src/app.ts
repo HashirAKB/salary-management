@@ -4,6 +4,7 @@ import type { Db } from './db/client.ts';
 import type { Clock } from './domain/clock.ts';
 import { registerErrorHandling } from './http/error-handler.ts';
 import { registerStatic } from './http/static.ts';
+import { authRoutes } from './modules/auth/routes.ts';
 import { healthRoutes } from './modules/health/routes.ts';
 
 export type AppDeps = {
@@ -20,5 +21,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   if (deps.staticRoot) registerStatic(app, deps.staticRoot);
   registerErrorHandling(app, { spaFallback: Boolean(deps.staticRoot) });
   healthRoutes(app, { db: deps.db });
+  authRoutes(app, deps);
   return app;
 }
