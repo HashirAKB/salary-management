@@ -208,3 +208,8 @@ export async function listEmployees(
     fxAsOf: asOf,
   };
 }
+
+// X1 (04 section 5.7): every row matching the filters, in the list's sort order, as CSV.
+export async function exportEmployees(_db: Db, _query: EmployeeListQuery): Promise<string> {
+  throw new Error('not implemented');
+}
