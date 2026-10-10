@@ -18,8 +18,9 @@ const idName = z.object({ id: z.number().int(), name: z.string() });
 
 export const moneySchema = z.object({ amountMinor: z.number().int(), currency: z.string() });
 
-// 04 section 5.4 E1 item. Local salary only; USD, compa-ratio and band position come with the
-// next cycle.
+export const bandPositionSchema = z.enum(['below', 'inside', 'above']);
+
+// 04 section 5.4 E1 item.
 export const employeeListItemSchema = z.object({
   id: z.number().int(),
   employeeCode: z.string(),
@@ -34,7 +35,10 @@ export const employeeListItemSchema = z.object({
   hireDate: isoDateSchema,
   terminationDate: isoDateSchema.nullable(),
   salary: moneySchema,
+  salaryUsd: moneySchema,
   salaryEffectiveDate: isoDateSchema,
+  compaRatio: z.number(),
+  bandPosition: bandPositionSchema,
 });
 
 export const employeeListResponseSchema = z.object({
