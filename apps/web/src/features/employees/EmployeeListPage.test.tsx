@@ -1,6 +1,8 @@
 import type { Role } from '@acme/shared';
 import { screen, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { delay, http, HttpResponse } from 'msw';
+import { useLocation } from 'react-router';
 import { describe, expect, it } from 'vitest';
 import {
   anEmployeeListItem,
@@ -11,6 +13,43 @@ import { aMeResponse } from '../../../test/fixtures/me.ts';
 import { render } from '../../../test/render.tsx';
 import { server } from '../../../test/server.ts';
 import { AppRoutes } from '../../AppRoutes.tsx';
+
+const Location = () => {
+  const { pathname, search } = useLocation();
+  return <output aria-label="location">{pathname + search}</output>;
+};
+
+const renderList = (route: string) =>
+  render(
+    <>
+      <AppRoutes />
+      <Location />
+    </>,
+    { route },
+  );
+
+/** Serves 120 employees in pages of the requested size; records each request's query. */
+function servesPages(requests: URLSearchParams[]) {
+  server.use(
+    http.get('/api/employees', ({ request }) => {
+      const params = new URL(request.url).searchParams;
+      requests.push(params);
+      const page = Number(params.get('page'));
+      const pageSize = Number(params.get('pageSize'));
+      const totalPages = Math.ceil(120 / pageSize);
+      const first = (page - 1) * pageSize;
+      return HttpResponse.json(
+        anEmployeeListResponse({
+          items: page > totalPages ? [] : someEmployees(Math.min(pageSize, 120 - first), first + 1),
+          page,
+          pageSize,
+          total: 120,
+          totalPages,
+        }),
+      );
+    }),
+  );
+}
 
 const loggedInAs = (role: Role) =>
   server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))));
@@ -76,5 +115,58 @@ describe('employee list page (04 section 8.5)', () => {
     const table = await screen.findByRole('table');
     expect(within(table).getAllByRole('row')).toHaveLength(11);
     expect(screen.getByRole('heading', { level: 1, name: 'Employees' })).toBeInTheDocument();
+  });
+
+  it('changing the page or page size updates the URL and requests that page', async () => {
+    loggedInAs('hr_viewer');
+    const requests: URLSearchParams[] = [];
+    servesPages(requests);
+    const user = userEvent.setup();
+    renderList('/employees');
+    await screen.findByText('Showing 1 to 50 of 120 employees');
+    expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/);
+
+    await user.click(screen.getByRole('button', { name: '2' }));
+
+    expect(await screen.findByText('Showing 51 to 100 of 120 employees')).toBeInTheDocument();
+    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?page=2');
+    expect(requests.at(-1)?.get('page')).toBe('2');
+
+    await user.click(screen.getByRole('textbox', { name: 'Page size' }));
+    await user.click(await screen.findByRole('option', { name: '25' }));
+
+    expect(await screen.findByText('Showing 1 to 25 of 120 employees')).toBeInTheDocument();
+    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?pageSize=25');
+    expect(requests.at(-1)?.get('page')).toBe('1');
+    expect(requests.at(-1)?.get('pageSize')).toBe('25');
+  });
+
+  it('reads the page and page size from the URL', async () => {
+    loggedInAs('hr_viewer');
+    const requests: URLSearchParams[] = [];
+    servesPages(requests);
+    renderList('/employees?page=2&pageSize=100');
+
+    expect(await screen.findByText('Showing 101 to 120 of 120 employees')).toBeInTheDocument();
+    expect(requests[0]?.get('page')).toBe('2');
+    expect(requests[0]?.get('pageSize')).toBe('100');
+  });
+
+  it('shows the past-the-end notice with a link to the last page', async () => {
+    loggedInAs('hr_viewer');
+    const requests: URLSearchParams[] = [];
+    servesPages(requests);
+    const user = userEvent.setup();
+    renderList('/employees?page=9');
+
+    expect(
+      await screen.findByText('This page is past the end of the results.'),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Go to last page' }));
+
+    expect(await screen.findByText('Showing 101 to 120 of 120 employees')).toBeInTheDocument();
+    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?page=3');
+    expect(screen.queryByText('This page is past the end of the results.')).not.toBeInTheDocument();
   });
 });
