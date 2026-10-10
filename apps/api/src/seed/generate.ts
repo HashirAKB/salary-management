@@ -151,7 +151,7 @@ const pickWeighted = (random: Random, weights: readonly number[]): number => {
 };
 
 const TERMINATION_FROM = '2024-01-01';
-const TERMINATION_DAYS = 623; // 2024-01-01 to 2026-09-15 inclusive
+const TERMINATION_DAYS = 989; // 2024-01-01 to 2026-09-15 inclusive
 
 // 02 section 7.8: spread across countries by headcount, titles and levels drawn by their shares,
 // salaries drawn like active pay but with no gap shaping or outliers.
