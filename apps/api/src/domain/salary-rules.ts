@@ -34,6 +34,9 @@ export interface SalaryChangeContext {
 }
 
 /** The first rule the change breaks, or null when it is allowed. */
-export function checkSalaryChange(_context: SalaryChangeContext): SalaryRuleCode | null {
-  throw new Error('not implemented');
+export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode | null {
+  const { today, employee, change } = context;
+  if (change.effectiveDate > today) return 'DATE_IN_FUTURE';
+  if (change.effectiveDate < employee.salaryEffectiveDate) return 'SALARY_DATE_BEFORE_CURRENT';
+  return null;
 }
