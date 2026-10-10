@@ -138,4 +138,46 @@ describe('POST /api/auth/login (A2)', () => {
     expect(wrongPassword.headers['set-cookie']).toBeUndefined();
     expect(await db.all('SELECT * FROM sessions')).toEqual([]);
   });
+
+  describe('rate limit', () => {
+    const attemptFrom = (ip: string) =>
+      app!.inject({
+        method: 'POST',
+        url: '/api/auth/login',
+        headers: { 'x-forwarded-for': ip },
+        payload: { email: 'nobody@test.local', password: 'wrong-password' },
+      });
+
+    it('the 11th login attempt in a minute from one IP returns 429 with Retry-After', async () => {
+      app = testApp();
+
+      for (let i = 0; i < 10; i++) {
+        expect((await attemptFrom('203.0.113.7')).statusCode).toBe(401);
+      }
+      const response = await attemptFrom('203.0.113.7');
+
+      expect(response.statusCode).toBe(429);
+      expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
+      expect(response.json()).toMatchObject({
+        type: 'about:blank',
+        title: 'Too Many Requests',
+        status: 429,
+        code: 'RATE_LIMITED',
+        instance: '/api/auth/login',
+      });
+      const retryAfter = Number(response.headers['retry-after']);
+      expect(Number.isInteger(retryAfter)).toBe(true);
+      expect(retryAfter).toBeGreaterThan(0);
+      expect(retryAfter).toBeLessThanOrEqual(60);
+    });
+
+    it('counts login attempts per client IP taken from X-Forwarded-For', async () => {
+      app = testApp();
+
+      for (let i = 0; i < 11; i++) await attemptFrom('203.0.113.7');
+      const otherClient = await attemptFrom('198.51.100.9');
+
+      expect(otherClient.statusCode).toBe(401);
+    });
+  });
 });
