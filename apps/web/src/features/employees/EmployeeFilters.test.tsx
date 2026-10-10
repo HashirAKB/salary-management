@@ -18,6 +18,14 @@ const Location = () => {
   );
 };
 
+// The dropdown options stay mounted, so a chosen value's name also appears there.
+const pill = (name: string) => screen.queryByText(name, { selector: '[class*="Pill-label"]' });
+const findPill = (name: string) => screen.findByText(name, { selector: '[class*="Pill-label"]' });
+
+// A Mantine select's dropdown list carries the same label as its input.
+const field = (label: string) =>
+  screen.getAllByLabelText(label).find((element) => element.tagName === 'INPUT')!;
+
 const renderList = (route: string) =>
   render(
     <>
@@ -56,7 +64,7 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
     renderList('/employees?page=2');
     await screen.findByText('Showing 51 to 100 of 120 employees');
 
-    await user.click(screen.getByLabelText('Country'));
+    await user.click(field('Country'));
     await user.click(await screen.findByRole('option', { name: 'India' }));
 
     await waitFor(() =>
@@ -66,7 +74,7 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
     await waitFor(() => expect(requests.at(-1)?.get('country')).toBe('IN'));
     expect(requests.at(-1)?.get('page')).toBe('1');
 
-    await user.click(screen.getByLabelText('Status'));
+    await user.click(field('Status'));
     await user.click(await screen.findByRole('option', { name: 'Terminated' }));
 
     await waitFor(() =>
@@ -84,11 +92,11 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
       '/employees?q=priya&country=IN,US&level=L3&status=all&band=below&salaryUnchangedSince=2025-01-01',
     );
 
-    expect(await screen.findByText('India')).toBeInTheDocument();
-    expect(screen.getByText('United States')).toBeInTheDocument();
-    expect(screen.getByText('L3 Senior')).toBeInTheDocument();
-    expect(screen.getByLabelText('Status')).toHaveValue('All');
-    expect(screen.getByLabelText('Pay band')).toHaveValue('Below band');
+    expect(await findPill('India')).toBeInTheDocument();
+    expect(pill('United States')).toBeInTheDocument();
+    expect(pill('L3 Senior')).toBeInTheDocument();
+    expect(field('Status')).toHaveValue('All');
+    expect(field('Pay band')).toHaveValue('Below band');
     expect(screen.getByLabelText('No salary change since')).toHaveValue('2025-01-01');
     expect(screen.getByPlaceholderText('Search name or employee ID')).toHaveValue('priya');
     await waitFor(() => expect(requests.length).toBeGreaterThan(0));
@@ -104,9 +112,9 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
     servesEmployees([]);
     const user = userEvent.setup();
     renderList('/employees?department=2');
-    await screen.findByText('Design');
+    await findPill('Design');
 
-    await user.click(screen.getByLabelText('Job title'));
+    await user.click(field('Job title'));
 
     expect(await screen.findByRole('option', { name: 'Product Designer' })).toBeInTheDocument();
     expect(screen.queryByRole('option', { name: 'Software Engineer' })).not.toBeInTheDocument();
@@ -134,7 +142,7 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
     servesEmployees([]);
     const user = userEvent.setup();
     renderList('/employees?q=priya&country=IN&status=all');
-    await screen.findByText('India');
+    await findPill('India');
 
     await user.click(screen.getByRole('button', { name: 'Clear filters' }));
 
@@ -142,6 +150,6 @@ describe('employee list filters (04 sections 8.3 and 8.5)', () => {
       expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/),
     );
     expect(screen.getByPlaceholderText('Search name or employee ID')).toHaveValue('');
-    expect(screen.queryByText('India')).not.toBeInTheDocument();
+    expect(pill('India')).not.toBeInTheDocument();
   });
 });
