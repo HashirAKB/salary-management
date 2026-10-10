@@ -75,6 +75,8 @@ const idName = z.object({ id: z.number().int(), name: z.string() });
 
 export const moneySchema = z.object({ amountMinor: z.number().int(), currency: z.string() });
 
+export type Money = z.infer<typeof moneySchema>;
+
 const genderSchema = z.enum(['female', 'male', 'non_binary', 'not_disclosed']);
 
 export const bandPositionSchema = z.enum(['below', 'inside', 'above']);
