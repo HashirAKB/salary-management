@@ -16,9 +16,11 @@ import {
 } from '@mantine/core';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import type { ReactElement } from 'react';
+import { Link } from 'react-router';
 import { apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
+import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
 import { useEmployeeFilters } from './useEmployeeFilters.ts';
 
@@ -85,12 +87,39 @@ export function EmployeeListPage(): ReactElement {
     placeholderData: keepPreviousData,
   });
   const data = employees.data;
-  const pastTheEnd = data !== undefined && data.items.length === 0 && data.page > data.totalPages;
+  const empty = data?.total === 0;
+  const pastTheEnd =
+    data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
+  const showTable = !empty && (data !== undefined || !employees.isError);
+  const canAdd = useViewer().permissions.includes('employee.write');
+  const addButton = (
+    <Button component={Link} to="/employees/new">
+      Add employee
+    </Button>
+  );
 
   return (
     <Stack>
-      <Title order={1}>Employees</Title>
-      {employees.isError && <Alert color="red">{employees.error.message}</Alert>}
+      <Group justify="space-between">
+        <Title order={1}>Employees</Title>
+        {canAdd && !empty && addButton}
+      </Group>
+      {employees.isError && (
+        <Alert color="red">
+          <Group justify="space-between">
+            <Text>{employees.error.message}</Text>
+            <Button variant="light" onClick={() => void employees.refetch()}>
+              Retry
+            </Button>
+          </Group>
+        </Alert>
+      )}
+      {empty && (
+        <Stack align="flex-start">
+          <Text>No employees yet.</Text>
+          {canAdd && addButton}
+        </Stack>
+      )}
       {data && !pastTheEnd && (
         <Text>
           {`Showing ${count.format((data.page - 1) * data.pageSize + 1)} to ${count.format(
@@ -108,29 +137,31 @@ export function EmployeeListPage(): ReactElement {
           </Group>
         </Alert>
       )}
-      <Table striped>
-        <Table.Thead>
-          <Table.Tr>
-            {COLUMNS.map((column) => (
-              <Table.Th key={column}>{column}</Table.Th>
-            ))}
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          {data
-            ? data.items.map((employee) => <EmployeeRow key={employee.id} employee={employee} />)
-            : Array.from({ length: SKELETON_ROWS }, (_, row) => (
-                <Table.Tr key={row}>
-                  {COLUMNS.map((column) => (
-                    <Table.Td key={column}>
-                      <Skeleton height={16} />
-                    </Table.Td>
-                  ))}
-                </Table.Tr>
+      {showTable && (
+        <Table striped>
+          <Table.Thead>
+            <Table.Tr>
+              {COLUMNS.map((column) => (
+                <Table.Th key={column}>{column}</Table.Th>
               ))}
-        </Table.Tbody>
-      </Table>
-      {data && (
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {data
+              ? data.items.map((employee) => <EmployeeRow key={employee.id} employee={employee} />)
+              : Array.from({ length: SKELETON_ROWS }, (_, row) => (
+                  <Table.Tr key={row}>
+                    {COLUMNS.map((column) => (
+                      <Table.Td key={column}>
+                        <Skeleton height={16} />
+                      </Table.Td>
+                    ))}
+                  </Table.Tr>
+                ))}
+          </Table.Tbody>
+        </Table>
+      )}
+      {data && !empty && (
         <Group justify="space-between">
           <Pagination value={data.page} total={data.totalPages} onChange={setPage} />
           <Select
