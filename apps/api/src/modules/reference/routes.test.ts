@@ -3,6 +3,7 @@ import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { loggedInAs } from '../../../test/builders/index.ts';
 import { testApp, testDb } from '../../../test/helpers.ts';
+import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
 
 describe('GET /api/reference (R1)', () => {
   let app: FastifyInstance | undefined;
@@ -80,5 +81,50 @@ describe('GET /api/reference (R1)', () => {
     const { response } = await getReference(role);
 
     expect(response.statusCode).toBe(200);
+  });
+});
+
+describe('GET /api/pay-bands/:countryCode/:jobTitleId/:levelCode (R2)', () => {
+  let app: FastifyInstance | undefined;
+
+  afterEach(async () => {
+    await app?.close();
+    app = undefined;
+  });
+
+  async function getBand(path: string, role: 'hr_admin' | 'hr_viewer' | 'finance' = 'finance') {
+    const db = await testDb();
+    const { cookie } = await loggedInAs(db, role);
+    app = testApp({ db });
+    return app.inject({ method: 'GET', url: `/api/pay-bands/${path}`, headers: { cookie } });
+  }
+
+  it('returns the pay band for a country, job title and level', async () => {
+    const band = generateBands().find(
+      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+    )!;
+
+    const response = await getBand(`IN/${SOFTWARE_ENGINEER}/L3`);
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      countryCode: 'IN',
+      jobTitleId: SOFTWARE_ENGINEER,
+      levelCode: 'L3',
+      min: { amountMinor: band.minMinor, currency: 'INR' },
+      mid: { amountMinor: band.midMinor, currency: 'INR' },
+      max: { amountMinor: band.maxMinor, currency: 'INR' },
+    });
+  });
+
+  it('returns 404 PAY_BAND_NOT_FOUND for a combination with no band and 400 for bad params', async () => {
+    const missing = await getBand(`IN/${SOFTWARE_ENGINEER + 1000}/L3`);
+    const badTitle = await getBand('IN/abc/L3');
+    const badLevel = await getBand(`IN/${SOFTWARE_ENGINEER}/L9`);
+
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json()).toMatchObject({ code: 'PAY_BAND_NOT_FOUND' });
+    expect(badTitle.statusCode).toBe(400);
+    expect(badLevel.statusCode).toBe(400);
   });
 });
