@@ -17,9 +17,9 @@ import {
   UnstyledButton,
 } from '@mantine/core';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import type { ReactElement } from 'react';
+import { useState, type ReactElement } from 'react';
 import { Link } from 'react-router';
-import { apiFetch } from '../../api/client.ts';
+import { apiDownload, apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
@@ -114,7 +114,27 @@ export function EmployeeListPage(): ReactElement {
   const pastTheEnd =
     data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
   const showTable = !empty && (data !== undefined || !employees.isError);
-  const canAdd = useViewer().permissions.includes('employee.write');
+  const permissions = useViewer().permissions;
+  const canAdd = permissions.includes('employee.write');
+  const canExport = permissions.includes('export.employees');
+  const [exporting, setExporting] = useState(false);
+  const exportCsv = async () => {
+    setExporting(true);
+    try {
+      const exportQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
+      const { blob, filename } = await apiDownload(
+        `/api/exports/employees.csv${exportQuery && `?${exportQuery}`}`,
+      );
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    } finally {
+      setExporting(false);
+    }
+  };
   const addButton = (
     <Button component={Link} to="/employees/new">
       Add employee
@@ -125,7 +145,19 @@ export function EmployeeListPage(): ReactElement {
     <Stack>
       <Group justify="space-between">
         <Title order={1}>Employees</Title>
-        {canAdd && !empty && addButton}
+        <Group>
+          {canExport && (
+            <Button
+              variant="default"
+              loading={exporting}
+              disabled={exporting}
+              onClick={() => void exportCsv()}
+            >
+              Export CSV
+            </Button>
+          )}
+          {canAdd && !empty && addButton}
+        </Group>
       </Group>
       {filters.droppedValues && (
         <Alert color="yellow" withCloseButton onClose={filters.dismissDropped}>
