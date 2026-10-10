@@ -21,7 +21,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({ logger: { level: deps.config.logLevel }, trustProxy: true });
   if (deps.staticRoot) registerStatic(app, deps.staticRoot);
   registerErrorHandling(app, { spaFallback: Boolean(deps.staticRoot) });
-  registerAuth(app, { db: deps.db });
+  registerAuth(app, deps);
   healthRoutes(app, { db: deps.db });
   authRoutes(app, deps);
   return app;

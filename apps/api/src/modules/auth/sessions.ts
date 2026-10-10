@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { and, eq, gt } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { fxRates, sessions, users } from '../../db/schema.ts';
 
@@ -20,12 +20,23 @@ export async function fxAsOf(db: Db): Promise<string> {
   return row?.asOf ?? '';
 }
 
-/** The user a session token hash belongs to: one primary-key lookup (04 section 4.3). */
-export async function findSessionUser(db: Db, tokenHash: string): Promise<UserRow | undefined> {
+/**
+ * The user of an unexpired session: one primary-key lookup (04 section 4.3). Expiry is absolute
+ * (ADR 0006); an expired row is treated as missing.
+ */
+export async function findSessionUser(
+  db: Db,
+  tokenHash: string,
+  now: Date,
+): Promise<UserRow | undefined> {
   const [row] = await db
     .select({ user: users })
     .from(sessions)
     .innerJoin(users, eq(users.id, sessions.userId))
-    .where(eq(sessions.tokenHash, tokenHash));
+    .where(and(eq(sessions.tokenHash, tokenHash), gt(sessions.expiresAt, now.toISOString())));
   return row?.user;
+}
+
+export async function deleteSession(db: Db, tokenHash: string): Promise<void> {
+  await db.delete(sessions).where(eq(sessions.tokenHash, tokenHash));
 }

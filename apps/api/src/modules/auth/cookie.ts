@@ -8,6 +8,13 @@ export function sessionCookie(token: string, { secure }: { secure: boolean }): s
   return [`${SESSION_COOKIE}=${token}`, ...attributes].join('; ');
 }
 
+/** Clears `sid` on logout. */
+export function clearedSessionCookie({ secure }: { secure: boolean }): string {
+  const attributes = ['HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=0'];
+  if (secure) attributes.push('Secure');
+  return [`${SESSION_COOKIE}=`, ...attributes].join('; ');
+}
+
 /** The `sid` value from a Cookie request header, if present. */
 export function readSid(header: string | undefined): string | undefined {
   for (const pair of (header ?? '').split(';')) {

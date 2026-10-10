@@ -2,8 +2,9 @@ import { loginBodySchema, type MeResponse } from '@acme/shared';
 import rateLimit from '@fastify/rate-limit';
 import type { FastifyInstance } from 'fastify';
 import { AppError } from '../../http/problem.ts';
-import { sessionCookie } from './cookie.ts';
-import { login, meFor, type AuthDeps } from './service.ts';
+import { clearedSessionCookie, readSid, sessionCookie } from './cookie.ts';
+import { hashToken, login, meFor, type AuthDeps } from './service.ts';
+import { deleteSession } from './sessions.ts';
 
 // 10 attempts per minute per client IP; request.ip honours X-Forwarded-For (trustProxy, 04 4.1).
 const LOGIN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' };
@@ -34,6 +35,17 @@ export function authRoutes(app: FastifyInstance, deps: AuthDeps) {
         return me;
       },
     );
+  });
+
+  // Always 204, with or without a session (A3).
+  app.post('/api/auth/logout', async (request, reply) => {
+    const token = readSid(request.headers.cookie);
+    if (token) await deleteSession(deps.db, hashToken(token));
+    reply.header(
+      'set-cookie',
+      clearedSessionCookie({ secure: deps.config.nodeEnv === 'production' }),
+    );
+    return reply.status(204).send();
   });
 
   app.get('/api/auth/me', async (request): Promise<MeResponse> => {
