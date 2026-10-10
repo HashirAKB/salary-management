@@ -142,6 +142,39 @@ describe('employee list page (04 section 8.5)', () => {
     expect(requests.at(-1)?.get('pageSize')).toBe('25');
   });
 
+  it('dims the previous rows and shows a progress bar while the next page loads', async () => {
+    loggedInAs('hr_viewer');
+    server.use(
+      http.get('/api/employees', async ({ request }) => {
+        const page = Number(new URL(request.url).searchParams.get('page'));
+        if (page === 2) await delay(150);
+        return HttpResponse.json(
+          anEmployeeListResponse({
+            items: someEmployees(50, (page - 1) * 50 + 1),
+            page,
+            pageSize: 50,
+            total: 120,
+            totalPages: 3,
+          }),
+        );
+      }),
+    );
+    const user = userEvent.setup();
+    renderList('/employees');
+    await screen.findByText('Showing 1 to 50 of 120 employees');
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: '2' }));
+
+    expect(await screen.findByRole('progressbar')).toBeInTheDocument();
+    expect(screen.getByText('Showing 1 to 50 of 120 employees')).toBeInTheDocument();
+    expect(screen.getByRole('table')).toHaveAttribute('data-fetching', 'true');
+
+    expect(await screen.findByText('Showing 51 to 100 of 120 employees')).toBeInTheDocument();
+    expect(screen.queryByRole('progressbar')).not.toBeInTheDocument();
+    expect(screen.getByRole('table')).not.toHaveAttribute('data-fetching');
+  });
+
   it('reads the page and page size from the URL', async () => {
     loggedInAs('hr_viewer');
     const requests: URLSearchParams[] = [];
