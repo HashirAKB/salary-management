@@ -156,7 +156,7 @@ Each slice lists: goal, demo, scope, test list (pointing at rows in `05-test-str
 
 ---
 
-### S0 Walking skeleton (1.5 h)
+### S0 Walking skeleton
 
 **Goal.** A repo where `npm test`, CI and a live deploy all work end to end, with no product features.
 
@@ -210,7 +210,7 @@ build(deploy): add render.yaml for one free web service
 
 ---
 
-### S1 Schema and seed (2 h)
+### S1 Schema and seed
 
 **Goal.** The full schema, migrations, and a deterministic 10,000-employee seed.
 
@@ -262,7 +262,7 @@ refactor(seed): extract cohort targets into a config table
 
 ---
 
-### S2 Login and roles (2 h)
+### S2 Login and roles
 
 **Goal.** Three demo accounts log in, each sees the right navigation, and every route is guarded by role.
 
@@ -318,7 +318,7 @@ refactor(web): extract api client problem parsing
 
 ---
 
-### S3 Employee list with paging (1.5 h)
+### S3 Employee list with paging
 
 **Goal.** HR roles page through all active employees, sorted by name.
 
@@ -358,7 +358,7 @@ feat(web): add employee list page
 
 ---
 
-### S4 Search, filters, sort and CSV export (1.5 h)
+### S4 Search, filters, sort and CSV export
 
 **Goal.** HR finds anyone in seconds, shares the view as a URL, and takes it to Excel.
 
@@ -401,7 +401,7 @@ feat(web): add export button
 
 ---
 
-### S5 View, add, edit, terminate (2 h)
+### S5 View, add, edit, terminate
 
 **Goal.** HR Admin keeps employee records correct; HR Viewer can read them.
 
@@ -446,7 +446,7 @@ refactor(employees): share employee detail mapping between endpoints
 
 ---
 
-### S6 Salary change and history (2 h)
+### S6 Salary change and history
 
 **Goal.** HR Admin records a raise, promotion or correction, and anyone in HR can see exactly how someone's pay got where it is.
 
@@ -492,7 +492,7 @@ feat(web): add record salary change modal
 
 ---
 
-### S7 Insights and pay equity (2 h)
+### S7 Insights and pay equity
 
 **Goal.** Anyone can answer "how do we pay people" in one screen, and HR can see where women and men in the same role are paid differently.
 
@@ -540,7 +540,7 @@ refactor(insights): load the active projection once per request
 
 ---
 
-### S8 Ask about pay (1.5 h)
+### S8 Ask about pay
 
 **Goal.** Anyone can ask a pay question in plain English and see both the answer and how it was read, with no salary data sent to the model.
 
@@ -587,7 +587,7 @@ docs(ask): record first eval run
 
 ---
 
-### S9 Deploy hardening and smoke test (1 h)
+### S9 Deploy hardening and smoke test
 
 **Goal.** The live link survives cold starts and reviewer use, and one automated test proves the built app works.
 
@@ -621,7 +621,7 @@ ci: run the smoke test after verify
 
 ---
 
-### S10 README, performance note, demo, AI notes (1.5 h)
+### S10 README, performance note, demo, AI notes
 
 **Goal.** A reviewer can understand, run and judge the submission in five minutes.
 
