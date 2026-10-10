@@ -280,6 +280,85 @@ describe('GET /api/employees (E1)', () => {
     });
   });
 
+  describe('sort', () => {
+    const lastNamesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
+      employeeListResponseSchema.parse((await get(q)).json()).items.map((item) => item.lastName);
+
+    it('sorts by USD salary across currencies, with ties in id order', async () => {
+      // At 0.011500, 1,000,000 paise is 11,500 cents, the same as a USD salary of 11,500.
+      const get = await setup(async (db) => {
+        await anEmployee().named('A', 'Low').inCountry('US').withSalary(5_000).insert(db);
+        await anEmployee().named('B', 'TieIn').inCountry('IN').withSalary(1_000_000).insert(db);
+        await anEmployee().named('C', 'TieUs').inCountry('US').withSalary(11_500).insert(db);
+        await anEmployee().named('D', 'High').inCountry('IN').withSalary(3_000_000).insert(db);
+        await anEmployee().named('E', 'Mid').inCountry('US').withSalary(20_000).insert(db);
+      });
+
+      expect(await lastNamesOf(get, '?sort=salaryUsd')).toEqual([
+        'Low',
+        'TieIn',
+        'TieUs',
+        'Mid',
+        'High',
+      ]);
+      expect(await lastNamesOf(get, '?sort=salaryUsd&order=desc')).toEqual([
+        'High',
+        'Mid',
+        'TieUs',
+        'TieIn',
+        'Low',
+      ]);
+    });
+
+    it('lists every row once across pages when salaries tie', async () => {
+      const get = await setup(async (db) => {
+        for (let i = 0; i < 30; i++) {
+          await anEmployee().named('Asha', `Same${i}`).withSalary(1_000_000).insert(db);
+        }
+      });
+
+      const ids: number[] = [];
+      for (const page of [1, 2]) {
+        const body = employeeListResponseSchema.parse(
+          (await get(`?sort=salaryUsd&pageSize=25&page=${page}`)).json(),
+        );
+        ids.push(...body.items.map((item) => item.id));
+      }
+
+      expect(ids).toEqual(Array.from({ length: 30 }, (_, i) => i + 1));
+    });
+
+    it('sorts by hire date and by name in both orders', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().named('A', 'Bravo').hiredOn('2021-05-01').insert(db);
+        await anEmployee().named('B', 'Charlie').hiredOn('2019-03-01').insert(db);
+        await anEmployee().named('C', 'Alpha').hiredOn('2023-07-01').insert(db);
+      });
+
+      expect(await lastNamesOf(get, '?sort=hireDate')).toEqual(['Charlie', 'Bravo', 'Alpha']);
+      expect(await lastNamesOf(get, '?sort=hireDate&order=desc')).toEqual([
+        'Alpha',
+        'Bravo',
+        'Charlie',
+      ]);
+      expect(await lastNamesOf(get, '?sort=name&order=asc')).toEqual(['Alpha', 'Bravo', 'Charlie']);
+      expect(await lastNamesOf(get, '?sort=name&order=desc')).toEqual([
+        'Charlie',
+        'Bravo',
+        'Alpha',
+      ]);
+    });
+
+    it('rejects an unknown param next to valid filters with 400 VALIDATION_FAILED', async () => {
+      const get = await setup(async () => {});
+
+      const response = await get('?country=IN&sort=name&order=asc&colour=red');
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toBe('VALIDATION_FAILED');
+    });
+  });
+
   describe('salary in local currency and USD, with compa-ratio and band position', () => {
     const band = generateBands().find(
       (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
