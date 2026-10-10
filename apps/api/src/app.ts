@@ -9,6 +9,7 @@ import { registerRouteCatalog } from './http/route-catalog.ts';
 import { registerStatic } from './http/static.ts';
 import { registerAuth } from './modules/auth/plugin.ts';
 import { authRoutes } from './modules/auth/routes.ts';
+import { employeeRoutes } from './modules/employees/routes.ts';
 import { healthRoutes } from './modules/health/routes.ts';
 import { referenceRoutes } from './modules/reference/routes.ts';
 
@@ -40,5 +41,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   healthRoutes(app, { db: deps.db });
   authRoutes(app, deps);
   referenceRoutes(app, { db: deps.db });
+  employeeRoutes(app, { db: deps.db });
   return app;
 }
