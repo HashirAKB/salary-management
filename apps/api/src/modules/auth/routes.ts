@@ -7,7 +7,7 @@ import { clearedSessionCookie, readSid, sessionCookie } from './cookie.ts';
 import { hashToken, login, meFor, type AuthDeps } from './service.ts';
 import { deleteSession } from './sessions.ts';
 
-// 10 attempts per minute per client IP; request.ip honours X-Forwarded-For (trustProxy, 04 4.1).
+// 10 attempts per minute per client IP; request.ip is the address the proxy appends (app.ts).
 const LOGIN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' };
 
 // A2 to A4 (04 section 5.2).

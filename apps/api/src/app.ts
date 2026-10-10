@@ -25,7 +25,10 @@ export type AppDeps = {
 export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({
     logger: loggerOptions(deps.config, deps.logStream),
-    trustProxy: true,
+    // Trust only the immediate peer, Render's proxy (the service has no other way in), so
+    // request.ip is the address it appends and a client can't spoof X-Forwarded-For to get round
+    // the login rate limit. 04 section 4.1 says `true`; changed after the S2 review.
+    trustProxy: (_address, hop) => hop === 0,
   });
   // Step 5 of the request pipeline (04 section 4.3): zod validation of params, query and body.
   app.setValidatorCompiler(validatorCompiler);
