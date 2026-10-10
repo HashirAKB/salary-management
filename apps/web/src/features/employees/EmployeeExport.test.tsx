@@ -5,6 +5,7 @@ import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { anEmployeeListResponse } from '../../../test/fixtures/employees.ts';
 import { aMeResponse } from '../../../test/fixtures/me.ts';
+import { aProblem } from '../../../test/fixtures/problem.ts';
 import { render } from '../../../test/render.tsx';
 import { server } from '../../../test/server.ts';
 import { AppRoutes } from '../../AppRoutes.tsx';
@@ -73,5 +74,37 @@ describe('export CSV button (04 sections 5.7 and 8.5)', () => {
       sort: 'salaryUsd',
     });
     await waitFor(() => expect(screen.getByRole('button', { name: 'Export CSV' })).toBeEnabled());
+  });
+
+  it('shows an alert with "Retry" when the export fails, and retrying downloads the file', async () => {
+    loggedInAs('hr_admin');
+    let calls = 0;
+    server.use(
+      http.get('/api/exports/employees.csv', () => {
+        calls += 1;
+        return calls === 1
+          ? HttpResponse.json(
+              aProblem({ status: 500, code: 'INTERNAL', detail: 'The export hit a snag.' }),
+              { status: 500, headers: { 'content-type': 'application/problem+json' } },
+            )
+          : new HttpResponse('"Employee ID"\r\n', {
+              headers: { 'content-disposition': 'attachment; filename="employees-2026-10-09.csv"' },
+            });
+      }),
+    );
+    const user = userEvent.setup();
+    render(<AppRoutes />, { route: '/employees' });
+    await screen.findByText('Priya Nair');
+
+    await user.click(await screen.findByRole('button', { name: 'Export CSV' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('The export hit a snag.');
+    expect(createObjectURL).not.toHaveBeenCalled();
+    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeEnabled();
+
+    await user.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
   });
 });
