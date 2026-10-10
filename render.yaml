@@ -1,0 +1,20 @@
+# One Render free web service serving /api/* and the web build (ADR 0002, D-061, D-063).
+# Node version comes from .nvmrc (D-062).
+services:
+  - type: web
+    name: acme-salary
+    runtime: node
+    plan: free
+    region: singapore
+    # --include=dev: NODE_ENV=production would otherwise make npm ci skip tsc, vite and husky.
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node apps/api/dist/main.js
+    healthCheckPath: /api/health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_AUTH_TOKEN
+        sync: false

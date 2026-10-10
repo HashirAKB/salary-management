@@ -1,0 +1,8 @@
+.ai-notes/
+.claude/
+docs/
+scripts/
+CLAUDE.md
+package-lock.json
+dist/
+coverage/
