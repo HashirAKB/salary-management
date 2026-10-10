@@ -68,6 +68,21 @@ describe('POST /api/auth/login (A2)', () => {
     expect(cookie).not.toContain('Secure');
   });
 
+  it.each([
+    ['password', { email: 'viewer@test.local' }],
+    ['email', { email: 'not-an-email', password: 'test-password-123' }],
+  ])('returns 400 VALIDATION_FAILED for a malformed login body (%s)', async (path, payload) => {
+    app = testApp();
+
+    const response = await app.inject({ method: 'POST', url: '/api/auth/login', payload });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({
+      code: 'VALIDATION_FAILED',
+      errors: [expect.objectContaining({ path })],
+    });
+  });
+
   it('matches the email after trimming and lower-casing it', async () => {
     db = await testDb();
     const user = await aUser('finance').withEmail('finance@test.local').insert(db);
