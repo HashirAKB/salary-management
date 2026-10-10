@@ -158,13 +158,11 @@ const bandJoin = and(
   eq(payBands.levelCode, employees.levelCode),
 );
 
-// Rows in the query's sort order; a limit pages them, no limit returns all of them.
-async function selectItems(
-  db: Db,
-  query: EmployeeListQuery,
-  paging?: { limit: number; offset: number },
-): Promise<EmployeeListItem[]> {
-  const select = db
+type EmployeeRow = Awaited<ReturnType<typeof selectEmployeeRows>>[number];
+
+// An employee with everything its list item and detail need, before any filter.
+function selectEmployeeRows(db: Db) {
+  return db
     .select({
       employee: employees,
       country: countries,
@@ -180,38 +178,54 @@ async function selectItems(
     .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
     .innerJoin(levels, eq(levels.code, employees.levelCode))
     .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
-    .innerJoin(payBands, bandJoin)
+    .innerJoin(payBands, bandJoin);
+}
+
+// The fields the list and the detail share.
+function toListItem({
+  employee: e,
+  country,
+  jobTitle,
+  department,
+  level,
+  band,
+  salaryUsdMinor,
+}: EmployeeRow): EmployeeListItem {
+  return {
+    id: e.id,
+    employeeCode: e.employeeCode,
+    firstName: e.firstName,
+    lastName: e.lastName,
+    gender: e.gender,
+    country: { code: country.code, name: country.name },
+    department: { id: department.id, name: department.name },
+    jobTitle: { id: jobTitle.id, name: jobTitle.name },
+    level: { code: level.code, name: level.name },
+    status: e.status,
+    hireDate: e.hireDate,
+    terminationDate: e.terminationDate,
+    salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
+    salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
+    salaryEffectiveDate: e.salaryEffectiveDate,
+    compaRatio: compaRatio(e.salaryMinor, band.midMinor),
+    // Equal to min or max is inside (02 section 4).
+    bandPosition:
+      e.salaryMinor < band.minMinor ? 'below' : e.salaryMinor > band.maxMinor ? 'above' : 'inside',
+  };
+}
+
+// Rows in the query's sort order; a limit pages them, no limit returns all of them.
+async function selectItems(
+  db: Db,
+  query: EmployeeListQuery,
+  paging?: { limit: number; offset: number },
+): Promise<EmployeeListItem[]> {
+  const select = selectEmployeeRows(db)
     .where(filterConditions(db, query))
     .orderBy(...orderBy(query))
     .$dynamic();
   const rows = await (paging ? select.limit(paging.limit).offset(paging.offset) : select);
-  return rows.map(
-    ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
-      id: e.id,
-      employeeCode: e.employeeCode,
-      firstName: e.firstName,
-      lastName: e.lastName,
-      gender: e.gender,
-      country: { code: country.code, name: country.name },
-      department: { id: department.id, name: department.name },
-      jobTitle: { id: jobTitle.id, name: jobTitle.name },
-      level: { code: level.code, name: level.name },
-      status: e.status,
-      hireDate: e.hireDate,
-      terminationDate: e.terminationDate,
-      salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
-      salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
-      salaryEffectiveDate: e.salaryEffectiveDate,
-      compaRatio: compaRatio(e.salaryMinor, band.midMinor),
-      // Equal to min or max is inside (02 section 4).
-      bandPosition:
-        e.salaryMinor < band.minMinor
-          ? 'below'
-          : e.salaryMinor > band.maxMinor
-            ? 'above'
-            : 'inside',
-    }),
-  );
+  return rows.map(toListItem);
 }
 
 // E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
@@ -244,46 +258,12 @@ export async function exportEmployees(db: Db, query: EmployeeExportQuery): Promi
 
 // E2 (04 section 5.4): one employee with its pay band.
 export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
-  const [row] = await db
-    .select({
-      employee: employees,
-      country: countries,
-      jobTitle: jobTitles,
-      department: departments,
-      level: levels,
-      band: payBands,
-      salaryUsdMinor: usdSalary,
-    })
-    .from(employees)
-    .innerJoin(countries, eq(countries.code, employees.countryCode))
-    .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
-    .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
-    .innerJoin(levels, eq(levels.code, employees.levelCode))
-    .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
-    .innerJoin(payBands, bandJoin)
-    .where(eq(employees.id, id));
+  const [row] = await selectEmployeeRows(db).where(eq(employees.id, id));
   if (!row) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
-  const { employee: e, country, jobTitle, department, level, band } = row;
+  const { employee: e, band } = row;
   const money = (amountMinor: number) => ({ amountMinor, currency: e.salaryCurrency });
   return {
-    id: e.id,
-    employeeCode: e.employeeCode,
-    firstName: e.firstName,
-    lastName: e.lastName,
-    gender: e.gender,
-    country: { code: country.code, name: country.name },
-    department: { id: department.id, name: department.name },
-    jobTitle: { id: jobTitle.id, name: jobTitle.name },
-    level: { code: level.code, name: level.name },
-    status: e.status,
-    hireDate: e.hireDate,
-    terminationDate: e.terminationDate,
-    salary: money(e.salaryMinor),
-    salaryUsd: { amountMinor: row.salaryUsdMinor, currency: 'USD' },
-    salaryEffectiveDate: e.salaryEffectiveDate,
-    compaRatio: compaRatio(e.salaryMinor, band.midMinor),
-    bandPosition:
-      e.salaryMinor < band.minMinor ? 'below' : e.salaryMinor > band.maxMinor ? 'above' : 'inside',
+    ...toListItem(row),
     band: { min: money(band.minMinor), mid: money(band.midMinor), max: money(band.maxMinor) },
     createdAt: e.createdAt,
     updatedAt: e.updatedAt,
