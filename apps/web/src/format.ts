@@ -21,7 +21,7 @@ function moneyFormatter(currency: string): Intl.NumberFormat {
 export function formatMoney({ amountMinor, currency }: MoneyValue): string {
   return moneyFormatter(currency)
     .format(amountMinor / 100)
-    .replace(/ /g, ' ');
+    .replace(/\s/g, ' ');
 }
 
 const dateFormatter = new Intl.DateTimeFormat('en-GB', {
