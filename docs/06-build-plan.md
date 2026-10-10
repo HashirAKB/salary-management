@@ -328,11 +328,13 @@ refactor(web): extract api client problem parsing
 - R1 reference endpoint; E1 with `page`, `pageSize`, `status` and default name sort (filters, search and other sorts come in S4); USD conversion and band position in the list query.
 - Shared `reference.ts`, `employee.ts` (list parts), `money.ts`, `percent.ts` (04 section 8.4.1).
 - Web: `format.ts`, `Money` and `FxAsOf` components, `EmployeeListPage` with table, pager, page size, skeleton, empty and error states.
+- Web: Mantine theme (`createTheme` with violet primary, `md` radius and striped table defaults) and `ColorSchemeScript` wired into `main.tsx`; dark mode toggle `ActionIcon` in the app shell user menu (`Shell.tsx`), colour scheme persisted in `localStorage` via `localStorageColorSchemeManager`. All from the already-installed `@mantine/core@9.7.1`.
 
 **Test list.**
 - 05 section 5.3: U rows 1 and 2; I rows 1, 2 and 12 (default list, past-the-end page, item fields); C rows 1, 6 and 7 (rows and count line, error, role buttons).
 - 05 section 5.9: the five U formatting rows.
 - 05 section 5.6: the TS and SQL USD conversion agreement row (needed for the list's USD column).
+- Dark mode toggle: C, `Shell` renders a toggle that switches and persists the colour scheme (no 05 row; behaviour introduced by this slice).
 
 **Acceptance.**
 - The default page answers in under 300 ms locally at 10,000 rows (rough check; Chat 8 measures properly).
@@ -346,6 +348,9 @@ test(employees): page active employees by name with totals
 feat(employees): add employee list endpoint with offset paging
 test(shared): convert to usd half up and agree with the sql form
 feat(shared): add money conversion helpers
+chore(web): add mantine theme with violet primary and table defaults
+test(web): toggle dark and light mode from the user menu
+feat(web): add dark mode toggle to the shell user menu
 test(web): format money, dates and percentages
 feat(web): add formatting helpers
 test(web): render the employee table with count and pager
