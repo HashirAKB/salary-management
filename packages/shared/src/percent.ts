@@ -5,3 +5,7 @@ export function compaRatio(salaryMinor: number, midMinor: number): number {
   const hundredths = Math.floor((numerator * 2 + midMinor) / (midMinor * 2));
   return salaryMinor < 0 && hundredths !== 0 ? -hundredths / 100 : hundredths / 100;
 }
+
+export function changePct(_prevMinor: number, _nextMinor: number): number {
+  throw new Error('not implemented');
+}
