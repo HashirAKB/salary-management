@@ -20,7 +20,7 @@ describe('employeeListQuerySchema', () => {
   });
 
   it('rejects unknown params', () => {
-    const result = employeeListQuerySchema.safeParse({ q: 'nair' });
+    const result = employeeListQuerySchema.safeParse({ nope: 'nair' });
 
     expect(result.success).toBe(false);
   });

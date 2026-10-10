@@ -103,7 +103,7 @@ describe('GET /api/employees (E1)', () => {
   it('rejects pageSize 30 and an unknown param with 400 VALIDATION_FAILED', async () => {
     const get = await setup(async () => {});
 
-    for (const query of ['?pageSize=30', '?page=0', '?country=IN']) {
+    for (const query of ['?pageSize=30', '?page=0', '?nope=IN']) {
       const response = await get(query);
       expect({ query, status: response.statusCode, code: response.json().code }).toEqual({
         query,
