@@ -4,6 +4,7 @@ import type { Config } from './config.ts';
 import type { Db } from './db/client.ts';
 import type { Clock } from './domain/clock.ts';
 import { registerErrorHandling } from './http/error-handler.ts';
+import { registerRouteCatalog } from './http/route-catalog.ts';
 import { registerStatic } from './http/static.ts';
 import { registerAuth } from './modules/auth/plugin.ts';
 import { authRoutes } from './modules/auth/routes.ts';
@@ -22,6 +23,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   const app = Fastify({ logger: { level: deps.config.logLevel }, trustProxy: true });
   // Step 5 of the request pipeline (04 section 4.3): zod validation of params, query and body.
   app.setValidatorCompiler(validatorCompiler);
+  registerRouteCatalog(app);
   if (deps.staticRoot) registerStatic(app, deps.staticRoot);
   registerErrorHandling(app, { spaFallback: Boolean(deps.staticRoot) });
   registerAuth(app, deps);
