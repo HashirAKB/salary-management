@@ -269,7 +269,7 @@ refactor(seed): extract cohort targets into a config table
 **Demo.** On the live URL, log in as HR Admin, HR Viewer and Finance. The nav differs by role, Finance lands on a placeholder `/insights`, and `/employees` shows the forbidden page for Finance.
 
 **Scope.**
-- `domain/permissions.ts` (04 section 4.5), password hashing with config-driven scrypt parameters, sessions repository, auth plugin (`onRequest`), `requires(action)` guard (`onRequest`, D-043), route catalog in `buildApp`, login rate limit with `trustProxy: true`, A2 to A4, `Cache-Control: no-store`, log redaction.
+- `domain/permissions.ts` (04 section 4.5), password hashing with config-driven scrypt parameters, sessions repository, auth plugin (`onRequest`), `requires(action)` guard (`onRequest`, D-043), route catalog in `buildApp`, login rate limit behind the proxy (trusting only the proxy hop, 04 section 4.1), A2 to A4, `Cache-Control: no-store`, log redaction.
 - Shared schemas `common.ts`, `problem.ts`, `auth.ts`.
 - Web: API client (problem parsing; the waking logic comes in S9), `useSession`, login page, `AppShell` with the nav gated by `permissions`, route guards, landing redirect, forbidden and not-found pages, placeholder pages for the later screens.
 - Builders `aUser`, `loggedInAs`.
