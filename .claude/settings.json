@@ -48,5 +48,11 @@
                             ]
                      }
               ]
+       },
+       "env": {
+              "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"
+       },
+       "enabledPlugins": {
+              "render@claude-plugins-official": false
        }
 }
