@@ -1,7 +1,7 @@
 import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
-import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
+import { anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
 import { testApp, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
 import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
@@ -228,6 +228,55 @@ describe('GET /api/employees (E1)', () => {
         code: 'VALIDATION_FAILED',
         errors: [{ path }],
       });
+    });
+  });
+
+  describe('band and stale-salary filters', () => {
+    const inBand = generateBands().find(
+      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
+    )!;
+    const lastNamesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
+      employeeListResponseSchema.parse((await get(q)).json()).items.map((item) => item.lastName);
+
+    // Salary exactly at min and at max is inside the band (02 section 4).
+    async function seedPositions(db: Db) {
+      await anEmployee()
+        .named('A', 'Below')
+        .withSalary(inBand.minMinor - 1)
+        .insert(db);
+      await anEmployee().named('B', 'AtMin').withSalary(inBand.minMinor).insert(db);
+      await anEmployee().named('C', 'Mid').withSalary(inBand.midMinor).insert(db);
+      await anEmployee().named('D', 'AtMax').withSalary(inBand.maxMinor).insert(db);
+      await anEmployee()
+        .named('E', 'Above')
+        .withSalary(inBand.maxMinor + 1)
+        .insert(db);
+    }
+
+    it.each([
+      ['below', ['Below']],
+      ['above', ['Above']],
+      ['outside', ['Above', 'Below']],
+      ['inside', ['AtMax', 'AtMin', 'Mid']],
+    ])('band=%s returns %j', async (band, expected) => {
+      const get = await setup(seedPositions);
+
+      expect(await lastNamesOf(get, `?band=${band}`)).toEqual(expected);
+    });
+
+    it('salaryUnchangedSince keeps employees whose salary date is before that date', async () => {
+      const get = await setup(async (db) => {
+        await anEmployee().named('A', 'Older').hiredOn('2023-06-14').insert(db);
+        await anEmployee().named('B', 'OnTheDay').hiredOn('2023-06-15').insert(db);
+        await anEmployee().named('C', 'Newer').hiredOn('2024-01-01').insert(db);
+        await anEmployee()
+          .named('D', 'Raised')
+          .hiredOn('2020-01-01')
+          .withHistory([merit('2024-02-01', 5)])
+          .insert(db);
+      });
+
+      expect(await lastNamesOf(get, '?salaryUnchangedSince=2023-06-15')).toEqual(['Older']);
     });
   });
 
