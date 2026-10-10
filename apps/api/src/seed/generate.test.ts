@@ -60,3 +60,68 @@ describe('generateDataset: allocation (02 sections 7.3 and 7.5)', () => {
     expect(employees.length).toBeGreaterThan(0);
   });
 });
+
+type Cohort = { key: string; women: number[]; men: number[] };
+
+// Gender gap per 02 section 4, in local currency: (meanMale - meanFemale) / meanMale * 100.
+const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
+const gapPct = (c: Cohort) => ((mean(c.men) - mean(c.women)) / mean(c.men)) * 100;
+
+const eligibleCohorts = (): Cohort[] => {
+  const cohorts = new Map<string, Cohort>();
+  for (const e of active()) {
+    const key = `${e.countryCode}/${e.jobTitleId}/${e.levelCode}`;
+    const cohort = cohorts.get(key) ?? { key, women: [], men: [] };
+    if (e.gender === 'female') cohort.women.push(e.salaryMinor);
+    if (e.gender === 'male') cohort.men.push(e.salaryMinor);
+    cohorts.set(key, cohort);
+  }
+  return [...cohorts.values()].filter((c) => c.women.length >= 5 && c.men.length >= 5);
+};
+
+describe('generateDataset: current salary (02 section 7.6)', () => {
+  it('lands the four target cohorts within 0.1 points of their gap, with the expected flags, and keeps every other eligible cohort under 2.5%', () => {
+    const targets: Record<string, { gap: number; flagged: boolean }> = {
+      'IN/1/L3': { gap: 8.0, flagged: true },
+      'US/5/L2': { gap: 6.0, flagged: true },
+      'GB/1/L4': { gap: 5.3, flagged: true },
+      'DE/1/L2': { gap: 4.7, flagged: false },
+    };
+    const cohorts = eligibleCohorts();
+
+    for (const [key, target] of Object.entries(targets)) {
+      const cohort = cohorts.find((c) => c.key === key);
+      expect(cohort, key).toBeDefined();
+      const gap = gapPct(cohort!);
+      expect(Math.abs(gap - target.gap), `${key} gap ${gap}`).toBeLessThanOrEqual(0.1);
+      expect(gap >= 5, key).toBe(target.flagged);
+    }
+    for (const cohort of cohorts.filter((c) => !(c.key in targets))) {
+      expect(Math.abs(gapPct(cohort)), cohort.key).toBeLessThan(2.5);
+    }
+  });
+
+  it('keeps the outside-band share between 5% and 8%', () => {
+    const band = new Map(
+      dataset().payBands.map((b) => [`${b.countryCode}/${b.jobTitleId}/${b.levelCode}`, b]),
+    );
+
+    const outside = active().filter((e) => {
+      const b = band.get(`${e.countryCode}/${e.jobTitleId}/${e.levelCode}`)!;
+      return e.salaryMinor < b.minMinor || e.salaryMinor > b.maxMinor;
+    });
+
+    expect(outside.length / 10_000).toBeGreaterThanOrEqual(0.05);
+    expect(outside.length / 10_000).toBeLessThanOrEqual(0.08);
+  });
+
+  it('rounds salaries to the nearest 100 major units, 1,000 for INR', () => {
+    const notRounded = dataset().employees.filter(
+      (e) => e.salaryMinor % ((e.salaryCurrency === 'INR' ? 1000 : 100) * 100) !== 0,
+    );
+    const distinctSalaries = new Set(active().map((e) => e.salaryMinor));
+
+    expect(notRounded).toEqual([]);
+    expect(distinctSalaries.size).toBeGreaterThan(1000);
+  });
+});
