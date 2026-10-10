@@ -10,7 +10,13 @@ export const isoDateSchema = z.iso.date();
 
 export type IsoDate = z.infer<typeof isoDateSchema>;
 
-// 04 section 4.7: trimmed, 1 to 100 characters, no leading formula character.
-export const personNameSchema: z.ZodType<string> = z.custom<string>(() => {
-  throw new Error('not implemented');
-});
+// 04 section 4.7: trimmed, 1 to 100 characters, no leading formula character. The formula check
+// runs on the raw value, so a leading tab is caught before trim removes it.
+export const personNameSchema = z
+  .string()
+  .refine((value) => !/^[=+\-@\t]/.test(value), {
+    message: "Name can't start with =, +, -, @ or a tab.",
+  })
+  .trim()
+  .min(1, 'Name is required.')
+  .max(100, 'Name must be 100 characters or fewer.');
