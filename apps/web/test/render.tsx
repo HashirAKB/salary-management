@@ -9,7 +9,7 @@ import { colorSchemeManager, theme } from '../src/theme.ts';
 export function render(ui: ReactElement, { route = '/' }: { route?: string } = {}) {
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const Wrapper = ({ children }: { children: ReactNode }) => (
-    <MantineProvider theme={theme} colorSchemeManager={colorSchemeManager}>
+    <MantineProvider theme={theme} colorSchemeManager={colorSchemeManager} env="test">
       <QueryClientProvider client={queryClient}>
         <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
       </QueryClientProvider>
