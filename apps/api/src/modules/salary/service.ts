@@ -3,6 +3,7 @@ import {
   type EmployeeDetail,
   type SalaryChangeBody,
   type SalaryChangeItem,
+  type SalaryHistoryResponse,
 } from '@acme/shared';
 import { and, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
@@ -141,4 +142,12 @@ export async function recordSalaryChange(
     createdAt: context.now,
   };
   return { employee: await getEmployee(db, employeeId), change };
+}
+
+// S1 (04 section 5.5): the employee's history, newest first.
+export async function listSalaryHistory(
+  _db: Db,
+  _employeeId: number,
+): Promise<SalaryHistoryResponse> {
+  throw new Error('not implemented');
 }

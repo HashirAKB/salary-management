@@ -4,17 +4,26 @@ import {
   type EmployeeDetail,
   type SalaryChangeBody,
   type SalaryChangeItem,
+  type SalaryHistoryResponse,
 } from '@acme/shared';
 import type { FastifyInstance } from 'fastify';
 import type { Db } from '../../db/client.ts';
 import type { Clock } from '../../domain/clock.ts';
 import { requires } from '../../http/guard.ts';
-import { recordSalaryChange, type SalaryWrites } from './service.ts';
+import { listSalaryHistory, recordSalaryChange, type SalaryWrites } from './service.ts';
 
 export function salaryRoutes(
   app: FastifyInstance,
   deps: { db: Db; clock: Clock; writes?: SalaryWrites },
 ) {
+  // S1 (04 section 5.5).
+  app.get(
+    '/api/employees/:id/salary-changes',
+    { onRequest: requires('salary.read'), schema: { params: employeeIdParamsSchema } },
+    async (request): Promise<SalaryHistoryResponse> =>
+      listSalaryHistory(deps.db, (request.params as { id: number }).id),
+  );
+
   // S2 (04 section 5.5).
   app.post(
     '/api/employees/:id/salary-changes',
