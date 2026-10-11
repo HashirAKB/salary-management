@@ -1,12 +1,24 @@
 # ACME Salary Manager
 
+> ## 🎥 [Watch the demo video (3 to 5 minutes)](https://www.youtube.com/watch?v=-_ylLd3blpA)
+>
+> All three roles, the salary history, pay equity and Ask about pay.
+
 A web app that replaces the Excel files an HR team uses to manage salaries for 10,000 employees across several countries. HR keeps salary data correct, records raises with a full history, and answers "how do we pay people?" in seconds, including in plain English.
 
 **Live:** https://acme-salary-r5qq.onrender.com/
 
 The live app runs on free hosting and sleeps when idle. The first load after a quiet spell takes about 30 seconds; after that it is fast.
 
-**Demo video (3 to 5 minutes):** [Watch on YouTube](https://www.youtube.com/watch?v=-_ylLd3blpA). It shows all three roles, the salary history, pay equity and Ask about pay.
+## Contents
+
+- [Demo accounts](#demo-accounts)
+- [Run it locally in five minutes](#run-it-locally-in-five-minutes)
+- [What it does](#what-it-does)
+- [How it works](#how-it-works)
+- [How I worked with AI](#how-i-worked-with-ai)
+- [How to read the history](#how-to-read-the-history)
+- [Not built](#not-built)
 
 ## Demo accounts
 
