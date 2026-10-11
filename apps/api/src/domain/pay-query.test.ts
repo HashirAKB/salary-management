@@ -106,6 +106,22 @@ describe('aggregatePay: minimum group size (D-012, D-040)', () => {
     expect(groups[0]?.suppressed).toBe(false);
   });
 
+  it('suppresses the ungrouped all group when a filter leaves fewer than the minimum', () => {
+    const groups = aggregatePay(rows.slice(0, 3), metrics, 'none', 5);
+
+    expect(groups).toEqual([
+      {
+        key: 'all',
+        label: 'All active employees',
+        suppressed: true,
+        headcount: null,
+        usd: null,
+        local: null,
+        outsideBand: null,
+      },
+    ]);
+  });
+
   it('suppresses nothing at the HR minimum of 1', () => {
     const groups = aggregatePay([payRow()], metrics, 'country', 1);
 
