@@ -32,6 +32,7 @@ export function registerErrorHandling(
 
   app.setErrorHandler((error: FastifyError | AppError, request, reply) => {
     if (error instanceof AppError) {
+      if (error.headers) reply.headers(error.headers);
       return sendProblem(reply, {
         status: error.status,
         code: error.code,

@@ -78,7 +78,7 @@ export default defineConfig({
 | `npm test -- --project api` | One project | |
 | `npm run test:coverage` | All projects with coverage and the D-052 floor | CI runs this one |
 | `npm run e2e` | Builds, seeds an e2e database, runs Playwright | Under 2 minutes in CI |
-| `npm run eval` | The Ask eval set against the real model (needs `ANTHROPIC_API_KEY`) | Manual only |
+| `npm run eval` | The Ask eval set against the real model (needs the configured provider's key: `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) | Manual only |
 
 Every script sets `TZ=UTC`. A single test file over 2 seconds is a smell to fix, not to accept.
 
@@ -127,7 +127,7 @@ Web fixtures (`apps/web/test/fixtures/`): `anEmployeeListItem()`, `anEmployeeDet
 - The SQL strings Drizzle generates. We test the rows that come back.
 - Styling, layout and colours. Snapshot tests: none.
 - Getters and pass-through functions with no logic.
-- The real Anthropic API inside the suite (only in the eval run).
+- The real Gemini or Anthropic API inside the suite (only in the eval run).
 - Performance (Chat 8 measures it with a script and records numbers in `docs/performance.md`).
 
 ## 5. Test lists per feature
@@ -328,6 +328,8 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
 | U | each cannot-answer reason maps to its message |
 | U | `AnthropicInterpreter` sends the model, `max_tokens: 512`, both tools as strict, `tool_choice: any` and only the question (stub SDK client, no network) |
 | U | `AnthropicInterpreter` maps a `run_pay_query` call to a query, and a `refusal` stop reason, a `max_tokens` stop reason or no tool call to an error |
+| U | `GeminiInterpreter` sends the model, `maxOutputTokens: 512`, both functions, a forced function call and only the question (stub `fetch`); maps a function call to a query or refusal, and a non-`STOP` finish reason, a blocked prompt, an HTTP error, no function call or invalid arguments to an error (ADR 0009) |
+| U | `createInterpreter` builds the interpreter for `ASK_PROVIDER` and refuses without that provider's key (ADR 0009) |
 | I | without an API key, `POST /api/ask` returns 503 `ASK_UNAVAILABLE` and writes no log row |
 | I | an answerable question returns the answer, the interpreted query and the interpretation list, and logs `answered` with the query JSON |
 | I | an unanswerable question returns `kind: cannot_answer` with the template message, logged as `cannot_answer` |

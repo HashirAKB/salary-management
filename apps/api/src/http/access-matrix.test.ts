@@ -26,6 +26,7 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
   'GET /api/insights/summary': 'insights.read',
   'GET /api/insights/pay-distribution': 'insights.read',
   'GET /api/insights/pay-equity': 'insights.read',
+  'POST /api/ask': 'ask.use',
 };
 
 const ROLES: Role[] = ['hr_admin', 'hr_viewer', 'finance'];

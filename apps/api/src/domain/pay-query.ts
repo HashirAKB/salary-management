@@ -1,4 +1,4 @@
-import { toUsdMinor } from '@acme/shared';
+import { gapPct, toUsdMinor } from '@acme/shared';
 import { GENDERS } from './genders.ts';
 import { percentile } from './percentiles.ts';
 
@@ -18,7 +18,16 @@ export interface PayRow {
 
 export type Dimension = 'country' | 'department' | 'jobTitle' | 'level' | 'gender';
 export type Metric =
-  'headcount' | 'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max' | 'outsideBandCount';
+  | 'headcount'
+  | 'total'
+  | 'average'
+  | 'median'
+  | 'p25'
+  | 'p75'
+  | 'min'
+  | 'max'
+  | 'outsideBandCount'
+  | 'genderGap';
 
 export type PayStats = Partial<
   Record<'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max', number>
@@ -34,6 +43,17 @@ export interface GroupResult {
   // Present only when every row in the group has the same currency.
   local: PayStats | null;
   outsideBand: { below: number; above: number; total: number } | null;
+  // The currency of a single-currency group; null when mixed or suppressed.
+  // Absent on suppressed groups.
+  currency?: string | null;
+  gap?: GenderGap | null;
+}
+
+export interface GenderGap {
+  comparable: boolean;
+  women: number | null;
+  men: number | null;
+  gapPct: number | null;
 }
 
 function statsOf(values: readonly number[], metrics: readonly Metric[]): PayStats {
@@ -52,6 +72,30 @@ function statsOf(values: readonly number[], metrics: readonly Metric[]): PayStat
     if (metrics.includes(key)) picked[key] = all[key];
   }
   return picked;
+}
+
+const MIN_PER_GENDER = 5;
+
+const mean = (values: readonly number[]) =>
+  Math.round(values.reduce((sum, v) => sum + v, 0) / values.length);
+
+// 02 section 4: mean gap with 5 women and 5 men at least; local currency when the group has one.
+function genderGapOf(rows: readonly PayRow[], singleCurrency: boolean): GenderGap {
+  const pay = (gender: string) =>
+    rows
+      .filter((r) => r.gender === gender)
+      .map((r) => (singleCurrency ? r.salaryMinor : toUsdMinor(r.salaryMinor, r.usdPerUnitMicros)));
+  const women = pay('female');
+  const men = pay('male');
+  if (women.length < MIN_PER_GENDER || men.length < MIN_PER_GENDER) {
+    return { comparable: false, women: null, men: null, gapPct: null };
+  }
+  return {
+    comparable: true,
+    women: women.length,
+    men: men.length,
+    gapPct: gapPct(mean(men), mean(women)),
+  };
 }
 
 function resultFor(
@@ -81,6 +125,8 @@ function resultFor(
         )
       : null,
     outsideBand,
+    currency: singleCurrency ? (rows[0]?.currency ?? null) : null,
+    gap: metrics.includes('genderGap') ? genderGapOf(rows, singleCurrency) : null,
   };
 }
 

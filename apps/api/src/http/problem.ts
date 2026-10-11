@@ -20,10 +20,19 @@ export class AppError extends Error {
   readonly status: number;
   readonly code: string;
   readonly errors: ProblemFieldError[] | undefined;
+  /** Extra response headers, such as Retry-After on a 429. */
+  readonly headers: Record<string, string> | undefined;
 
-  constructor(status: number, code: string, detail: string, errors?: ProblemFieldError[]) {
+  constructor(
+    status: number,
+    code: string,
+    detail: string,
+    errors?: ProblemFieldError[],
+    headers?: Record<string, string>,
+  ) {
     super(detail);
     this.errors = errors;
+    this.headers = headers;
     this.name = 'AppError';
     this.status = status;
     this.code = code;

@@ -552,7 +552,7 @@ refactor(insights): load the active projection once per request
 **Demo.** Ask "What is the median pay for a Senior Engineer in India?" and see the answer with "How I read your question"; ask "What does Priya Nair earn?" and see the refusal with a suggestion; show the eval report.
 
 **Scope.**
-- `QueryInterpreter`, `FakeInterpreter`, `AnthropicInterpreter` (SDK client injected), tool schema builder from reference data, system prompt, semantic rule, answer templates, caps over `ask_log`, K1, `askEnabled` in `me`.
+- `QueryInterpreter`, `FakeInterpreter`, `AnthropicInterpreter` (SDK client injected), `GeminiInterpreter` (`fetch` injected, default provider, ADR 0009), provider switch `ASK_PROVIDER`, tool schema builder from reference data, system prompt, semantic rule, answer templates, caps over `ask_log`, K1, `askEnabled` in `me`.
 - Shared `structured-query.ts`, `ask.ts`.
 - `apps/api/evals/ask-eval.json` (05 section 6.3), the `npm run eval` script, and the first committed eval report.
 - Web: `AskPage`, nav entry when enabled.

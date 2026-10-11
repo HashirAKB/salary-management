@@ -266,3 +266,74 @@ describe('aggregatePay: grouping and order', () => {
     ]);
   });
 });
+
+describe('aggregatePay: gender gap (04 section 6 step 3)', () => {
+  const people = (gender: string, count: number, override: Parameters<typeof payRow>[0] = {}) =>
+    Array.from({ length: count }, () => payRow({ gender, ...override }));
+
+  it('reports the mean gap with at least 5 women and 5 men', () => {
+    const rows = [
+      ...people('female', 5, { salaryMinor: 920_000 }),
+      ...people('male', 5, { salaryMinor: 1_000_000 }),
+      ...people('non_binary', 2, { salaryMinor: 5_000_000 }),
+    ];
+
+    const [group] = aggregatePay(rows, ['genderGap'], 'none', 1);
+
+    expect(group?.gap).toEqual({ comparable: true, women: 5, men: 5, gapPct: 8 });
+  });
+
+  it('is not comparable under 5 women or under 5 men', () => {
+    const rows = [...people('female', 4), ...people('male', 9)];
+
+    const [group] = aggregatePay(rows, ['genderGap'], 'none', 1);
+
+    expect(group?.gap).toEqual({ comparable: false, women: null, men: null, gapPct: null });
+  });
+
+  it('uses USD when the group mixes currencies', () => {
+    // Women earn 10_000 USD; men earn 1_000_000 INR at 0.012, which is 12_000 USD.
+    const rows = [
+      ...people('female', 5, { salaryMinor: 10_000 }),
+      ...people('male', 5, { currency: 'INR', salaryMinor: 1_000_000, usdPerUnitMicros: 12_000 }),
+    ];
+
+    const [group] = aggregatePay(rows, ['genderGap'], 'none', 1);
+
+    expect(group?.gap?.gapPct).toBe(16.7);
+  });
+
+  it('computes a gap per group', () => {
+    const rows = [
+      ...people('female', 5, { countryCode: 'US', salaryMinor: 900_000 }),
+      ...people('male', 5, { countryCode: 'US', salaryMinor: 1_000_000 }),
+      ...people('male', 2, { countryCode: 'IN' }),
+    ];
+
+    const groups = aggregatePay(rows, ['genderGap'], 'country', 1);
+
+    expect(groups.map((g) => [g.key, g.gap?.comparable, g.gap?.gapPct])).toEqual([
+      ['IN', false, null],
+      ['US', true, 10],
+    ]);
+  });
+
+  it('has no gap unless genderGap is asked for', () => {
+    const [group] = aggregatePay(people('female', 5), ['median'], 'none', 1);
+
+    expect(group?.gap).toBeNull();
+  });
+
+  it('reports the currency of a single-currency group, null when mixed', () => {
+    const inr = aggregatePay([payRow({ currency: 'INR' })], ['median'], 'none', 1)[0];
+    const mixed = aggregatePay(
+      [payRow({ currency: 'INR' }), payRow({ currency: 'USD' })],
+      ['median'],
+      'none',
+      1,
+    )[0];
+
+    expect(inr?.currency).toBe('INR');
+    expect(mixed?.currency).toBeNull();
+  });
+});

@@ -30,6 +30,7 @@ const NAV: { to: string; label: string; action: Action }[] = [
   { to: '/employees', label: 'Employees', action: 'employee.read' },
   { to: '/insights', label: 'Insights', action: 'insights.read' },
   { to: '/insights/pay-equity', label: 'Pay equity', action: 'insights.read' },
+  { to: '/ask', label: 'Ask about pay', action: 'ask.use' },
 ];
 
 const ROLE_LABELS: Record<Role, string> = {
@@ -140,7 +141,11 @@ export function Shell(): ReactElement {
               ACME Salary Manager
             </Title>
             <Group component="nav" gap="sm" aria-label="Main">
-              {NAV.filter((item) => me.data.permissions.includes(item.action)).map((item) => (
+              {NAV.filter(
+                (item) =>
+                  me.data.permissions.includes(item.action) &&
+                  (item.to !== '/ask' || me.data.askEnabled),
+              ).map((item) => (
                 <NavLink key={item.to} to={item.to} end>
                   {item.label}
                 </NavLink>

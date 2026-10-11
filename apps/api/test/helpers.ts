@@ -10,6 +10,8 @@ export const testConfig: Config = {
   port: 0,
   databaseUrl: ':memory:',
   databaseAuthToken: undefined,
+  askProvider: 'anthropic',
+  geminiApiKey: undefined,
   anthropicApiKey: undefined,
   askModel: 'claude-haiku-5-5',
   askUserDailyLimit: 30,

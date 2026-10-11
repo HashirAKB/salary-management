@@ -1,6 +1,6 @@
 # ADR 0008: "Ask about pay" with Claude Haiku, strict tool use, and layered spend caps
 
-- Status: Accepted (settles "LLM provider, key handling and spend cap"; implements D-003, D-004, D-015)
+- Status: Accepted; the provider part is amended by [ADR 0009](0009-ask-gemini-provider.md) (settles "LLM provider, key handling and spend cap"; implements D-003, D-004, D-015)
 - Date: 2026-10-09
 
 ## Context

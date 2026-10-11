@@ -4,6 +4,7 @@ import { Navigate, Route, Routes } from 'react-router';
 import { PlaceholderPage } from './components/PlaceholderPage.tsx';
 import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
 import { Shell, useViewer } from './components/Shell.tsx';
+import { AskPage } from './features/ask/AskPage.tsx';
 import { EmployeeDetailPage } from './features/employees/EmployeeDetailPage.tsx';
 import { NewEmployeePage } from './features/employees/NewEmployeePage.tsx';
 import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
@@ -20,6 +21,7 @@ const SCREENS: Record<string, ComponentType> = {
   '/employees/:id': EmployeeDetailPage,
   '/insights': InsightsPage,
   '/insights/pay-equity': PayEquityPage,
+  '/ask': AskPage,
 };
 
 function Gated({

@@ -6,6 +6,8 @@ export type Config = {
   port: number;
   databaseUrl: string;
   databaseAuthToken: string | undefined;
+  askProvider: 'gemini' | 'anthropic';
+  geminiApiKey: string | undefined;
   anthropicApiKey: string | undefined;
   askModel: string;
   askUserDailyLimit: number;
@@ -29,6 +31,9 @@ export class ConfigError extends Error {
   }
 }
 
+// ADR 0009: the model each provider uses unless ASK_MODEL says otherwise.
+const DEFAULT_MODELS = { gemini: 'gemini-flash-latest', anthropic: 'claude-haiku-5-5' } as const;
+
 // An empty value (as copied from .env.example) counts as not set.
 const optional = <T extends z.ZodType>(schema: T) =>
   z.preprocess((value) => (value === '' ? undefined : value), schema);
@@ -42,8 +47,10 @@ const envSchema = z
     PORT: optional(positiveInt.default(3000)),
     DATABASE_URL: optional(z.string({ error: 'Required.' })),
     DATABASE_AUTH_TOKEN: optional(z.string().optional()),
+    ASK_PROVIDER: optional(z.enum(['gemini', 'anthropic']).default('gemini')),
+    GEMINI_API_KEY: optional(z.string().optional()),
     ANTHROPIC_API_KEY: optional(z.string().optional()),
-    ASK_MODEL: optional(z.string().default('claude-haiku-5-5')),
+    ASK_MODEL: optional(z.string().optional()),
     ASK_USER_DAILY_LIMIT: optional(positiveInt.default(30)),
     ASK_GLOBAL_DAILY_LIMIT: optional(positiveInt.default(300)),
     LOG_LEVEL: optional(
@@ -76,11 +83,18 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     port: e.PORT,
     databaseUrl: e.DATABASE_URL,
     databaseAuthToken: e.DATABASE_AUTH_TOKEN,
+    askProvider: e.ASK_PROVIDER,
+    geminiApiKey: e.GEMINI_API_KEY,
     anthropicApiKey: e.ANTHROPIC_API_KEY,
-    askModel: e.ASK_MODEL,
+    askModel: e.ASK_MODEL ?? DEFAULT_MODELS[e.ASK_PROVIDER],
     askUserDailyLimit: e.ASK_USER_DAILY_LIMIT,
     askGlobalDailyLimit: e.ASK_GLOBAL_DAILY_LIMIT,
     logLevel: e.LOG_LEVEL,
     scrypt: PRODUCTION_SCRYPT,
   };
+}
+
+/** The API key for the configured Ask provider; undefined turns Ask off (D-004). */
+export function askApiKey(config: Config): string | undefined {
+  return config.askProvider === 'gemini' ? config.geminiApiKey : config.anthropicApiKey;
 }

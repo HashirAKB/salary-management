@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "q01",
+      "question": "What is the median pay for a Senior Engineer in India?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "median",
+          "groupBy": "none",
+          "filters": {
+            "countries": ["IN"],
+            "departments": [],
+            "jobTitles": ["Software Engineer"],
+            "levels": ["L3"],
+            "genders": []
+          }
+        }
+      },
+      "tests": "Persona question; \"Senior\" to L3; \"Engineer\" to a title"
+    },
+    {
+      "id": "q02",
+      "question": "How does total payroll split by country?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "total",
+          "groupBy": "country",
+          "filters": {
+            "countries": [],
+            "departments": [],
+            "jobTitles": [],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "\"payroll\" to total; \"split by\" to groupBy"
+    },
+    {
+      "id": "q03",
+      "question": "How many people work in Sales?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "headcount",
+          "groupBy": "none",
+          "filters": {
+            "countries": [],
+            "departments": ["Sales"],
+            "jobTitles": [],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "Department word"
+    },
+    {
+      "id": "q04",
+      "question": "Average salary by level for Product Managers in the US",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "average",
+          "groupBy": "level",
+          "filters": {
+            "countries": ["US"],
+            "departments": [],
+            "jobTitles": ["Product Manager"],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "Group plus two filters"
+    },
+    {
+      "id": "q05",
+      "question": "How many employees are paid outside their band in Germany?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "outsideBandCount",
+          "groupBy": "none",
+          "filters": {
+            "countries": ["DE"],
+            "departments": [],
+            "jobTitles": [],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "Band metric"
+    },
+    {
+      "id": "q06",
+      "question": "What's the gender pay gap for Account Executives by level?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "genderGap",
+          "groupBy": "level",
+          "filters": {
+            "countries": [],
+            "departments": [],
+            "jobTitles": ["Account Executive"],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "Gap metric with groupBy"
+    },
+    {
+      "id": "q07",
+      "question": "Show me the 75th percentile salary for Data Analysts in the UK",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "p75",
+          "groupBy": "none",
+          "filters": {
+            "countries": ["GB"],
+            "departments": [],
+            "jobTitles": ["Data Analyst"],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "\"UK\" to GB; percentile"
+    },
+    {
+      "id": "q08",
+      "question": "Who is the highest paid engineer in Canada?",
+      "expect": { "kind": "cannot_answer", "reason": "individual" },
+      "tests": "\"Who\" singles out a person even without a name"
+    },
+    {
+      "id": "q09",
+      "question": "What is the highest salary for a Lead Software Engineer in Canada?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "max",
+          "groupBy": "none",
+          "filters": {
+            "countries": ["CA"],
+            "departments": [],
+            "jobTitles": ["Software Engineer"],
+            "levels": ["L4"],
+            "genders": []
+          }
+        }
+      },
+      "tests": "Same words as q08, but answerable"
+    },
+    {
+      "id": "q10",
+      "question": "How has median pay in India changed since last year?",
+      "expect": { "kind": "cannot_answer", "reason": "trend" },
+      "tests": "Time question"
+    },
+    {
+      "id": "q11",
+      "question": "Give Priya Nair a 5% raise",
+      "expect": { "kind": "cannot_answer", "reason": "edit" },
+      "tests": "Write request"
+    },
+    {
+      "id": "q12",
+      "question": "What's the min and max salary in Marketing?",
+      "expect": { "kind": "cannot_answer", "reason": "multiple" },
+      "tests": "Two metrics"
+    },
+    {
+      "id": "q13",
+      "question": "What do we spend on bonuses in the US?",
+      "expect": { "kind": "cannot_answer", "reason": "unsupported" },
+      "tests": "Outside base salary"
+    },
+    {
+      "id": "q14",
+      "question": "Headcount by gender in Engineering",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "headcount",
+          "groupBy": "gender",
+          "filters": {
+            "countries": [],
+            "departments": ["Engineering"],
+            "jobTitles": [],
+            "levels": [],
+            "genders": []
+          }
+        }
+      },
+      "tests": "\"Engineering\" is a department, unlike q01"
+    },
+    {
+      "id": "q15",
+      "question": "What is the typical salary of a junior support specialist in India and the UK?",
+      "expect": {
+        "kind": "query",
+        "query": {
+          "metric": "median",
+          "groupBy": "none",
+          "filters": {
+            "countries": ["IN", "GB"],
+            "departments": [],
+            "jobTitles": ["Support Specialist"],
+            "levels": ["L1"],
+            "genders": []
+          }
+        }
+      },
+      "tests": "\"typical\" to median; \"junior\" to L1; two countries"
+    }
+  ]
+}

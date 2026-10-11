@@ -8,6 +8,7 @@ export const ROUTES: { path: string; action: Action; title: string }[] = [
   { path: '/employees/:id', action: 'employee.read', title: 'Employee' },
   { path: '/insights', action: 'insights.read', title: 'Insights' },
   { path: '/insights/pay-equity', action: 'insights.read', title: 'Pay equity' },
+  { path: '/ask', action: 'ask.use', title: 'Ask about pay' },
 ];
 
 /** Whether `?next=` may send this viewer to `path`: a known in-app route they may open. */
