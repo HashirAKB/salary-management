@@ -21,8 +21,12 @@ export class ApiError extends Error {
 
 /** The server is asleep or unreachable (D-045); the connection store polls until it wakes. */
 export class ServerWakingError extends Error {
-  constructor() {
-    super('The server is waking up.');
+  constructor(write = false) {
+    super(
+      write
+        ? 'The server was waking up, so your change may not have been saved. Check the page and try again.'
+        : 'The server is waking up.',
+    );
     this.name = 'ServerWakingError';
   }
 }
@@ -67,7 +71,7 @@ export function onUnauthenticated(listener: () => void): () => void {
   return () => unauthenticatedListeners.delete(listener);
 }
 
-async function send(path: string, method: string, body?: unknown): Promise<Response> {
+async function sendOnce(path: string, method: string, body?: unknown): Promise<Response> {
   const finish = connection.requestStarted();
   try {
     const response = await fetch(path, {
@@ -80,7 +84,7 @@ async function send(path: string, method: string, body?: unknown): Promise<Respo
         !(await hasProblemBody(response)) &&
         (SLEEPING_STATUSES.includes(response.status) || !isJson(response))
       )
-        throw new ServerWakingError();
+        throw new ServerWakingError(method !== 'GET');
       const error = await toApiError(response);
       if (error.code === 'UNAUTHENTICATED')
         unauthenticatedListeners.forEach((listener) => listener());
@@ -90,12 +94,23 @@ async function send(path: string, method: string, body?: unknown): Promise<Respo
   } catch (error) {
     if (error instanceof TypeError) {
       connection.serverWaking();
-      throw new ServerWakingError();
+      throw new ServerWakingError(method !== 'GET');
     }
     if (error instanceof ServerWakingError) connection.serverWaking();
     throw error;
   } finally {
     finish();
+  }
+}
+
+/** Retries a GET once after the server wakes; a write is never retried (D-045). */
+async function send(path: string, method: string, body?: unknown): Promise<Response> {
+  try {
+    return await sendOnce(path, method, body);
+  } catch (error) {
+    if (method !== 'GET' || !(error instanceof ServerWakingError)) throw error;
+    if (!(await connection.recovered())) throw error;
+    return sendOnce(path, method, body);
   }
 }
 

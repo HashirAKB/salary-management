@@ -9,6 +9,7 @@ export type Scheduler = {
 };
 
 const SLOW_AFTER_MS = 4000;
+const POLL_EVERY_MS = 3000;
 
 const realScheduler: Scheduler = {
   after(ms, fn) {
@@ -24,12 +25,40 @@ const realScheduler: Scheduler = {
 let scheduler = realScheduler;
 let state: ConnectionState = 'ok';
 let pending = 0;
+let cancelPoll: (() => void) | undefined;
+let polling = false;
+let waiters: ((awake: boolean) => void)[] = [];
 const listeners = new Set<() => void>();
 
 function setState(next: ConnectionState): void {
   if (state === next) return;
   state = next;
   listeners.forEach((listener) => listener());
+}
+
+function settle(awake: boolean): void {
+  const done = waiters;
+  waiters = [];
+  done.forEach((resolve) => resolve(awake));
+}
+
+async function poll(): Promise<void> {
+  if (polling) return;
+  polling = true;
+  try {
+    const response = await fetch('/api/health');
+    const healthy = response.ok && (response.headers.get('content-type') ?? '').includes('json');
+    if (healthy && state === 'waking') {
+      cancelPoll?.();
+      cancelPoll = undefined;
+      setState('ok');
+      settle(true);
+    }
+  } catch {
+    // Still asleep; the next tick tries again.
+  } finally {
+    polling = false;
+  }
 }
 
 /** The connection store (04 section 8.3): a tiny external store read with `useSyncExternalStore`. */
@@ -53,13 +82,23 @@ export const connection = {
   },
   /** A request hit a sleeping server. */
   serverWaking(): void {
+    if (state === 'waking') return;
     setState('waking');
+    cancelPoll = scheduler.every(POLL_EVERY_MS, () => void poll());
+  },
+  /** Resolves true once the server answers health again, so a failed GET can be retried. */
+  recovered(): Promise<boolean> {
+    if (state === 'ok' || state === 'slow') return Promise.resolve(true);
+    return new Promise((resolve) => waiters.push(resolve));
   },
   setScheduler(next: Scheduler): void {
     scheduler = next;
   },
   /** Back to the real timers and a healthy state (tests). */
   reset(): void {
+    cancelPoll?.();
+    cancelPoll = undefined;
+    settle(false);
     scheduler = realScheduler;
     pending = 0;
     state = 'ok';
