@@ -1,4 +1,5 @@
 import { toUsdMinor } from '@acme/shared';
+import { GENDERS } from './genders.ts';
 import { percentile } from './percentiles.ts';
 
 export interface PayRow {
@@ -83,12 +84,64 @@ function resultFor(
   };
 }
 
+const KEY_OF: Record<Dimension, (row: PayRow) => string> = {
+  country: (r) => r.countryCode,
+  department: (r) => String(r.departmentId),
+  jobTitle: (r) => String(r.jobTitleId),
+  level: (r) => r.levelCode,
+  gender: (r) => r.gender,
+};
+
+// Levels L1 to L5 sort by rank as codes; genders follow the reference order (genders.ts).
+function compareGroups(
+  groupBy: Dimension,
+  a: { key: string; label: string },
+  b: { key: string; label: string },
+): number {
+  if (groupBy === 'level') return a.key.localeCompare(b.key);
+  if (groupBy === 'gender') {
+    const order = GENDERS.map((g) => g.code);
+    return order.indexOf(a.key) - order.indexOf(b.key);
+  }
+  return a.label.localeCompare(b.label);
+}
+
+function suppressedResult(key: string, label: string): GroupResult {
+  return {
+    key,
+    label,
+    suppressed: true,
+    headcount: null,
+    usd: null,
+    local: null,
+    outsideBand: null,
+  };
+}
+
 export function aggregatePay(
   rows: readonly PayRow[],
   metrics: readonly Metric[],
-  _groupBy: Dimension | 'none',
-  _minGroupSize: number,
-  _labels: Readonly<Record<string, string>> = {},
+  groupBy: Dimension | 'none',
+  minGroupSize: number,
+  labels: Readonly<Record<string, string>> = {},
 ): GroupResult[] {
-  return [resultFor('all', 'All active employees', rows, metrics)];
+  if (rows.length === 0) return [];
+  if (groupBy === 'none') {
+    return [resultFor('all', 'All active employees', rows, metrics)];
+  }
+
+  const byKey = new Map<string, PayRow[]>();
+  for (const row of rows) {
+    const key = KEY_OF[groupBy](row);
+    byKey.set(key, [...(byKey.get(key) ?? []), row]);
+  }
+
+  return [...byKey.entries()]
+    .map(([key, groupRows]) => {
+      const label = labels[key] ?? key;
+      return groupRows.length < minGroupSize
+        ? suppressedResult(key, label)
+        : resultFor(key, label, groupRows, metrics);
+    })
+    .sort((a, b) => compareGroups(groupBy, a, b));
 }
