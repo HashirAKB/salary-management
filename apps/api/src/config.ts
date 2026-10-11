@@ -84,3 +84,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     scrypt: PRODUCTION_SCRYPT,
   };
 }
+
+/** The API key for the configured Ask provider; undefined turns Ask off (D-004). */
+export function askApiKey(_config: Config): string | undefined {
+  throw new Error('not implemented');
+}
