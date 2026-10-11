@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@acme/shared": "0.0.0",
+    "@anthropic-ai/sdk": "0.133.0",
     "@faker-js/faker": "10.6.0",
     "@fastify/rate-limit": "11.2.0",
     "@fastify/static": "10.1.6",
