@@ -100,6 +100,25 @@ describe('employee detail page (04 section 8.5 S-3)', () => {
     );
   });
 
+  it('shows "Employee not found." when the id is not a valid id', async () => {
+    loggedInAs('hr_admin');
+    server.use(
+      http.get('/api/employees/4217', () =>
+        HttpResponse.json(
+          aProblem({
+            status: 400,
+            code: 'VALIDATION_FAILED',
+            errors: [{ path: 'id', message: 'Invalid input' }],
+          }),
+          { status: 400, headers: { 'content-type': 'application/problem+json' } },
+        ),
+      ),
+    );
+    renderDetail();
+
+    expect(await screen.findByText('Employee not found.')).toBeVisible();
+  });
+
   it('shows the error alert with "Retry" on a 500 problem', async () => {
     loggedInAs('hr_admin');
     server.use(
