@@ -129,38 +129,40 @@ function PayrollByCountry({ summary }: { summary: InsightsSummaryResponse }): Re
       <Title order={2} size="h3">
         Payroll by country
       </Title>
-      <Table aria-label="Payroll by country" striped>
-        <Table.Thead>
-          <Table.Tr>
-            <Table.Th>Country</Table.Th>
-            <Table.Th>Headcount</Table.Th>
-            <Table.Th>Payroll local</Table.Th>
-            <Table.Th>Payroll USD</Table.Th>
-            <Table.Th>Share of payroll</Table.Th>
-          </Table.Tr>
-        </Table.Thead>
-        <Table.Tbody>
-          {summary.byCountry.map((row) => (
-            <Table.Tr key={row.country.code}>
-              <Table.Td>{row.country.name}</Table.Td>
-              {row.suppressed || row.payrollUsd === null || row.payrollLocal === null ? (
-                <Table.Td colSpan={3}>{HIDDEN}</Table.Td>
-              ) : (
-                <>
-                  <Table.Td>{count.format(row.headcount ?? 0)}</Table.Td>
-                  <Table.Td>
-                    <Money value={row.payrollLocal} />
-                  </Table.Td>
-                  <Table.Td>
-                    <Money value={row.payrollUsd} />
-                  </Table.Td>
-                </>
-              )}
-              <Table.Td>{formatSharePct(share(row.payrollUsd))}</Table.Td>
+      <Table.ScrollContainer minWidth={600}>
+        <Table aria-label="Payroll by country" striped>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Country</Table.Th>
+              <Table.Th>Headcount</Table.Th>
+              <Table.Th>Payroll local</Table.Th>
+              <Table.Th>Payroll USD</Table.Th>
+              <Table.Th>Share of payroll</Table.Th>
             </Table.Tr>
-          ))}
-        </Table.Tbody>
-      </Table>
+          </Table.Thead>
+          <Table.Tbody>
+            {summary.byCountry.map((row) => (
+              <Table.Tr key={row.country.code}>
+                <Table.Td>{row.country.name}</Table.Td>
+                {row.suppressed || row.payrollUsd === null || row.payrollLocal === null ? (
+                  <Table.Td colSpan={3}>{HIDDEN}</Table.Td>
+                ) : (
+                  <>
+                    <Table.Td>{count.format(row.headcount ?? 0)}</Table.Td>
+                    <Table.Td>
+                      <Money value={row.payrollLocal} />
+                    </Table.Td>
+                    <Table.Td>
+                      <Money value={row.payrollUsd} />
+                    </Table.Td>
+                  </>
+                )}
+                <Table.Td>{formatSharePct(share(row.payrollUsd))}</Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Table.ScrollContainer>
       {chart.length > 0 && (
         <BarChart
           h={240}
@@ -223,6 +225,7 @@ function Distribution(): ReactElement {
       value={query[key] ?? []}
       onChange={(values) => setFilters({ [key]: values.length > 0 ? values : undefined })}
       clearable
+      style={{ flex: '1 1 10rem', minWidth: 0 }}
     />
   );
   const chart = (data?.groups ?? [])
@@ -235,6 +238,8 @@ function Distribution(): ReactElement {
       </Title>
       <SegmentedControl
         aria-label="Group by"
+        maw="100%"
+        style={{ overflowX: 'auto' }}
         data={GROUP_BY}
         value={query.groupBy}
         onChange={(value) => setFilters({ groupBy: value as typeof query.groupBy })}
@@ -255,22 +260,24 @@ function Distribution(): ReactElement {
       {data && data.groups.length === 0 && <Text>No active employees match these filters.</Text>}
       {data && data.groups.length > 0 && (
         <>
-          <Table aria-label="Pay distribution" striped>
-            <Table.Thead>
-              <Table.Tr>
-                <Table.Th>Group</Table.Th>
-                <Table.Th>Headcount</Table.Th>
-                {STAT_LABELS.map((label) => (
-                  <Table.Th key={label}>{label}</Table.Th>
+          <Table.ScrollContainer minWidth={900}>
+            <Table aria-label="Pay distribution" striped>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th>Group</Table.Th>
+                  <Table.Th>Headcount</Table.Th>
+                  {STAT_LABELS.map((label) => (
+                    <Table.Th key={label}>{label}</Table.Th>
+                  ))}
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {data.groups.map((group) => (
+                  <DistributionRow key={group.key} group={group} />
                 ))}
-              </Table.Tr>
-            </Table.Thead>
-            <Table.Tbody>
-              {data.groups.map((group) => (
-                <DistributionRow key={group.key} group={group} />
-              ))}
-            </Table.Tbody>
-          </Table>
+              </Table.Tbody>
+            </Table>
+          </Table.ScrollContainer>
           {chart.length > 0 && (
             <BarChart
               h={240}
