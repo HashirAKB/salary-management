@@ -14,11 +14,13 @@ export function changePct(prevMinor: number, nextMinor: number): number {
 }
 
 // Gender gap to 1 decimal: tenths = (men - women) * 1000 / men. Positive when women are paid less.
-export function gapPct(_menMinor: number, _womenMinor: number): number {
-  throw new Error('not implemented');
+export function gapPct(menMinor: number, womenMinor: number): number {
+  const numerator = Math.abs(menMinor - womenMinor) * 1000;
+  const tenths = Math.floor((numerator * 2 + menMinor) / (menMinor * 2));
+  return womenMinor > menMinor && tenths !== 0 ? -tenths / 10 : tenths / 10;
 }
 
 // Share to 1 decimal: tenths = part * 1000 / total.
-export function sharePct(_part: number, _total: number): number {
-  throw new Error('not implemented');
+export function sharePct(part: number, total: number): number {
+  return Math.floor((part * 1000 * 2 + total) / (total * 2)) / 10;
 }
