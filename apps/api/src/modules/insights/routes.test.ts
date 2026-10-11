@@ -159,7 +159,16 @@ describe('GET /api/insights/summary (I1)', () => {
       payrollLocal: null,
       payrollUsd: null,
     });
-    expect(finance.byCountry.find((c) => c.country.code === 'DE')?.suppressed).toBe(false);
+    // With only India hidden, Finance could subtract the others from the total (D-071), so
+    // the smallest visible country, Germany (tied with the United States on 5, by code), goes too.
+    expect(finance.byCountry.find((c) => c.country.code === 'DE')).toMatchObject({
+      headcount: null,
+      suppressed: true,
+      payrollLocal: null,
+      payrollUsd: null,
+    });
+    expect(finance.byCountry.find((c) => c.country.code === 'US')?.suppressed).toBe(false);
+    expect(finance.headcount).toBe(13);
     expect(hr.byCountry.find((c) => c.country.code === 'IN')).toMatchObject({
       headcount: 3,
       suppressed: false,

@@ -80,7 +80,8 @@ describe('aggregatePay: outside band', () => {
 
 describe('aggregatePay: minimum group size (D-012, D-040)', () => {
   const rows = [
-    ...Array.from({ length: 5 }, () => payRow({ countryCode: 'US' })),
+    ...Array.from({ length: 6 }, () => payRow({ countryCode: 'US' })),
+    ...Array.from({ length: 5 }, () => payRow({ countryCode: 'DE', currency: 'EUR' })),
     ...Array.from({ length: 3 }, () => payRow({ countryCode: 'IN', currency: 'INR' })),
   ];
   const metrics = ['headcount', 'total', 'outsideBandCount'] as const;
@@ -97,7 +98,7 @@ describe('aggregatePay: minimum group size (D-012, D-040)', () => {
       local: null,
       outsideBand: null,
     });
-    expect(groups.find((g) => g.key === 'US')).toMatchObject({ suppressed: false, headcount: 5 });
+    expect(groups.find((g) => g.key === 'US')).toMatchObject({ suppressed: false, headcount: 6 });
   });
 
   it('keeps a group at exactly the minimum', () => {
@@ -127,6 +128,69 @@ describe('aggregatePay: minimum group size (D-012, D-040)', () => {
 
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({ suppressed: false, headcount: 1 });
+  });
+});
+
+describe('aggregatePay: complementary suppression (D-071)', () => {
+  const metrics = ['headcount', 'total'] as const;
+  const team = (countryCode: string, count: number) =>
+    Array.from({ length: count }, () => payRow({ countryCode }));
+
+  it('also hides the smallest visible group when exactly one group is suppressed', () => {
+    const groups = aggregatePay(
+      [...team('US', 7), ...team('GB', 6), ...team('DE', 5), ...team('IN', 3)],
+      metrics,
+      'country',
+      5,
+    );
+
+    expect(groups.map((g) => [g.key, g.suppressed])).toEqual([
+      ['DE', true],
+      ['GB', false],
+      ['IN', true],
+      ['US', false],
+    ]);
+    expect(groups.find((g) => g.key === 'DE')).toMatchObject({
+      headcount: null,
+      usd: null,
+      local: null,
+      outsideBand: null,
+    });
+  });
+
+  it('breaks a tie for smallest by key', () => {
+    const groups = aggregatePay(
+      [...team('US', 5), ...team('DE', 5), ...team('IN', 3)],
+      metrics,
+      'country',
+      5,
+    );
+
+    expect(groups.filter((g) => !g.suppressed).map((g) => g.key)).toEqual(['US']);
+  });
+
+  it('adds nothing when two groups are already suppressed', () => {
+    const groups = aggregatePay(
+      [...team('US', 6), ...team('GB', 2), ...team('IN', 3)],
+      metrics,
+      'country',
+      5,
+    );
+
+    expect(groups.filter((g) => g.suppressed).map((g) => g.key)).toEqual(['GB', 'IN']);
+  });
+
+  it('adds nothing when the only group is the suppressed one', () => {
+    const groups = aggregatePay(team('IN', 3), metrics, 'country', 5);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]?.suppressed).toBe(true);
+  });
+
+  it('adds nothing at the HR minimum of 1', () => {
+    const groups = aggregatePay([...team('US', 6), ...team('IN', 1)], metrics, 'country', 1);
+
+    expect(groups.every((g) => !g.suppressed)).toBe(true);
   });
 });
 
