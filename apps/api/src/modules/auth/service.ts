@@ -1,6 +1,6 @@
 import type { MeResponse } from '@acme/shared';
 import { createHash, randomBytes } from 'node:crypto';
-import type { Config } from '../../config.ts';
+import { askApiKey, type Config } from '../../config.ts';
 import type { Db } from '../../db/client.ts';
 import type { Clock } from '../../domain/clock.ts';
 import { can, permissionsFor } from '../../domain/permissions.ts';
@@ -33,7 +33,7 @@ export async function meFor(
   return {
     user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
     permissions: permissionsFor(user.role),
-    askEnabled: Boolean(config.anthropicApiKey) && can(user.role, 'ask.use'),
+    askEnabled: Boolean(askApiKey(config)) && can(user.role, 'ask.use'),
     today: clock.today(),
     fxAsOf: await fxAsOf(db),
   };
