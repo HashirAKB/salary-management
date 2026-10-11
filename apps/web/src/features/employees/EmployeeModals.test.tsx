@@ -39,6 +39,23 @@ const openTerminate = async (user: ReturnType<typeof userEvent.setup>) => {
 };
 
 describe('edit details modal (04 section 8.5 S-5)', () => {
+  it('shows job title, level and country read-only', async () => {
+    servesEmployee();
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openEdit(user);
+
+    for (const [label, value] of [
+      ['Job title', 'Software Engineer'],
+      ['Level', 'L3 Senior'],
+      ['Country', 'India'],
+    ] as const) {
+      expect(within(dialog).getByLabelText(label)).toHaveValue(value);
+      expect(within(dialog).getByLabelText(label)).toBeDisabled();
+    }
+  });
+
   it('keeps Save disabled until a field changes', async () => {
     servesEmployee();
     const user = userEvent.setup();
