@@ -141,12 +141,29 @@ export function aggregatePay(
     byKey.set(key, [...(byKey.get(key) ?? []), row]);
   }
 
-  return [...byKey.entries()]
-    .map(([key, groupRows]) => {
-      const label = labels[key] ?? key;
-      return groupRows.length < minGroupSize
-        ? suppressedResult(key, label)
-        : resultFor(key, label, groupRows, metrics);
-    })
+  const groups = [...byKey.entries()].map(([key, groupRows]) => {
+    const label = labels[key] ?? key;
+    return {
+      key,
+      label,
+      rows: groupRows,
+      suppressed: groupRows.length < minGroupSize,
+    };
+  });
+
+  // D-071: with one group hidden, Finance could subtract the visible groups from the total and
+  // recover it, so the smallest visible group (ties by key) is hidden too.
+  const hidden = groups.filter((g) => g.suppressed);
+  if (hidden.length === 1) {
+    const [smallest] = groups
+      .filter((g) => !g.suppressed)
+      .sort((a, b) => a.rows.length - b.rows.length || a.key.localeCompare(b.key));
+    if (smallest) smallest.suppressed = true;
+  }
+
+  return groups
+    .map((g) =>
+      g.suppressed ? suppressedResult(g.key, g.label) : resultFor(g.key, g.label, g.rows, metrics),
+    )
     .sort((a, b) => compareGroups(groupBy, a, b));
 }
