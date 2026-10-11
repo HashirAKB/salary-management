@@ -13,7 +13,7 @@ ADR 0008 chose Anthropic's Claude Haiku through `@anthropic-ai/sdk`. The project
 
 **Gemini.**
 - Called over its REST API with `fetch`; no new dependency. The key is sent in the `x-goog-api-key` header.
-- `GEMINI_API_KEY` is the key. `ASK_MODEL` defaults to `gemini-2.5-flash` for Gemini and `claude-haiku-5-5` for Anthropic.
+- `GEMINI_API_KEY` is the key. `ASK_MODEL` defaults to `gemini-flash-latest` for Gemini and `claude-haiku-5-5` for Anthropic.
 - One request: `systemInstruction` (the 04 section 7.3 prompt), one user message with the question, both tools as `functionDeclarations` using `parametersJsonSchema`, `toolConfig.functionCallingConfig.mode: ANY`, `maxOutputTokens: 512`, 15-second timeout, no retries.
 - `strict: true` has no Gemini equivalent. The enum-only, all-required schema is still sent, and the zod re-parse rejects anything invalid as `ASK_UPSTREAM_FAILED`. A `finishReason` other than `STOP`, a blocked prompt, an HTTP error or no function call also map to `ASK_UPSTREAM_FAILED`.
 - Token counts come from `usageMetadata`.
@@ -35,4 +35,5 @@ ADR 0008 chose Anthropic's Claude Haiku through `@anthropic-ai/sdk`. The project
 
 - No cost for the demo, but free-tier rate limits and a possible model change by the provider. On the free tier Google may use prompts to improve its products; the data is synthetic and the model never sees salaries.
 - Gemini's schema support is looser than Anthropic strict mode, so more malformed replies are possible. The zod parse is the guarantee.
-- The model ID default may need updating as Google retires models; set `ASK_MODEL` to change it without a code change.
+- The default is the rolling alias `gemini-flash-latest`: nothing to update when Google retires a model (the pinned `gemini-2.5-flash` returned 404 on the first eval run), but results can drift when the alias moves. The eval report records the model name; set `ASK_MODEL` to pin one.
+- An HTTP error from Google includes its message in the interpreter error, so failures in the eval report say why.

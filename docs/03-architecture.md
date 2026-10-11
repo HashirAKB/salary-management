@@ -189,7 +189,7 @@ All env vars are read once, in `config.ts`, and validated with zod. The process 
 | `ASK_PROVIDER` | no | `gemini` | `gemini` or `anthropic` (ADR 0009) |
 | `GEMINI_API_KEY` | no | | Key for `ASK_PROVIDER=gemini`. Absent: "Ask about pay" is off (D-004) |
 | `ANTHROPIC_API_KEY` | no | | Key for `ASK_PROVIDER=anthropic`; absent: Ask is off. Belongs to a dedicated Console workspace (ADR 0008) |
-| `ASK_MODEL` | no | `gemini-2.5-flash` (Gemini), `claude-haiku-5-5` (Anthropic) | |
+| `ASK_MODEL` | no | `gemini-flash-latest` (Gemini), `claude-haiku-5-5` (Anthropic) | |
 | `ASK_USER_DAILY_LIMIT` | no | `30` | Questions per user per UTC day |
 | `ASK_GLOBAL_DAILY_LIMIT` | no | `300` | Questions per UTC day across all users |
 | `DEMO_HR_ADMIN_PASSWORD`, `DEMO_HR_VIEWER_PASSWORD`, `DEMO_FINANCE_PASSWORD` | seed only | | 02 section 7.9; the API itself never reads them |
