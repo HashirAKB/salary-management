@@ -24,6 +24,7 @@ import {
 } from 'react-router';
 import { onUnauthenticated } from '../api/client.ts';
 import { ME_KEY, useLogout, useMe } from '../features/auth/useSession.ts';
+import { ServerStatusBanner } from './ServerStatusBanner.tsx';
 import { ToastProvider } from './Toasts.tsx';
 
 const NAV: { to: string; label: string; action: Action }[] = [
@@ -159,6 +160,7 @@ export function Shell(): ReactElement {
         </Group>
       </AppShell.Header>
       <AppShell.Main>
+        <ServerStatusBanner />
         <ToastProvider>
           <Outlet context={me.data} />
         </ToastProvider>
