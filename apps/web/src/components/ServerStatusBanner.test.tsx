@@ -109,6 +109,29 @@ describe('health poll and GET retry (05 section 5.9 C row 3; D-045)', () => {
   });
 });
 
+describe('200 non-JSON response (04 section 8.3; D-045)', () => {
+  it('retries a GET once after a 200 HTML response and resolves with the data', async () => {
+    let gets = 0;
+    server.use(
+      http.get('/api/employees', () => {
+        gets += 1;
+        return gets === 1
+          ? new HttpResponse('<html></html>', { headers: { 'content-type': 'text/html' } })
+          : HttpResponse.json({ ok: 1 });
+      }),
+      http.get('/api/health', () => HttpResponse.json({ status: 'ok' })),
+    );
+    render(<ServerStatusBanner />);
+
+    const result = apiFetch('/api/employees', { schema: { parse: (v) => v } });
+    expect(await screen.findByText(WAKING)).toBeVisible();
+    act(() => scheduler.advance(3000));
+
+    await expect(result).resolves.toEqual({ ok: 1 });
+    expect(gets).toBe(2);
+  });
+});
+
 describe('server down (05 section 5.9 C row 5; 04 section 8.2)', () => {
   const DOWN = "The server isn't responding.";
 
