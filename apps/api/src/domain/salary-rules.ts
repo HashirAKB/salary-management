@@ -44,5 +44,9 @@ export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode 
       return 'POSITION_MUST_NOT_CHANGE';
     }
   }
+  if (change.reason === 'promotion') {
+    if (change.amount.amountMinor <= employee.salary.amountMinor) return 'RAISE_REQUIRED';
+    if (change.levelRank <= employee.levelRank) return 'PROMOTION_LEVEL_NOT_HIGHER';
+  }
   return null;
 }
