@@ -1,4 +1,4 @@
-import { act, screen } from '@testing-library/react';
+import { act, screen, waitFor } from '@testing-library/react';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { aProblem } from '../../test/fixtures/problem.ts';
@@ -73,5 +73,37 @@ describe('waking banner (05 section 5.9 C rows 2 and 3; D-045)', () => {
 
     expect(error).toMatchObject({ name: 'ApiError', code: 'DB_UNAVAILABLE' });
     expect(screen.queryByText(WAKING)).toBeNull();
+  });
+});
+
+describe('health poll and GET retry (05 section 5.9 C row 3; D-045)', () => {
+  it('hides the banner when health answers 200 and retries the failed GET once', async () => {
+    let gets = 0;
+    let polls = 0;
+    server.use(
+      http.get('/api/employees', () => {
+        gets += 1;
+        return gets === 1 ? new HttpResponse(null, { status: 503 }) : HttpResponse.json({ ok: 1 });
+      }),
+      http.get('/api/health', () => {
+        polls += 1;
+        return polls === 1
+          ? new HttpResponse(null, { status: 503 })
+          : HttpResponse.json({ status: 'ok' });
+      }),
+    );
+    render(<ServerStatusBanner />);
+
+    const result = apiFetch('/api/employees', { schema: { parse: (v) => v } });
+    expect(await screen.findByText(WAKING)).toBeVisible();
+    act(() => scheduler.advance(3000));
+    await waitFor(() => expect(polls).toBe(1));
+    expect(screen.getByText(WAKING)).toBeVisible();
+    act(() => scheduler.advance(3000));
+
+    await expect(result).resolves.toEqual({ ok: 1 });
+    expect(polls).toBe(2);
+    expect(gets).toBe(2);
+    await waitFor(() => expect(screen.queryByText(WAKING)).toBeNull());
   });
 });

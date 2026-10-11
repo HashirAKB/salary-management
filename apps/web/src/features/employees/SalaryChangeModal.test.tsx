@@ -3,14 +3,16 @@ import { changePct } from '@acme/shared';
 import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
 import { aSalaryChangeItem, aSalaryHistory } from '../../../test/fixtures/salary.ts';
 import { aMeResponse } from '../../../test/fixtures/me.ts';
 import { aProblem } from '../../../test/fixtures/problem.ts';
+import { aManualScheduler } from '../../../test/manualScheduler.ts';
 import { render } from '../../../test/render.tsx';
 import { server } from '../../../test/server.ts';
 import { AppRoutes } from '../../AppRoutes.tsx';
+import { connection } from '../../api/connection.ts';
 
 const problem = (status: number, body: Parameters<typeof aProblem>[0]) =>
   HttpResponse.json(aProblem(body), {
@@ -260,5 +262,36 @@ describe('record salary change outcomes and preview (04 sections 8.5 S-6, 8.6)',
     const history = await screen.findByRole('region', { name: 'Salary history' });
     const row = (await within(history).findByText('Merit increase')).closest('tr')!;
     expect(within(row).getByText('+1.0%')).toBeVisible();
+  });
+});
+
+describe('record salary change on a waking server (05 section 5.9 C row 4; D-045)', () => {
+  afterEach(() => connection.reset());
+
+  it('does not retry the write and says the change may not have been saved', async () => {
+    connection.setScheduler(aManualScheduler());
+    servesEmployee();
+    servesBand();
+    let posts = 0;
+    server.use(
+      http.post('/api/employees/4217/salary-changes', () => {
+        posts += 1;
+        return new HttpResponse(null, { status: 503 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openModal(user);
+    await choose(user, 'Reason', 'Merit increase');
+    await user.type(within(dialog).getByLabelText('New annual salary'), '2000000');
+    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
+
+    expect(
+      await within(dialog).findByText(
+        'The server was waking up, so your change may not have been saved. Check the page and try again.',
+      ),
+    ).toBeVisible();
+    expect(posts).toBe(1);
   });
 });

@@ -3,7 +3,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { describe, expect, it } from 'vitest';
 import { aProblem } from '../test/fixtures/problem.ts';
-import { ApiError } from './api/client.ts';
+import { ApiError, ServerWakingError } from './api/client.ts';
 import { createQueryClient } from './queryClient.ts';
 
 describe('createQueryClient (04 section 8.3)', () => {
@@ -28,5 +28,11 @@ describe('createQueryClient (04 section 8.3)', () => {
 
     await waitFor(() => expect(result.current.isError).toBe(true));
     expect(calls).toBe(1);
+  });
+
+  it('never retries a ServerWakingError: the waking logic owns transport retries', () => {
+    const retry = createQueryClient().getDefaultOptions().queries?.retry;
+
+    expect(typeof retry === 'function' && retry(0, new ServerWakingError())).toBe(false);
   });
 });
