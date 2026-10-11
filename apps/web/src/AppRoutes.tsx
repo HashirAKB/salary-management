@@ -8,6 +8,7 @@ import { EmployeeDetailPage } from './features/employees/EmployeeDetailPage.tsx'
 import { NewEmployeePage } from './features/employees/NewEmployeePage.tsx';
 import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
 import { InsightsPage } from './features/insights/InsightsPage.tsx';
+import { PayEquityPage } from './features/insights/PayEquityPage.tsx';
 import { LoginPage } from './features/auth/LoginPage.tsx';
 import { landingPath } from './features/auth/useSession.ts';
 import { ROUTES } from './routes.ts';
@@ -18,6 +19,7 @@ const SCREENS: Record<string, ComponentType> = {
   '/employees/new': NewEmployeePage,
   '/employees/:id': EmployeeDetailPage,
   '/insights': InsightsPage,
+  '/insights/pay-equity': PayEquityPage,
 };
 
 function Gated({
