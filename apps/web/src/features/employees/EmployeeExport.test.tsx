@@ -66,7 +66,10 @@ describe('export CSV button (04 sections 5.7 and 8.5)', () => {
     expect(exporting).toHaveAttribute('data-loading', 'true');
     release();
     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
-    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    // fetch's Blob comes from Node, not jsdom, so `expect.any(Blob)` can't match it.
+    const blob = (createObjectURL.mock.calls as unknown as Blob[][])[0]![0]!;
+    expect(blob.type).toBe('text/csv;charset=utf-8');
+    expect(blob.size).toBeGreaterThan(0);
     expect(requests).toHaveLength(1);
     expect(Object.fromEntries(requests[0] ?? [])).toEqual({
       country: 'IN',
