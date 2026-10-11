@@ -36,8 +36,10 @@ export interface SalaryChangeContext {
 /** The first rule the change breaks, or null when it is allowed. */
 export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode | null {
   const { today, employee, change } = context;
+  if (employee.status === 'terminated') return 'EMPLOYEE_TERMINATED';
   if (change.effectiveDate > today) return 'DATE_IN_FUTURE';
   if (change.effectiveDate < employee.salaryEffectiveDate) return 'SALARY_DATE_BEFORE_CURRENT';
+  if (change.amount.currency !== employee.salary.currency) return 'SALARY_CURRENCY_MISMATCH';
   if (change.reason === 'merit' || change.reason === 'market_adjustment') {
     if (change.amount.amountMinor <= employee.salary.amountMinor) return 'RAISE_REQUIRED';
     if (change.jobTitleId !== employee.jobTitleId || change.levelRank !== employee.levelRank) {
@@ -57,5 +59,6 @@ export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode 
       return 'CORRECTION_NO_CHANGE';
     }
   }
+  if (!context.hasPayBand) return 'NO_PAY_BAND';
   return null;
 }
