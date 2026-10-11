@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isoDateSchema } from './common.ts';
+import { moneySchema } from './employee.ts';
 
 // 04 section 4.7: the four reasons a user can pick; `hire` is written by the system only.
 export const salaryChangeReasonSchema = z.enum([
@@ -24,3 +25,28 @@ export const salaryChangeBodySchema = z.strictObject({
 });
 
 export type SalaryChangeBody = z.infer<typeof salaryChangeBodySchema>;
+
+const levelRefSchema = z.object({ code: z.string(), name: z.string() });
+const titleRefSchema = z.object({ id: z.number().int(), name: z.string() });
+
+// 04 section 5.5 S1: one history row with the values before it (null on the hire row).
+export const salaryChangeItemSchema = z.object({
+  id: z.number().int(),
+  effectiveDate: isoDateSchema,
+  reason: z.enum(['hire', 'promotion', 'merit', 'market_adjustment', 'correction']),
+  amount: moneySchema,
+  previousAmount: moneySchema.nullable(),
+  changePct: z.number().nullable(),
+  jobTitle: titleRefSchema,
+  level: levelRefSchema,
+  previousJobTitle: titleRefSchema.nullable(),
+  previousLevel: levelRefSchema.nullable(),
+  changedBy: z.object({ displayName: z.string() }).nullable(),
+  createdAt: z.string(),
+});
+
+export type SalaryChangeItem = z.infer<typeof salaryChangeItemSchema>;
+
+export const salaryHistoryResponseSchema = z.object({ items: z.array(salaryChangeItemSchema) });
+
+export type SalaryHistoryResponse = z.infer<typeof salaryHistoryResponseSchema>;

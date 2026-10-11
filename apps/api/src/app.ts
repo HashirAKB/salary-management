@@ -12,6 +12,8 @@ import { authRoutes } from './modules/auth/routes.ts';
 import { employeeRoutes } from './modules/employees/routes.ts';
 import { healthRoutes } from './modules/health/routes.ts';
 import { referenceRoutes } from './modules/reference/routes.ts';
+import { salaryRoutes } from './modules/salary/routes.ts';
+import type { SalaryWrites } from './modules/salary/service.ts';
 
 export type AppDeps = {
   db: Db;
@@ -21,6 +23,8 @@ export type AppDeps = {
   staticRoot?: string;
   /** Where log lines go; stdout when absent. Tests capture it (05 section 5.0). */
   logStream?: { write(line: string): void };
+  /** Replaces the salary change writes; tests inject a failing one to prove the rollback. */
+  salaryWrites?: SalaryWrites;
 };
 
 // The composition root used by main.ts and every test (03 section 6, rule 1).
@@ -42,5 +46,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   authRoutes(app, deps);
   referenceRoutes(app, { db: deps.db });
   employeeRoutes(app, { db: deps.db, clock: deps.clock });
+  salaryRoutes(app, { db: deps.db, clock: deps.clock, writes: deps.salaryWrites });
   return app;
 }
