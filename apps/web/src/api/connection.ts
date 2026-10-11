@@ -10,6 +10,7 @@ export type Scheduler = {
 
 const SLOW_AFTER_MS = 4000;
 const POLL_EVERY_MS = 3000;
+const DOWN_AFTER_MS = 90_000;
 
 const realScheduler: Scheduler = {
   after(ms, fn) {
@@ -26,6 +27,7 @@ let scheduler = realScheduler;
 let state: ConnectionState = 'ok';
 let pending = 0;
 let cancelPoll: (() => void) | undefined;
+let cancelDown: (() => void) | undefined;
 let polling = false;
 let waiters: ((awake: boolean) => void)[] = [];
 const listeners = new Set<() => void>();
@@ -34,6 +36,22 @@ function setState(next: ConnectionState): void {
   if (state === next) return;
   state = next;
   listeners.forEach((listener) => listener());
+}
+
+function stopTimers(): void {
+  cancelPoll?.();
+  cancelDown?.();
+  cancelPoll = cancelDown = undefined;
+}
+
+function startWaking(): void {
+  setState('waking');
+  cancelPoll = scheduler.every(POLL_EVERY_MS, () => void poll());
+  cancelDown = scheduler.after(DOWN_AFTER_MS, () => {
+    stopTimers();
+    setState('down');
+    settle(false);
+  });
 }
 
 function settle(awake: boolean): void {
@@ -49,8 +67,7 @@ async function poll(): Promise<void> {
     const response = await fetch('/api/health');
     const healthy = response.ok && (response.headers.get('content-type') ?? '').includes('json');
     if (healthy && state === 'waking') {
-      cancelPoll?.();
-      cancelPoll = undefined;
+      stopTimers();
       setState('ok');
       settle(true);
     }
@@ -82,13 +99,17 @@ export const connection = {
   },
   /** A request hit a sleeping server. */
   serverWaking(): void {
-    if (state === 'waking') return;
-    setState('waking');
-    cancelPoll = scheduler.every(POLL_EVERY_MS, () => void poll());
+    if (state === 'waking' || state === 'down') return;
+    startWaking();
+  },
+  /** "Try again" on the server-down banner restarts the health poll. */
+  tryAgain(): void {
+    if (state === 'down') startWaking();
   },
   /** Resolves true once the server answers health again, so a failed GET can be retried. */
   recovered(): Promise<boolean> {
     if (state === 'ok' || state === 'slow') return Promise.resolve(true);
+    if (state === 'down') return Promise.resolve(false);
     return new Promise((resolve) => waiters.push(resolve));
   },
   setScheduler(next: Scheduler): void {
@@ -96,8 +117,7 @@ export const connection = {
   },
   /** Back to the real timers and a healthy state (tests). */
   reset(): void {
-    cancelPoll?.();
-    cancelPoll = undefined;
+    stopTimers();
     settle(false);
     scheduler = realScheduler;
     pending = 0;
