@@ -53,7 +53,7 @@ describe('waking banner (05 section 5.9 C rows 2 and 3; D-045)', () => {
     server.use(http.get('/api/employees', respond));
     render(<ServerStatusBanner />);
 
-    await apiFetch('/api/employees', { schema: { parse: (v) => v } }).catch(() => {});
+    void apiFetch('/api/employees', { schema: { parse: (v) => v } }).catch(() => {});
 
     expect(await screen.findByText(WAKING)).toBeVisible();
   });
