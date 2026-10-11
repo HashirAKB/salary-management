@@ -3,16 +3,21 @@ import {
   ActionIcon,
   AppShell,
   Badge,
+  Burger,
   Button,
   Center,
+  Drawer,
   Group,
   Loader,
   Menu,
+  Stack,
+  Text,
   Title,
   useComputedColorScheme,
   useMantineColorScheme,
 } from '@mantine/core';
 import { useQueryClient } from '@tanstack/react-query';
+import { useDisclosure } from '@mantine/hooks';
 import { useEffect, type ReactElement } from 'react';
 import {
   Navigate,
@@ -86,8 +91,10 @@ function UserMenu({ me }: { me: MeResponse }): ReactElement {
     <Menu position="bottom-end">
       <Menu.Target>
         <Button variant="subtle">
-          {me.user.displayName}
-          <Badge ml="xs" variant="light">
+          <Text component="span" size="sm" visibleFrom="sm">
+            {me.user.displayName}
+          </Text>
+          <Badge ml="xs" variant="light" style={{ flexShrink: 0 }}>
             {ROLE_LABELS[me.user.role]}
           </Badge>
         </Button>
@@ -109,6 +116,7 @@ export function Shell(): ReactElement {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const location = useLocation();
+  const [menuOpened, menu] = useDisclosure(false);
   const loginWithNext = `/login?next=${encodeURIComponent(location.pathname + location.search)}`;
 
   // Session expired: any 401 after login clears the cache and asks to log in again (04 8.2).
@@ -133,32 +141,52 @@ export function Shell(): ReactElement {
     );
   }
 
+  const links = NAV.filter(
+    (item) =>
+      me.data.permissions.includes(item.action) && (item.to !== '/ask' || me.data.askEnabled),
+  ).map((item) => (
+    <NavLink key={item.to} to={item.to} end onClick={menu.close}>
+      {item.label}
+    </NavLink>
+  ));
+
   return (
     <AppShell header={{ height: 60 }} padding="md">
       <AppShell.Header>
-        <Group h="100%" px="md" justify="space-between">
-          <Group>
-            <Title order={4} component="p">
-              ACME Salary Manager
+        <Group h="100%" px="md" justify="space-between" wrap="nowrap">
+          <Group wrap="nowrap" miw={0}>
+            <Burger
+              opened={menuOpened}
+              onClick={menu.toggle}
+              hiddenFrom="sm"
+              size="sm"
+              aria-label="Open menu"
+            />
+            <Title
+              order={4}
+              component="p"
+              style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+            >
+              ACME
+              <Text component="span" inherit visibleFrom="xs">
+                {' Salary Manager'}
+              </Text>
             </Title>
-            <Group component="nav" gap="sm" aria-label="Main">
-              {NAV.filter(
-                (item) =>
-                  me.data.permissions.includes(item.action) &&
-                  (item.to !== '/ask' || me.data.askEnabled),
-              ).map((item) => (
-                <NavLink key={item.to} to={item.to} end>
-                  {item.label}
-                </NavLink>
-              ))}
+            <Group component="nav" gap="sm" aria-label="Main" visibleFrom="sm">
+              {links}
             </Group>
           </Group>
-          <Group gap="xs">
+          <Group gap="xs" wrap="nowrap" style={{ flexShrink: 0 }}>
             <ColorSchemeToggle />
             <UserMenu me={me.data} />
           </Group>
         </Group>
       </AppShell.Header>
+      <Drawer opened={menuOpened} onClose={menu.close} title="Menu" size="xs" hiddenFrom="sm">
+        <Stack component="nav" aria-label="Main menu">
+          {links}
+        </Stack>
+      </Drawer>
       <AppShell.Main>
         <ServerStatusBanner />
         <ToastProvider>
