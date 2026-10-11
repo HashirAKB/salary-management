@@ -135,7 +135,7 @@ Error code catalogue (complete; a new code needs a line here first):
 | 422 | `TERMINATION_BEFORE_HIRE` | Termination date before hire date |
 | 429 | `RATE_LIMITED` | More than 10 login attempts per minute from one IP |
 | 429 | `ASK_LIMIT_REACHED` | Per-user or global daily Ask cap reached |
-| 503 | `ASK_UNAVAILABLE` | No `ANTHROPIC_API_KEY` configured |
+| 503 | `ASK_UNAVAILABLE` | No API key for the configured `ASK_PROVIDER` (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) |
 | 503 | `ASK_UPSTREAM_FAILED` | Model call failed, timed out, refused, hit `max_tokens`, or returned input our schema rejects |
 | 503 | `DB_UNAVAILABLE` | Health check could not run `SELECT 1` |
 | 500 | `INTERNAL` | Anything unexpected; `detail` is a generic sentence, the error is logged with the request id |
@@ -240,7 +240,7 @@ No body required (an empty JSON body `{}` is accepted). Deletes the session row 
 }
 ```
 
-`askEnabled` is true only when `ANTHROPIC_API_KEY` is set and the role has `ask.use`. `today` is the clock's UTC date. 401 `UNAUTHENTICATED` without a session.
+`askEnabled` is true only when the configured provider's key is set (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, ADR 0009) and the role has `ask.use`. `today` is the clock's UTC date. 401 `UNAUTHENTICATED` without a session.
 
 ### 5.3 Reference data
 
@@ -719,7 +719,9 @@ Expected load is at most 10,000 rows per request; Chat 8 measures it against Tur
 
 ## 7. Ask about pay: interpreter contract
 
-### 7.1 Request to the model (ADR 0008)
+### 7.1 Request to the model (ADR 0008, ADR 0009)
+
+> ADR 0009 adds `GeminiInterpreter` (the default provider). It sends one `generateContent` request: `systemInstruction` (7.3), one user message with the question, both tools as `functionDeclarations` (`parametersJsonSchema` from 7.2, no `strict`), `toolConfig.functionCallingConfig.mode: ANY`, `maxOutputTokens: 512`, 15-second timeout, no retries. A `finishReason` other than `STOP`, a blocked prompt, an HTTP error or no function call is an interpreter error (503 `ASK_UPSTREAM_FAILED`); function arguments are re-parsed as in 7.4. The rest of this section describes the Anthropic request.
 
 `AnthropicInterpreter.interpret(question, context)` sends one Messages API request:
 - `model`: `config.ASK_MODEL` (default `claude-haiku-5-5`), `max_tokens: 512`, 15-second timeout, SDK `maxRetries: 0`.
