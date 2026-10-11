@@ -249,7 +249,7 @@ At 10,000 rows SQLite can scan the whole employees table in a few milliseconds, 
 | I14 | `CREATE INDEX ix_ask_log_time ON ask_log(asked_at)` | Global daily cap: count of today's questions for everyone |
 
 Deliberately not indexed:
-- **Name search** (`name_search LIKE '%term%'`): a leading wildcard can't use a B-tree index. A 10k-row scan is expected to be a few ms; Chat 8 confirms.
+- **Name search** (`name_search LIKE '%term%'`): a leading wildcard can't use a B-tree index. A 10k-row scan is expected to be a few ms; measure with the S10 performance script (`08` §6).
 - **Sort by salary in USD**: an expression over a join, which can't be indexed in the portable subset (D-025). Expected cost is a 10k-row sort. Fallback if Chat 8 measures it above budget: store `salary_usd_minor` on `employees`, written with the current salary (FX is static).
 - **Gender**: four values, low selectivity, always combined with other filters.
 - **`salary_changes(changed_by_user_id)`**: nothing queries by it.
@@ -392,8 +392,8 @@ Built backwards from the current salary, so the last row always equals it.
   2. Inserts the dataset.
   3. Upserts the three users by email, so their passwords follow the current env values.
 - The reset also deletes all rows from `ask_log` and `sessions` first (so every reviewer is logged out and caps restart).
-- The same command is the candidate for restoring the live demo to a known state. Chat 8 decides on that.
-- Cost on Turso: about 52,000 rows written per reset (deletes count as writes too, so a reset roughly doubles that) against the free plan's 10 million rows written per month. Chat 8 owns that budget.
+- The same command is the live demo reset: run by hand against production Turso when needed (`08-deploy-perf-demo.md` §4). No scheduled job.
+- Cost on Turso: about 52,000 rows written per reset (deletes count as writes too, so a reset roughly doubles that) against the free plan's 10 million rows written per month. Occasional manual resets stay inside that budget.
 
 ### 7.11 Seed report (printed to the console)
 
@@ -448,8 +448,8 @@ All run against `generateDataset` in memory unless noted:
 | 1 | Resolved 9 Oct: promotions record the old and new level (D-029). 10,000 active plus 250 terminated (D-026). Illustrative FX rates, labelled as such (section 4) | - | Hashir |
 | 4 | Resolved by Chat 3: migrations are hand-written SQL files (ADR 0003) | - | - |
 | 5 | Resolved by Chat 3: scrypt hashing, sessions in the DB (ADR 0006) | - | - |
-| 6 | Is the seed command also the demo reset mechanism, and how often does it run? | Candidate only | Chat 8 |
-| 7 | Does salary-in-USD sorting stay within the F2 budget without a stored USD column? | Expected yes; measured | Chat 8 |
+| 6 | ~~Is the seed command also the demo reset mechanism, and how often does it run?~~ | Resolved: yes; manual only (`08` §4) | Chat 8 |
+| 7 | Does salary-in-USD sorting stay within the F2 budget without a stored USD column? | Expected yes; measure in S10 per `08` §6 | Chat 8 / S10 |
 
 ## Sources
 

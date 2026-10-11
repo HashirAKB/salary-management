@@ -14,9 +14,9 @@ Updated in Chat 7 to match D-064 to D-068 and A-006 (the Claude Code kit): S0 ho
 | D-058 | CI runs on pull requests and on pushes to `main`, not on every branch push. Red commits live on slice branches and are expected to fail; they never land on `main` alone. A pull request is opened only when its branch head is green. Closes the open question "May red commits fail CI on a branch?" | `main` is green at every first-parent commit, which Render's `checksPass` deploy trigger relies on. Red commits still show in history as evidence, without a wall of red crosses in the GitHub UI | CI on every push (red crosses on every red commit). Marking red commits as expected failures in CI (machinery that adds nothing for the reviewer) |
 | D-059 | Conventional Commits, checked by commitlint in a `commit-msg` hook. Red: `test(scope): <behaviour>`, test files plus "not implemented" stubs only. Green: `feat(scope)` or `fix(scope)`, production code only. Refactor: `refactor(scope)`, tests unchanged and green. The `pre-commit` hook runs lint-staged (Prettier and ESLint on staged files) and never runs tests. Claude Code's co-author trailer stays on its commits | The log reads as red, green, refactor without opening a diff. A test-running pre-commit hook would block every red commit. The co-author trailer is an honest record of AI pairing, which the brief asks to see | Free-form messages; tests in the pre-commit hook; removing AI trailers |
 | D-060 | Each slice has a time box. Two checkpoints apply the cut order from `chat-plan.md` by rule: Saturday 21:30 and Sunday 12:00. Build work stops at Sunday 16:00 whatever its state. Each cut is logged in `decisions.md` when it's made, and anything unbuilt is listed in the README with its reason | Deciding cuts by rule at fixed times avoids discovering on Sunday afternoon that the demo can't be recorded. Logged cuts are product decisions, not quiet omissions | Cutting by feel when tired; extending the build into the submission buffer |
-| D-061 | The skeleton deploy happens in S0: Render free web service from `render.yaml`, `autoDeployTrigger: checksPass`, Turso database created, `/api/health` live. Every merged slice then deploys itself. Chat 8 still confirms the final hosting setup (D-005, D-030 stay Proposed) | Deployment risk (cold starts, env vars, Turso connectivity) surfaces on day one, not in S9. `checksPass` deploys only `main` commits whose checks passed | Deploying first in S9 (any hosting surprise lands on Sunday afternoon) |
+| D-061 | The skeleton deploy happens in S0: Render free web service from `render.yaml`, `autoDeployTrigger: checksPass`, Turso database created, `/api/health` live. Every merged slice then deploys itself. Hosting confirmed in Chat 8 (`08-deploy-perf-demo.md`; D-005, D-030 Decided) | Deployment risk (cold starts, env vars, Turso connectivity) surfaces on day one, not in S9. `checksPass` deploys only `main` commits whose checks passed | Deploying first in S9 (any hosting surprise lands on Sunday afternoon) |
 | D-062 | Node 24 LTS ("Krypton"), pinned in `.nvmrc` and in `engines.node` as `>=24.0.0 <25`. Render reads `.nvmrc` | Current LTS line; meets Vitest 5's Node 22.12+ requirement. Render advises an upper bound on version ranges | Node 26 (not yet LTS on the start date); Node 22 (older LTS for no reason) |
-| D-063 | Render region `singapore`. Turso database in the Turso region closest to it, picked at S0 and recorded in the S0 commit | A Render service's region can't be changed after creation, so it's decided before S0. Singapore is Render's closest region to India, where I record the demo and where I assume the reviewers are. Chat 8 can still move the database | Oregon, Render's default (about 250 ms further from India on every request) |
+| D-063 | Render region `singapore`. Turso database in the Turso region closest to it, picked at S0 and recorded in the S0 commit | A Render service's region can't be changed after creation, so it's decided before S0. Singapore is Render's closest region to India, where I record the demo and where I assume the reviewers are. Confirmed in Chat 8 (`08` §2); region left as built | Oregon, Render's default (about 250 ms further from India on every request) |
 
 ## 2. Changes this file makes to earlier docs
 
@@ -601,7 +601,7 @@ docs(ask): record first eval run
 **Scope.**
 - Web: connection store with injected scheduler, `ServerStatusBanner`, waking detection and GET retry in the API client (D-045).
 - Playwright config with `webServer` and `globalSetup` running the seed; `e2e/smoke.spec.ts` (05 section 5.10); `e2e` CI job; branch protection requires `e2e`.
-- Live checks from `08-deploy-perf-demo.md` (Chat 8): env vars, `trustProxy` IP in logs, health check, cold-start time, demo reset mechanism as Chat 8 decides.
+- Live checks from `08-deploy-perf-demo.md` §5: env vars, `trustProxy` IP in logs, sleeping `/api` form, cold-start time, one manual seed reset, portable SQL smoke, waking banner.
 
 **Test list.**
 - 05 section 5.9: the waking rows (C rows 2 to 5).
@@ -684,7 +684,7 @@ docs: link the demo video
 | # | Question | Default until answered | Owner |
 | --- | --- | --- | --- |
 | 1 | Which Turso region is closest to Render's Singapore region? | Pick at S0 from Turso's region list; record in the S0 commit | S0 |
-| 2 | How does the live demo return to a known state after reviewer edits? | Carried from decisions.md; S9 implements whatever Chat 8 decides | Chat 8 |
+| 2 | ~~How does the live demo return to a known state after reviewer edits?~~ | Resolved: manual `npm run seed` against Turso (`08` §4); S9 proves it once on the live checklist | Chat 8 |
 | 3 | ~~How is TDD enforced in Claude Code (instructions, Stop hook or TDD Guard)?~~ | Resolved: layered, D-064 (skill, Stop hook, commit-shape check, spec-reviewer); red commits still allowed | Chat 7 |
 | 4 | Does the schedule survive contact? | Checkpoint rules apply cuts automatically (4.2) | Checkpoints A and B |
 
