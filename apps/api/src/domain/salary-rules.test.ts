@@ -156,3 +156,64 @@ describe('checkSalaryChange: correction (D-022)', () => {
     );
   });
 });
+
+describe('checkSalaryChange: order of the rules (04 section 5.5)', () => {
+  // Every reason with an amount equal to the current pay and the same position breaks its own rule.
+  const reasons = [
+    { reason: 'merit', own: 'RAISE_REQUIRED' },
+    { reason: 'market_adjustment', own: 'RAISE_REQUIRED' },
+    { reason: 'promotion', own: 'RAISE_REQUIRED' },
+    { reason: 'correction', own: 'CORRECTION_NO_CHANGE' },
+  ] as const;
+  const unchanged = { amount: { amountMinor: 200_000_000, currency: 'INR' } };
+  const wrongCurrency = { amount: { amountMinor: 200_000_000, currency: 'USD' } };
+
+  describe.each(reasons)('$reason', ({ reason, own }) => {
+    it('returns its own rule when nothing earlier is broken', () => {
+      expect(checkSalaryChange(context({ change: { reason, ...unchanged } }))).toBe(own);
+    });
+
+    it('terminated comes before a future date', () => {
+      const input = context({
+        employee: { status: 'terminated' },
+        change: { reason, ...wrongCurrency, effectiveDate: '2026-10-10' },
+        hasPayBand: false,
+      });
+      expect(checkSalaryChange(input)).toBe('EMPLOYEE_TERMINATED');
+    });
+
+    it('a future date comes before a currency mismatch', () => {
+      const input = context({
+        change: { reason, ...wrongCurrency, effectiveDate: '2026-10-10' },
+        hasPayBand: false,
+      });
+      expect(checkSalaryChange(input)).toBe('DATE_IN_FUTURE');
+    });
+
+    it('a date before the current one comes before a currency mismatch', () => {
+      const input = context({
+        change: { reason, ...wrongCurrency, effectiveDate: '2026-03-31' },
+        hasPayBand: false,
+      });
+      expect(checkSalaryChange(input)).toBe('SALARY_DATE_BEFORE_CURRENT');
+    });
+
+    it('a currency mismatch comes before the reason rule', () => {
+      const input = context({ change: { reason, ...wrongCurrency }, hasPayBand: false });
+      expect(checkSalaryChange(input)).toBe('SALARY_CURRENCY_MISMATCH');
+    });
+
+    it('the reason rule comes before a missing pay band', () => {
+      const input = context({ change: { reason, ...unchanged }, hasPayBand: false });
+      expect(checkSalaryChange(input)).toBe(own);
+    });
+  });
+
+  it.each(['merit', 'market_adjustment', 'promotion', 'correction'] as const)(
+    'returns NO_PAY_BAND for %s when every other rule passes',
+    (reason) => {
+      const change = reason === 'promotion' ? { reason, levelRank: 3 } : { reason, levelRank: 2 };
+      expect(checkSalaryChange(context({ change, hasPayBand: false }))).toBe('NO_PAY_BAND');
+    },
+  );
+});
