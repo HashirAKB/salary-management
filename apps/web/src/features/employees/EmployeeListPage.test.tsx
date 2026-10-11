@@ -102,6 +102,26 @@ describe('employee list page (04 section 8.5)', () => {
     expect(screen.getByRole('button', { name: '49' })).toBeInTheDocument();
   });
 
+  it.each(['hr_admin', 'hr_viewer'] as const)(
+    'opens the employee detail page from a row link for %s (04 section 8.5)',
+    async (role) => {
+      loggedInAs(role);
+      server.use(
+        http.get('/api/employees', () =>
+          HttpResponse.json(anEmployeeListResponse({ items: [anEmployeeListItem()] })),
+        ),
+      );
+      const user = userEvent.setup();
+      renderList('/employees');
+
+      const link = await screen.findByRole('link', { name: 'Priya Nair' });
+      expect(link).toHaveAttribute('href', '/employees/4217');
+      await user.click(link);
+
+      expect(screen.getByLabelText('location')).toHaveTextContent('/employees/4217');
+    },
+  );
+
   it('shows 10 skeleton rows on first load', async () => {
     loggedInAs('hr_viewer');
     server.use(

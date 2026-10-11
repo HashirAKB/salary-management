@@ -1,4 +1,4 @@
-import { screen, within } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { beforeEach, describe, expect, it } from 'vitest';
@@ -25,6 +25,21 @@ describe('Ask about pay nav entry (05 section 5.2 C row 6)', () => {
     const hidden = await screen.findByRole('navigation', { name: 'Main' });
     expect(within(hidden).getByRole('link', { name: 'Employees' })).toBeInTheDocument();
     expect(within(hidden).queryByRole('link', { name: 'Ask about pay' })).not.toBeInTheDocument();
+  });
+});
+
+describe('mobile navigation menu', () => {
+  it('opens a drawer with the same nav links from the menu button', async () => {
+    server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))));
+    const user = userEvent.setup();
+    render(<AppRoutes />, { route: '/employees' });
+
+    await user.click(await screen.findByRole('button', { name: 'Open menu' }));
+
+    const drawer = await screen.findByRole('dialog');
+    expect(within(drawer).getByRole('link', { name: 'Insights' })).toBeInTheDocument();
+    await user.click(within(drawer).getByRole('link', { name: 'Pay equity' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 });
 

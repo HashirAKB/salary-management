@@ -108,6 +108,7 @@ export function PayEquityPage(): ReactElement {
           value={query.country ?? []}
           onChange={(values) => setFilters({ country: values.length > 0 ? values : undefined })}
           clearable
+          style={{ flex: '1 1 10rem', minWidth: 0 }}
         />
         <MultiSelect
           label="Department"
@@ -118,6 +119,7 @@ export function PayEquityPage(): ReactElement {
           value={query.department ?? []}
           onChange={(values) => setFilters({ department: values.length > 0 ? values : undefined })}
           clearable
+          style={{ flex: '1 1 10rem', minWidth: 0 }}
         />
         <Checkbox
           label="Flagged only"
@@ -157,23 +159,25 @@ export function PayEquityPage(): ReactElement {
           {data.cohorts.length === 0 ? (
             <Text>No cohorts match these filters.</Text>
           ) : (
-            <Table aria-label="Pay equity cohorts" striped>
-              <Table.Thead>
-                <Table.Tr>
-                  {COLUMNS.map((column) => (
-                    <Table.Th key={column}>{column}</Table.Th>
+            <Table.ScrollContainer minWidth={800}>
+              <Table aria-label="Pay equity cohorts" striped>
+                <Table.Thead>
+                  <Table.Tr>
+                    {COLUMNS.map((column) => (
+                      <Table.Th key={column}>{column}</Table.Th>
+                    ))}
+                  </Table.Tr>
+                </Table.Thead>
+                <Table.Tbody>
+                  {data.cohorts.map((cohort) => (
+                    <CohortRow
+                      key={`${cohort.country.code}-${cohort.jobTitle.id}-${cohort.level.code}`}
+                      cohort={cohort}
+                    />
                   ))}
-                </Table.Tr>
-              </Table.Thead>
-              <Table.Tbody>
-                {data.cohorts.map((cohort) => (
-                  <CohortRow
-                    key={`${cohort.country.code}-${cohort.jobTitle.id}-${cohort.level.code}`}
-                    cohort={cohort}
-                  />
-                ))}
-              </Table.Tbody>
-            </Table>
+                </Table.Tbody>
+              </Table>
+            </Table.ScrollContainer>
           )}
           <Text size="xs" c="dimmed">
             Flagged at a gap of 5% or more, the EU Pay Transparency Directive's joint pay assessment

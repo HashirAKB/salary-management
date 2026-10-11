@@ -4,7 +4,11 @@ export const theme = createTheme({
   primaryColor: 'violet',
   defaultRadius: 'md',
   components: {
-    Table: Table.extend({ defaultProps: { striped: true, highlightOnHover: true } }),
+    Table: Table.extend({
+      defaultProps: { striped: true, highlightOnHover: true },
+      // Numbers and dates never wrap; the table scrolls inside its container instead.
+      styles: { th: { whiteSpace: 'nowrap' }, td: { whiteSpace: 'nowrap' } },
+    }),
   },
 });
 
