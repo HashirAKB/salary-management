@@ -169,6 +169,16 @@ describe('GeminiInterpreter response mapping (ADR 0009)', () => {
     await expect(interpreter.interpret('q', context)).rejects.toThrow();
   });
 
+  it("puts Google's error message in the rejection", async () => {
+    const { interpreter } = setup(
+      { error: { message: 'models/x is not found' } },
+      { ok: false, status: 404 },
+    );
+    await expect(interpreter.interpret('q', context)).rejects.toThrow(
+      'HTTP 404: models/x is not found',
+    );
+  });
+
   it('rejects an HTTP error response and a failed request', async () => {
     const { interpreter } = setup({ error: { message: 'quota' } }, { ok: false, status: 429 });
     await expect(interpreter.interpret('q', context)).rejects.toThrow();

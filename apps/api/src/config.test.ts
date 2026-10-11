@@ -35,7 +35,7 @@ describe('config', () => {
       askProvider: 'gemini',
       geminiApiKey: undefined,
       anthropicApiKey: undefined,
-      askModel: 'gemini-2.5-flash',
+      askModel: 'gemini-flash-latest',
       askUserDailyLimit: 30,
       askGlobalDailyLimit: 300,
       logLevel: 'info',
@@ -48,7 +48,7 @@ describe('config', () => {
 
     const gemini = loadConfig(base);
     expect(askApiKey(gemini)).toBe('g-key');
-    expect(gemini.askModel).toBe('gemini-2.5-flash');
+    expect(gemini.askModel).toBe('gemini-flash-latest');
 
     const anthropic = loadConfig({ ...base, ASK_PROVIDER: 'anthropic' });
     expect(askApiKey(anthropic)).toBe('a-key');
