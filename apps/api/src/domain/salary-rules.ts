@@ -48,5 +48,14 @@ export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode 
     if (change.amount.amountMinor <= employee.salary.amountMinor) return 'RAISE_REQUIRED';
     if (change.levelRank <= employee.levelRank) return 'PROMOTION_LEVEL_NOT_HIGHER';
   }
+  if (change.reason === 'correction') {
+    if (
+      change.amount.amountMinor === employee.salary.amountMinor &&
+      change.jobTitleId === employee.jobTitleId &&
+      change.levelRank === employee.levelRank
+    ) {
+      return 'CORRECTION_NO_CHANGE';
+    }
+  }
   return null;
 }
