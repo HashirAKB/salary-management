@@ -17,6 +17,7 @@ The live app runs on free hosting and sleeps when idle. The first load after a q
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
 - [How I worked with AI](#how-i-worked-with-ai)
+- [Demo video, made as code](#demo-video-made-as-code)
 - [How to read the history](#how-to-read-the-history)
 - [Not built](#not-built)
 
@@ -102,6 +103,10 @@ I used Claude Code throughout, and tried to keep myself in charge of decisions.
 - **The AI feature is evaluated.** A fixed set of 15 questions runs against the real model; the bar is 13 of 15.
 
 The prompts, test lists, reviews, overrides and usage log are in [.ai-notes/](.ai-notes/).
+
+## Demo video, made as code
+
+The demo video was not screen-recorded by hand. While building this app I wrote [**talkies**](https://github.com/HashirAKB/talkies), a small open-source command-line tool that turns Playwright scene scripts into a narrated product video. It gives the cursor a gliding pointer and click ripples so viewers can follow along, cuts spinners and dead air automatically, voices each scene with AI text-to-speech, and fits each scene to its narration so audio and video stay in sync, all with no hand editing. A retake is one command (`talkies take`), so the video can be regenerated whenever the UI changes. It also ships as an agent skill: in Claude Code (or Cursor and Codex) you can ask for "a demo video of the app" and the agent writes the scenes, records the take and checks the result before handing it over.
 
 ## How to read the history
 
