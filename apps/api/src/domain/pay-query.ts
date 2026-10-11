@@ -18,7 +18,16 @@ export interface PayRow {
 
 export type Dimension = 'country' | 'department' | 'jobTitle' | 'level' | 'gender';
 export type Metric =
-  'headcount' | 'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max' | 'outsideBandCount';
+  | 'headcount'
+  | 'total'
+  | 'average'
+  | 'median'
+  | 'p25'
+  | 'p75'
+  | 'min'
+  | 'max'
+  | 'outsideBandCount'
+  | 'genderGap';
 
 export type PayStats = Partial<
   Record<'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max', number>
@@ -34,6 +43,17 @@ export interface GroupResult {
   // Present only when every row in the group has the same currency.
   local: PayStats | null;
   outsideBand: { below: number; above: number; total: number } | null;
+  // The currency of a single-currency group; null when mixed or suppressed.
+  // Absent on suppressed groups.
+  currency?: string | null;
+  gap?: GenderGap | null;
+}
+
+export interface GenderGap {
+  comparable: boolean;
+  women: number | null;
+  men: number | null;
+  gapPct: number | null;
 }
 
 function statsOf(values: readonly number[], metrics: readonly Metric[]): PayStats {
@@ -81,6 +101,8 @@ function resultFor(
         )
       : null,
     outsideBand,
+    currency: null,
+    gap: null,
   };
 }
 
