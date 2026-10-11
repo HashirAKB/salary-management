@@ -77,3 +77,112 @@ describe('aggregatePay: outside band', () => {
     expect(group?.outsideBand).toEqual({ below: 1, above: 2, total: 3 });
   });
 });
+
+describe('aggregatePay: minimum group size (D-012, D-040)', () => {
+  const rows = [
+    ...Array.from({ length: 5 }, () => payRow({ countryCode: 'US' })),
+    ...Array.from({ length: 3 }, () => payRow({ countryCode: 'IN', currency: 'INR' })),
+  ];
+  const metrics = ['headcount', 'total', 'outsideBandCount'] as const;
+
+  it('suppresses a group under the minimum with no values', () => {
+    const groups = aggregatePay(rows, metrics, 'country', 5);
+
+    expect(groups.find((g) => g.key === 'IN')).toEqual({
+      key: 'IN',
+      label: 'IN',
+      suppressed: true,
+      headcount: null,
+      usd: null,
+      local: null,
+      outsideBand: null,
+    });
+    expect(groups.find((g) => g.key === 'US')).toMatchObject({ suppressed: false, headcount: 5 });
+  });
+
+  it('keeps a group at exactly the minimum', () => {
+    const groups = aggregatePay(rows.slice(0, 5), metrics, 'country', 5);
+
+    expect(groups[0]?.suppressed).toBe(false);
+  });
+
+  it('suppresses nothing at the HR minimum of 1', () => {
+    const groups = aggregatePay([payRow()], metrics, 'country', 1);
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ suppressed: false, headcount: 1 });
+  });
+});
+
+describe('aggregatePay: grouping and order', () => {
+  it('groupBy none returns one all group', () => {
+    const groups = aggregatePay(
+      [payRow(), payRow({ countryCode: 'IN' })],
+      ['headcount'],
+      'none',
+      1,
+    );
+
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({ key: 'all', label: 'All active employees', headcount: 2 });
+  });
+
+  it('omits empty groups: no rows, no groups', () => {
+    expect(aggregatePay([], ['headcount'], 'none', 1)).toEqual([]);
+    expect(aggregatePay([], ['headcount'], 'country', 1)).toEqual([]);
+  });
+
+  it('groups by each dimension using the row value as the key', () => {
+    const rows = [
+      payRow({
+        countryCode: 'US',
+        departmentId: 7,
+        jobTitleId: 3,
+        levelCode: 'L4',
+        gender: 'male',
+      }),
+    ];
+
+    expect(aggregatePay(rows, ['headcount'], 'country', 1)[0]?.key).toBe('US');
+    expect(aggregatePay(rows, ['headcount'], 'department', 1)[0]?.key).toBe('7');
+    expect(aggregatePay(rows, ['headcount'], 'jobTitle', 1)[0]?.key).toBe('3');
+    expect(aggregatePay(rows, ['headcount'], 'level', 1)[0]?.key).toBe('L4');
+    expect(aggregatePay(rows, ['headcount'], 'gender', 1)[0]?.key).toBe('male');
+  });
+
+  it('sorts levels by rank', () => {
+    const rows = ['L3', 'L1', 'L5', 'L2'].map((levelCode) => payRow({ levelCode }));
+
+    const keys = aggregatePay(rows, ['headcount'], 'level', 1).map((g) => g.key);
+
+    expect(keys).toEqual(['L1', 'L2', 'L3', 'L5']);
+  });
+
+  it('sorts genders in reference order', () => {
+    const rows = ['not_disclosed', 'male', 'non_binary', 'female'].map((gender) =>
+      payRow({ gender }),
+    );
+
+    const keys = aggregatePay(rows, ['headcount'], 'gender', 1).map((g) => g.key);
+
+    expect(keys).toEqual(['female', 'male', 'non_binary', 'not_disclosed']);
+  });
+
+  it('sorts countries, departments and titles by name, and labels groups with it', () => {
+    const rows = [
+      payRow({ countryCode: 'GB' }),
+      payRow({ countryCode: 'US' }),
+      payRow({ countryCode: 'DE' }),
+    ];
+    // Name order (Alpha, Middle, Zealand) is the reverse of code order, so a sort by key fails.
+    const labels = { GB: 'Zealand', US: 'Alpha', DE: 'Middle' };
+
+    const groups = aggregatePay(rows, ['headcount'], 'country', 1, labels);
+
+    expect(groups.map((g) => [g.key, g.label])).toEqual([
+      ['US', 'Alpha'],
+      ['DE', 'Middle'],
+      ['GB', 'Zealand'],
+    ]);
+  });
+});

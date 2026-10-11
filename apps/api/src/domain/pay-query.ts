@@ -88,6 +88,7 @@ export function aggregatePay(
   metrics: readonly Metric[],
   _groupBy: Dimension | 'none',
   _minGroupSize: number,
+  _labels: Readonly<Record<string, string>> = {},
 ): GroupResult[] {
   return [resultFor('all', 'All active employees', rows, metrics)];
 }
