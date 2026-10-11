@@ -83,9 +83,9 @@ Run in S10; write real numbers to `docs/performance.md`. Do not invent timings i
 Script outline (local file DB and/or production Turso, 10,000 active employees):
 
 1. Seed once.
-2. Time the default employee list page (`page=1`, `pageSize=50`, no filters) — F2 budget under 300 ms locally.
+2. Time the default employee list page (`page=1`, `pageSize=50`, no filters). F2 budget under 300 ms locally.
 3. Time one insights request that loads up to 10,000 active rows (target under 500 ms, 04 §11 Q3).
-4. Time list sort by salary in USD (02 §10 Q7) — expected to stay in budget without a stored USD column.
+4. Time list sort by salary in USD (02 §10 Q7). Expected to stay in budget without a stored USD column.
 5. If practical, compare with indexes temporarily dropped; otherwise note "indexes on" only.
 6. Optional: first Ask call latency on the live service (grammar / cold model path) against the 15-second timeout (04 §11 Q4).
 

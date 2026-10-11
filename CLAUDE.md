@@ -8,7 +8,6 @@ The spec lives in `docs/`. Find the current slice in `docs/06-build-plan.md` and
 - `npm run lint && npm run typecheck`; `npm run build`; `npm run dev`
 - `npm run test:coverage`: what CI runs; enforces the coverage floor on `domain/` and `shared/`
 - `npm run seed`: 10,000 employees, deterministic; needs `DEMO_HR_ADMIN_PASSWORD`, `DEMO_HR_VIEWER_PASSWORD`, `DEMO_FINANCE_PASSWORD`
-- `npm run e2e`: Playwright smoke test against the built app
 - `npm run eval`: Ask eval against the real model. Manual only, needs `ANTHROPIC_API_KEY`, never in CI
 ## Rules
 - IMPORTANT: test first. Write a failing test, run it, see it fail, write the minimum code to pass, refactor only on green. Build slices with `/tdd-plan S<n>` (Opus, plan mode) then `/tdd-build S<n> <cycles>` (Sonnet, effort medium, one cycle group per session) then `/tdd-finish S<n>` (Sonnet). Use `/clear` between sessions; never switch model mid-session. Build sessions read `.ai-notes/Sn/brief.md`, not `docs/04` or `docs/05` directly.
