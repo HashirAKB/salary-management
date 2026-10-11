@@ -1,7 +1,7 @@
 import type { CannotAnswerReason, StructuredQuery } from '@acme/shared';
 import { createHash } from 'node:crypto';
-import { readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { askApiKey, loadConfig } from '../src/config.ts';
 import { createDb } from '../src/db/client.ts';
 import { systemClock } from '../src/domain/clock.ts';
@@ -136,6 +136,7 @@ export async function runEval(env: Record<string, string | undefined>): Promise<
     '',
   ].join('\n');
   const path = resolve(import.meta.dirname, `../../../docs/evals/ask-eval-${today}.md`);
+  await mkdir(dirname(path), { recursive: true });
   await writeFile(path, report);
   console.log(`Report written to ${path}`);
   return 0;
