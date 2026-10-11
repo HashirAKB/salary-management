@@ -104,3 +104,14 @@ export async function loadGroupLabels(
       return Object.fromEntries(GENDERS.map((g) => [g.code, g.name]));
   }
 }
+
+// Names for the I3 cohort labels, keyed by job title id and by level code.
+export async function loadCohortNames(
+  db: Db,
+): Promise<{ jobTitles: Record<string, string>; levels: Record<string, string> }> {
+  const [titles, levelRows] = await Promise.all([
+    namesOf(db.select({ key: jobTitles.id, name: jobTitles.name }).from(jobTitles)),
+    namesOf(db.select({ key: levels.code, name: levels.name }).from(levels)),
+  ]);
+  return { jobTitles: titles, levels: levelRows };
+}

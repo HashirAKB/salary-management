@@ -3,6 +3,8 @@ import type {
   Money,
   PayDistributionQuery,
   PayDistributionResponse,
+  PayEquityQuery,
+  PayEquityResponse,
 } from '@acme/shared';
 import type { Db } from '../../db/client.ts';
 import type { Role } from '../../db/schema.ts';
@@ -10,7 +12,8 @@ import { aggregateMinGroupSize } from '../../domain/permissions.ts';
 import { aggregatePay, KEY_OF, type Metric, type PayStats } from '../../domain/pay-query.ts';
 import { fxAsOf } from '../auth/sessions.ts';
 import { checkListValues } from '../employees/service.ts';
-import { loadActivePayRows, loadCountryNames, loadGroupLabels } from './repo.ts';
+import { FLAG_THRESHOLD_PCT, MIN_PER_GENDER, computePayEquity } from '../../domain/pay-equity.ts';
+import { loadActivePayRows, loadCohortNames, loadCountryNames, loadGroupLabels } from './repo.ts';
 
 const SUMMARY_METRICS: Metric[] = ['headcount', 'total', 'outsideBandCount'];
 
@@ -130,6 +133,57 @@ export async function getPayDistribution(
       suppressed: group.suppressed,
       usd: group.usd ? moneyStats(group.usd, 'USD') : null,
       local: group.local ? moneyStats(group.local, currencyOf.get(group.key)!) : null,
+    })),
+  };
+}
+
+// I3 (04 section 5.6). The org gap compares every active woman with every man (D-013), so the
+// filters narrow the cohorts only. Every role gets the same body (D-047).
+export async function getPayEquity(db: Db, query: PayEquityQuery): Promise<PayEquityResponse> {
+  await checkListValues(db, query);
+  const [rows, countryNames, names, asOf] = await Promise.all([
+    loadActivePayRows(db),
+    loadCountryNames(db),
+    loadCohortNames(db),
+    fxAsOf(db),
+  ]);
+  const departmentIds = (query.department ?? []).map(Number);
+  const inScope = rows.filter(
+    (r) =>
+      (!query.country?.length || query.country.includes(r.countryCode)) &&
+      (departmentIds.length === 0 || departmentIds.includes(r.departmentId)),
+  );
+  const { org } = computePayEquity(rows);
+  const { cohorts } = computePayEquity(inScope);
+  const comparable = cohorts.filter((c) => c.comparable);
+  const shown = [
+    ...comparable.sort((a, b) => b.gapPct! - a.gapPct!),
+    ...(query.includeNotComparable ? cohorts.filter((c) => !c.comparable) : []),
+  ].filter((c) => !query.flaggedOnly || c.flagged);
+
+  return {
+    fxAsOf: asOf,
+    thresholdPct: FLAG_THRESHOLD_PCT,
+    minPerGender: MIN_PER_GENDER,
+    org: { ...org, basis: 'usd' },
+    cohortCounts: {
+      withEmployees: cohorts.length,
+      comparable: comparable.length,
+      flagged: cohorts.filter((c) => c.flagged).length,
+    },
+    cohorts: shown.map((c) => ({
+      country: { code: c.countryCode, name: countryNames[c.countryCode]! },
+      jobTitle: { id: c.jobTitleId, name: names.jobTitles[c.jobTitleId]! },
+      level: { code: c.levelCode, name: names.levels[c.levelCode]! },
+      comparable: c.comparable,
+      women: c.women,
+      men: c.men,
+      meanWomen:
+        c.meanWomenMinor === null ? null : { amountMinor: c.meanWomenMinor, currency: c.currency },
+      meanMen:
+        c.meanMenMinor === null ? null : { amountMinor: c.meanMenMinor, currency: c.currency },
+      gapPct: c.gapPct,
+      flagged: c.flagged,
     })),
   };
 }
