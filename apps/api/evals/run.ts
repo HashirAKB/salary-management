@@ -1,17 +1,16 @@
-import Anthropic from '@anthropic-ai/sdk';
 import type { CannotAnswerReason, StructuredQuery } from '@acme/shared';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { loadConfig } from '../src/config.ts';
+import { askApiKey, loadConfig } from '../src/config.ts';
 import { createDb } from '../src/db/client.ts';
 import { systemClock } from '../src/domain/clock.ts';
-import { AnthropicInterpreter } from '../src/modules/ask/anthropic-interpreter.ts';
 import type { InterpretResult } from '../src/modules/ask/interpreter.ts';
+import { createInterpreter } from '../src/modules/ask/provider.ts';
 import { loadAskReference } from '../src/modules/ask/repo.ts';
 import { buildSystemPrompt } from '../src/modules/ask/system-prompt.ts';
 
-// 05 section 6.4: npm run eval. Manual, needs ANTHROPIC_API_KEY, never in CI.
+// 05 section 6.4: npm run eval. Manual, needs the Ask provider's key (GEMINI_API_KEY or ANTHROPIC_API_KEY), never in CI.
 
 type Expectation =
   { kind: 'query'; query: StructuredQuery } | { kind: 'cannot_answer'; reason: CannotAnswerReason };
@@ -24,6 +23,9 @@ interface EvalCase {
 }
 
 type Actual = Expectation | { kind: 'error'; message: string };
+
+const GEMINI_PAUSE_MS = 7_000;
+const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
 
 const FILTER_KEYS = ['countries', 'departments', 'jobTitles', 'levels', 'genders'] as const;
 
@@ -66,8 +68,10 @@ const toActual = (result: InterpretResult): Actual =>
 
 export async function runEval(env: Record<string, string | undefined>): Promise<number> {
   const config = loadConfig(env);
-  if (!config.anthropicApiKey) {
-    console.error('npm run eval needs ANTHROPIC_API_KEY.');
+  if (!askApiKey(config)) {
+    console.error(
+      `npm run eval needs ${config.askProvider === 'gemini' ? 'GEMINI_API_KEY' : 'ANTHROPIC_API_KEY'}.`,
+    );
     return 1;
   }
   const file = JSON.parse(
@@ -75,15 +79,14 @@ export async function runEval(env: Record<string, string | undefined>): Promise<
   ) as { cases: EvalCase[] };
 
   const db = createDb(config.databaseUrl, config.databaseAuthToken);
-  const interpreter = new AnthropicInterpreter(
-    new Anthropic({ apiKey: config.anthropicApiKey, maxRetries: 0, timeout: 15_000 }),
-    { model: config.askModel, reference: await loadAskReference(db) },
-  );
+  const interpreter = createInterpreter(config, await loadAskReference(db));
   const today = systemClock.today();
 
   const rows: { id: string; question: string; expected: string; actual: string; pass: boolean }[] =
     [];
   for (const testCase of file.cases) {
+    // The Gemini free tier allows only a few requests a minute.
+    if (rows.length > 0 && config.askProvider === 'gemini') await sleep(GEMINI_PAUSE_MS);
     let actual: Actual;
     try {
       actual = toActual(await interpreter.interpret(testCase.question, { today }));
@@ -113,6 +116,7 @@ export async function runEval(env: Record<string, string | undefined>): Promise<
   const report = [
     `# Ask eval ${today}`,
     '',
+    `- Provider: ${config.askProvider}`,
     `- Model: ${config.askModel}`,
     `- Prompt hash: ${promptHash}`,
     `- Total: ${passed}/${rows.length} (bar: 13/${rows.length})`,
