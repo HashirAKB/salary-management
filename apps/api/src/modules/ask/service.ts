@@ -23,7 +23,7 @@ import {
 } from './answer.ts';
 import { checkQuery } from './interpret.ts';
 import type { InterpretResult, QueryInterpreter } from './interpreter.ts';
-import { insertAskLog, loadAskReference } from './repo.ts';
+import { countAsked, insertAskLog, loadAskReference } from './repo.ts';
 
 const MONEY_METRICS = ['total', 'average', 'median', 'p25', 'p75', 'min', 'max'] as const;
 const MAX_SUGGESTION_LENGTH = 200;
@@ -73,8 +73,38 @@ export async function askQuestion(
   question: string,
 ): Promise<AskResponse> {
   const { db, clock, config } = deps;
-  const askedAt = clock.now().toISOString();
-  const usage = { usedToday: 1, dailyLimit: config.askUserDailyLimit };
+  const now = clock.now();
+  const askedAt = now.toISOString();
+  const dayStart = `${clock.today()}T00:00:00.000Z`;
+  const nextMidnight = new Date(`${clock.today()}T00:00:00.000Z`).getTime() + 86_400_000;
+  const window = { from: dayStart, to: new Date(nextMidnight).toISOString() };
+  const [userCount, globalCount] = await Promise.all([
+    countAsked(db, window, viewer.id),
+    countAsked(db, window),
+  ]);
+  const overUser = userCount >= config.askUserDailyLimit;
+  if (overUser || globalCount >= config.askGlobalDailyLimit) {
+    await insertAskLog(db, {
+      userId: viewer.id,
+      askedAt,
+      question,
+      outcome: 'rate_limited',
+      interpretedQuery: null,
+      inputTokens: null,
+      outputTokens: null,
+    });
+    throw new AppError(
+      429,
+      'ASK_LIMIT_REACHED',
+      overUser
+        ? `You've used your ${config.askUserDailyLimit} questions for today.`
+        : "The demo has reached today's question limit.",
+      undefined,
+      { 'retry-after': String(Math.ceil((nextMidnight - now.getTime()) / 1000)) },
+    );
+  }
+  // The current question counts as one used (first of the day is 1).
+  const usage = { usedToday: userCount + 1, dailyLimit: config.askUserDailyLimit };
   const log = (outcome: 'answered' | 'cannot_answer' | 'error', result?: InterpretResult) =>
     insertAskLog(db, {
       userId: viewer.id,

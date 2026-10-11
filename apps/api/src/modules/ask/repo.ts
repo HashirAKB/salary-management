@@ -1,5 +1,5 @@
 import type { AskReference } from '@acme/shared';
-import { asc } from 'drizzle-orm';
+import { and, asc, count, eq, gte, inArray, lt } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { askLog, countries, departments, jobTitles, levels } from '../../db/schema.ts';
 import { GENDERS } from '../../domain/genders.ts';
@@ -34,4 +34,24 @@ export async function loadAskReference(db: Db): Promise<AskReference> {
     levels: levelRows,
     genders: GENDERS.map((g) => ({ code: g.code, name: g.name })),
   };
+}
+
+// Questions that count toward the daily caps: rate_limited rows don't (04 section 5.8 step 2).
+export async function countAsked(
+  db: Db,
+  window: { from: string; to: string },
+  userId?: number,
+): Promise<number> {
+  const [row] = await db
+    .select({ n: count() })
+    .from(askLog)
+    .where(
+      and(
+        inArray(askLog.outcome, ['answered', 'cannot_answer', 'error']),
+        gte(askLog.askedAt, window.from),
+        lt(askLog.askedAt, window.to),
+        userId === undefined ? undefined : eq(askLog.userId, userId),
+      ),
+    );
+  return row?.n ?? 0;
 }
