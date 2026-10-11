@@ -169,7 +169,7 @@ export function EmployeeListPage(): ReactElement {
               Export CSV
             </Button>
           )}
-          {canAdd && !empty && addButton}
+          {canAdd && !(empty && !filtered) && addButton}
         </Group>
       </Group>
       {filters.droppedValues && (
@@ -212,7 +212,7 @@ export function EmployeeListPage(): ReactElement {
           {canAdd && addButton}
         </Stack>
       )}
-      {data && !pastTheEnd && (
+      {data && !pastTheEnd && data.total > 0 && (
         <Text>
           {`Showing ${count.format((data.page - 1) * data.pageSize + 1)} to ${count.format(
             Math.min(data.page * data.pageSize, data.total),
