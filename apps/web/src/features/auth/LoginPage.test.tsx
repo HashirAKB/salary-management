@@ -23,6 +23,23 @@ async function logIn(email = 'hr.admin@acme.test', password = 'demo-password-1')
 }
 
 describe('LoginPage (S-1)', () => {
+  it('shows messages under the fields when submitted empty, without calling the API', async () => {
+    let called = false;
+    server.use(
+      http.post('/api/auth/login', () => {
+        called = true;
+        return HttpResponse.json({});
+      }),
+    );
+    render(<AppRoutes />, { route: '/login' });
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Log in' }));
+
+    expect(await screen.findByText('Enter your email.')).toBeInTheDocument();
+    expect(screen.getByText('Enter your password.')).toBeInTheDocument();
+    expect(called).toBe(false);
+  });
+
   it('shows "Email or password is incorrect." on a 401', async () => {
     server.use(
       http.post('/api/auth/login', () =>
