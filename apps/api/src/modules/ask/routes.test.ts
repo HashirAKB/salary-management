@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { afterEach, describe, expect, it } from 'vitest';
 import { fakeInterpreter, questionOf } from '../../../test/ask.ts';
-import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
+import { aUser, anEmployee, loggedInAs } from '../../../test/builders/index.ts';
 import { testApp, testConfig, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
 import { askLog, type Role } from '../../db/schema.ts';
@@ -147,5 +147,89 @@ describe('POST /api/ask (K1)', () => {
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
     expect(await db.select().from(askLog)).toEqual([]);
+  });
+
+  // Rows for the cap tests, written straight to the log (05 section 4.2).
+  const logRows = (
+    db: Db,
+    userId: number,
+    count: number,
+    outcome: 'answered' | 'rate_limited',
+    askedAt = '2026-10-09T01:00:00.000Z',
+  ) =>
+    db
+      .insert(askLog)
+      .values(Array.from({ length: count }, () => ({ userId, askedAt, question: 'q', outcome })));
+
+  describe('daily caps (D-037)', () => {
+    it("the 31st question of a user's day returns 429 with Retry-After to UTC midnight and logs rate_limited", async () => {
+      const { db, ask } = await setup();
+      const [user] = await db.all<{ id: number }>('SELECT id FROM users');
+      await logRows(db, user!.id, 30, 'answered');
+
+      const response = await ask(questionOf('q01'));
+
+      expect(response.statusCode).toBe(429);
+      expect(response.json()).toMatchObject({
+        code: 'ASK_LIMIT_REACHED',
+        detail: "You've used your 30 questions for today.",
+      });
+      // The test clock reads 09:00 UTC, so midnight is 15 hours away.
+      expect(response.headers['retry-after']).toBe(String(15 * 60 * 60));
+      const limited = (await db.select().from(askLog)).filter((r) => r.outcome === 'rate_limited');
+      expect(limited).toHaveLength(1);
+      expect(limited[0]).toMatchObject({ question: questionOf('q01'), interpretedQuery: null });
+    });
+
+    it("rate_limited rows and yesterday's rows don't count toward the cap", async () => {
+      const { db, ask } = await setup();
+      const [user] = await db.all<{ id: number }>('SELECT id FROM users');
+      await logRows(db, user!.id, 29, 'answered');
+      await logRows(db, user!.id, 3, 'rate_limited');
+      await logRows(db, user!.id, 10, 'answered', '2026-10-08T23:59:59.000Z');
+
+      const thirtieth = await ask(questionOf('q01'));
+      const thirtyFirst = await ask(questionOf('q01'));
+
+      expect(thirtieth.statusCode).toBe(200);
+      expect(thirtieth.json()).toMatchObject({ usage: { usedToday: 30, dailyLimit: 30 } });
+      expect(thirtyFirst.statusCode).toBe(429);
+    });
+
+    it('the global cap of 300 returns 429 with the demo-wide message', async () => {
+      const { db, ask } = await setup();
+      const other = await aUser('hr_viewer').insert(db);
+      await logRows(db, other.id, 300, 'answered');
+
+      const response = await ask(questionOf('q01'));
+
+      expect(response.statusCode).toBe(429);
+      expect(response.json()).toMatchObject({
+        code: 'ASK_LIMIT_REACHED',
+        detail: "The demo has reached today's question limit.",
+      });
+      expect(response.headers['retry-after']).toBe(String(15 * 60 * 60));
+    });
+  });
+
+  it('Finance asking about a group under 5 gets the "fewer than 5" sentence and no numbers', async () => {
+    const { ask } = await setup({ role: 'finance', seed: threeIndians });
+
+    const response = await ask(questionOf('q01'));
+
+    expect(response.statusCode).toBe(200);
+    const body = response.json();
+    expect(body.answer).toBe(
+      'Some figures are hidden to protect groups of fewer than 5 employees.',
+    );
+    expect(body.result.rows).toEqual([
+      {
+        key: 'all',
+        label: 'All matching employees',
+        headcount: null,
+        suppressed: true,
+        value: null,
+      },
+    ]);
   });
 });
