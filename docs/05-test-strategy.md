@@ -283,6 +283,7 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
 | U | local figures appear only when a group has one currency |
 | U | outside-band counts split below and above, and the band limits count as inside |
 | U | groups under the minimum size are suppressed with no values; the HR minimum suppresses nothing |
+| U | exactly one suppressed group also hides the smallest visible group (ties by key); two suppressed, a single group, or the HR minimum add nothing (D-071) |
 | U | `groupBy: none` returns one `all` group; empty groups are omitted; levels sort by rank, others by name |
 | U | gender gap is `(men - women) / men * 100`, positive when women are paid less |
 | U | `compaRatio` and `gapPct` round half away from zero from integers (`compaRatio(100500, 100000)` is `1.01`, not floating-point `1.00`; a gap under 0.05% either way is `0`, never `-0`) |
@@ -298,7 +299,7 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
 | I | pay distribution groups by each dimension (`it.each`) and applies filters |
 | I | pay equity returns the flagged cohort first, hides not-comparable cohorts unless asked, and honours `flaggedOnly` |
 | I | Finance and HR get the same pay-equity body (D-047) |
-| C | a suppressed row shows "Fewer than 5" |
+| C | a suppressed row shows "Hidden to protect small groups" |
 | C | HR roles see the outside-band and stale cards as links; Finance sees plain counts |
 | C | pay equity shows "Too few to compare" rows and a "Review" badge with text on flagged rows |
 | C | changing "Group by" updates the URL and the table |

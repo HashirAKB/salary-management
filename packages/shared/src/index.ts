@@ -7,3 +7,4 @@ export * from './schemas/employee.ts';
 export * from './percent.ts';
 export * from './schemas/reference.ts';
 export * from './schemas/salary.ts';
+export * from './schemas/insights.ts';

@@ -10,6 +10,7 @@ import { registerStatic } from './http/static.ts';
 import { registerAuth } from './modules/auth/plugin.ts';
 import { authRoutes } from './modules/auth/routes.ts';
 import { employeeRoutes } from './modules/employees/routes.ts';
+import { insightsRoutes } from './modules/insights/routes.ts';
 import { healthRoutes } from './modules/health/routes.ts';
 import { referenceRoutes } from './modules/reference/routes.ts';
 import { salaryRoutes } from './modules/salary/routes.ts';
@@ -46,6 +47,7 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   authRoutes(app, deps);
   referenceRoutes(app, { db: deps.db });
   employeeRoutes(app, { db: deps.db, clock: deps.clock });
+  insightsRoutes(app, { db: deps.db, clock: deps.clock });
   salaryRoutes(app, { db: deps.db, clock: deps.clock, writes: deps.salaryWrites });
   return app;
 }

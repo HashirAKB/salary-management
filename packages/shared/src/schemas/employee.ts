@@ -3,7 +3,7 @@ import { isoDateSchema, personNameSchema } from './common.ts';
 
 // 04 section 4.6: a list is one comma-separated param; trim, drop empties, de-duplicate.
 // Shape only: whether a country or level exists is checked against the reference tables.
-const commaList = z.preprocess(
+export const commaList = z.preprocess(
   (value) =>
     typeof value === 'string'
       ? [

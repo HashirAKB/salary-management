@@ -19,7 +19,7 @@ You are building specific cycles of slice **$0**. The plan and spec are already 
 1. No production code without a failing test that needs it.
 2. Never edit, skip, weaken or delete a test to make it pass. If a test looks wrong, stop and ask.
 3. If `brief.md` is silent or contradicts something, stop with `BLOCKED:`, quote the field and options, wait.
-4. Show evidence: after every test run, paste the command and its last ~10 summary lines.
+4. Evidence is the test run's tool output in this session. Don't repeat or paste it in your reply; state red or green in one line.
 5. When I correct something, append it to `.ai-notes/$0/overrides.md` immediately.
 6. Stage explicit paths. Nothing in `.ai-notes/` is ever staged.
 

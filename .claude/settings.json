@@ -53,6 +53,7 @@
               "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "50"
        },
        "enabledPlugins": {
-              "render@claude-plugins-official": false
+              "render@claude-plugins-official": false,
+              "security-guidance@claude-plugins-official": false
        }
 }

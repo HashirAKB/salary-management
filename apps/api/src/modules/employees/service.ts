@@ -48,7 +48,10 @@ import { buildEmployeesCsv } from './csv.ts';
 
 // Values in the list filters must exist in the reference tables (brief ruling 1); the shared
 // schema only checks their shape. The path names the offending item, e.g. `country[1]`.
-async function checkListValues(db: Db, query: EmployeeListQuery): Promise<void> {
+export async function checkListValues(
+  db: Db,
+  query: Pick<EmployeeListQuery, 'country' | 'department' | 'jobTitle' | 'level' | 'gender'>,
+): Promise<void> {
   const [countryRows, levelRows, departmentRows, titleRows] = await Promise.all([
     db.select({ key: countries.code }).from(countries),
     db.select({ key: levels.code }).from(levels),
