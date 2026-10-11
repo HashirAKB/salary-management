@@ -70,7 +70,7 @@ describe('employee detail page (04 section 8.5 S-3)', () => {
 
     expect(await screen.findByRole('button', { name: 'Edit details' })).toBeVisible();
     expect(screen.getByRole('button', { name: 'Terminate' })).toBeVisible();
-    expect(screen.queryByRole('button', { name: /salary change/i })).toBeNull();
+    expect(screen.getByRole('button', { name: 'Record salary change' })).toBeVisible();
     admin.unmount();
 
     loggedInAs('hr_viewer');
@@ -78,6 +78,7 @@ describe('employee detail page (04 section 8.5 S-3)', () => {
     await screen.findByRole('heading', { level: 1, name: 'Priya Nair' });
     expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Terminate' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Record salary change' })).toBeNull();
   });
 
   it('shows "Employee not found." for an unknown id', async () => {

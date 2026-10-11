@@ -66,14 +66,16 @@ describe('record salary change modal (04 section 8.5 S-6)', () => {
 
     const dialog = await openModal(user);
     await choose(user, 'Reason', 'Merit increase');
-    expect(within(dialog).getByLabelText('Job title')).toBeDisabled();
-    expect(within(dialog).getByLabelText('Job title')).toHaveValue('Software Engineer');
-    expect(within(dialog).getByLabelText('Level')).toBeDisabled();
-    expect(within(dialog).getByLabelText('Level')).toHaveValue('L3 Senior');
+    expect(within(dialog).getByRole('combobox', { name: 'Job title' })).toBeDisabled();
+    expect(within(dialog).getByRole('combobox', { name: 'Job title' })).toHaveValue(
+      'Software Engineer',
+    );
+    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toBeDisabled();
+    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toHaveValue('L3 Senior');
 
     await choose(user, 'Reason', 'Promotion');
-    expect(within(dialog).getByLabelText('Job title')).toBeEnabled();
-    const level = within(dialog).getByLabelText('Level');
+    expect(within(dialog).getByRole('combobox', { name: 'Job title' })).toBeEnabled();
+    const level = within(dialog).getByRole('combobox', { name: 'Level' });
     expect(level).toBeEnabled();
     await user.click(level);
     expect(await screen.findByRole('option', { name: 'L4 Staff' })).toBeVisible();
@@ -131,7 +133,7 @@ describe('record salary change modal (04 section 8.5 S-6)', () => {
     code = 'PROMOTION_LEVEL_NOT_HIGHER';
     await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
     expect(await within(dialog).findByText('Choose a higher level.')).toBeVisible();
-    expect(within(dialog).getByLabelText('Level')).toHaveAccessibleDescription(
+    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toHaveAccessibleDescription(
       'Choose a higher level.',
     );
   });

@@ -12,6 +12,7 @@ import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
 import { EditEmployeeModal } from './EditEmployeeModal.tsx';
+import { SalaryChangeModal } from './SalaryChangeModal.tsx';
 import { SalaryHistoryTable } from './SalaryHistoryTable.tsx';
 import { TerminateModal } from './TerminateModal.tsx';
 
@@ -95,7 +96,7 @@ function DetailsCard({ employee }: { employee: EmployeeDetail }): ReactElement {
 export function EmployeeDetailPage(): ReactElement {
   const me = useViewer();
   const { id } = useParams();
-  const [modal, setModal] = useState<'edit' | 'terminate'>();
+  const [modal, setModal] = useState<'edit' | 'terminate' | 'salary'>();
   const employee = useQuery({
     queryKey: ['employee', id],
     queryFn: () => apiFetch(`/api/employees/${id}`, { schema: employeeDetailSchema }),
@@ -144,6 +145,7 @@ export function EmployeeDetailPage(): ReactElement {
   const data = employee.data;
   const terminated = data.status === 'terminated';
   const canWrite = me.permissions.includes('employee.write');
+  const canWriteSalary = me.permissions.includes('salary.write') && !terminated;
   return (
     <Stack>
       <Group justify="space-between" align="flex-start">
@@ -158,8 +160,11 @@ export function EmployeeDetailPage(): ReactElement {
           <Text>{`${data.jobTitle.name}, ${data.level.code} ${data.level.name}, ${data.country.name}`}</Text>
           <Text>{`Hired ${formatDate(data.hireDate)}`}</Text>
         </Stack>
-        {canWrite && (
+        {(canWrite || canWriteSalary) && (
           <Group>
+            {canWriteSalary && (
+              <Button onClick={() => setModal('salary')}>Record salary change</Button>
+            )}
             <Button variant="default" onClick={() => setModal('edit')}>
               Edit details
             </Button>
@@ -183,6 +188,13 @@ export function EmployeeDetailPage(): ReactElement {
         </Card>
       )}
       <DetailsCard employee={data} />
+      {canWriteSalary && (
+        <SalaryChangeModal
+          employee={data}
+          opened={modal === 'salary'}
+          onClose={() => setModal(undefined)}
+        />
+      )}
       {canWrite && (
         <>
           <EditEmployeeModal
