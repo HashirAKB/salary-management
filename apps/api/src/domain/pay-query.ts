@@ -84,7 +84,7 @@ function resultFor(
   };
 }
 
-const KEY_OF: Record<Dimension, (row: PayRow) => string> = {
+export const KEY_OF: Record<Dimension, (row: PayRow) => string> = {
   country: (r) => r.countryCode,
   department: (r) => String(r.departmentId),
   jobTitle: (r) => String(r.jobTitleId),
