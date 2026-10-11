@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import type { Money } from './employee.ts';
 
 // 04 section 7.2: the run_pay_query input, mirrored as a zod schema.
 export const ASK_METRICS = [
@@ -87,3 +88,57 @@ export function buildStructuredQuerySchema(reference: AskReference): z.ZodType<S
     }),
   });
 }
+
+// K1 request body (04 section 5.8).
+export const askBodySchema = z.strictObject({ question: z.string().trim().min(1).max(500) });
+export type AskBody = z.infer<typeof askBodySchema>;
+
+export type AskRowValue =
+  | { type: 'count'; count: number }
+  | { type: 'money'; usd: Money; local: Money | null }
+  | { type: 'outsideBand'; below: number; above: number; total: number }
+  | {
+      type: 'gap';
+      comparable: boolean;
+      gapPct: number | null;
+      women: number | null;
+      men: number | null;
+      likeForLike: boolean;
+    };
+
+export interface AskUsage {
+  usedToday: number;
+  dailyLimit: number;
+}
+
+export interface AskAnswerResponse {
+  kind: 'answer';
+  question: string;
+  answer: string;
+  interpretedQuery: StructuredQuery;
+  interpretation: { label: string; value: string }[];
+  result: {
+    groupBy: AskGroupBy;
+    rows: {
+      key: string;
+      label: string;
+      headcount: number | null;
+      suppressed: boolean;
+      value: AskRowValue | null;
+    }[];
+  };
+  fxAsOf: string;
+  usage: AskUsage;
+}
+
+export interface AskCannotAnswerResponse {
+  kind: 'cannot_answer';
+  question: string;
+  reason: CannotAnswerReason;
+  message: string;
+  suggestion: string;
+  examples: string[];
+  usage: AskUsage;
+}
+
+export type AskResponse = AskAnswerResponse | AskCannotAnswerResponse;

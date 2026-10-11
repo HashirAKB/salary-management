@@ -113,6 +113,17 @@ function gapText(group: GroupResult, likeForLike: boolean): string {
   return core + suffix;
 }
 
+// 04 section 7.6: exactly one country, one title and one level, ungrouped.
+export function isLikeForLike(query: StructuredQuery): boolean {
+  const { filters } = query;
+  return (
+    query.groupBy === 'none' &&
+    filters.countries.length === 1 &&
+    filters.jobTitles.length === 1 &&
+    filters.levels.length === 1
+  );
+}
+
 function valueText(query: StructuredQuery, group: GroupResult): string {
   const { metric } = query;
   if (metric === 'headcount') return String(group.headcount ?? 0);
@@ -121,12 +132,7 @@ function valueText(query: StructuredQuery, group: GroupResult): string {
     return `${band.total} (${band.below} below, ${band.above} above)`;
   }
   if (metric === 'genderGap') {
-    const { filters } = query;
-    const likeForLike =
-      filters.countries.length === 1 &&
-      filters.jobTitles.length === 1 &&
-      filters.levels.length === 1;
-    return gapText(group, likeForLike);
+    return gapText(group, isLikeForLike(query));
   }
   const key = metric as keyof PayStats;
   const usd = formatMoney(group.usd?.[key] ?? 0, 'USD');

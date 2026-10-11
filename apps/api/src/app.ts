@@ -8,6 +8,7 @@ import { loggerOptions } from './http/logger.ts';
 import { registerRouteCatalog } from './http/route-catalog.ts';
 import { registerStatic } from './http/static.ts';
 import { registerAuth } from './modules/auth/plugin.ts';
+import { askRoutes } from './modules/ask/routes.ts';
 import { authRoutes } from './modules/auth/routes.ts';
 import { employeeRoutes } from './modules/employees/routes.ts';
 import { insightsRoutes } from './modules/insights/routes.ts';
@@ -27,7 +28,7 @@ export type AppDeps = {
   logStream?: { write(line: string): void };
   /** Replaces the salary change writes; tests inject a failing one to prove the rollback. */
   salaryWrites?: SalaryWrites;
-  /** Replaces the Anthropic interpreter; tests inject the fake. Unused until the ask routes exist. */
+  /** Replaces the Anthropic interpreter; tests inject the fake. */
   interpreter?: QueryInterpreter;
 };
 
@@ -52,5 +53,11 @@ export function buildApp(deps: AppDeps): FastifyInstance {
   employeeRoutes(app, { db: deps.db, clock: deps.clock });
   insightsRoutes(app, { db: deps.db, clock: deps.clock });
   salaryRoutes(app, { db: deps.db, clock: deps.clock, writes: deps.salaryWrites });
+  askRoutes(app, {
+    db: deps.db,
+    clock: deps.clock,
+    config: deps.config,
+    interpreter: deps.interpreter,
+  });
   return app;
 }
