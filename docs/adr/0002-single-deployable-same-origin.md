@@ -1,8 +1,8 @@
 # ADR 0002: One deployable serving API and UI from the same origin
 
-- Status: Proposed (amends D-005; Chat 8 confirms hosting)
+- Status: Accepted (amends D-005; hosting confirmed in Chat 8 / `08-deploy-perf-demo.md`)
 - Date: 2026-10-09
-- Updated: 2026-10-09 in Chat 7, Consequences aligned with D-045 (as recorded in 04 section 2). No new decision.
+- Updated: 2026-10-11 in Chat 8. Status Accepted; cold-start policy recorded (accept free-tier spin-down; no keep-warm). Earlier: 2026-10-09 in Chat 7, Consequences aligned with D-045 (04 section 2).
 
 ## Context
 
@@ -27,5 +27,5 @@ Deploy one Render free web service. Fastify serves `/api/*` and the built React 
 
 - No CORS configuration and a first-party `HttpOnly` cookie (ADR 0006).
 - One build, one deploy, one URL in the README.
-- Lost: the UI loads instantly from a CDN while the API wakes. On a cold start, the whole page waits for Render's spin-up (about a minute), and Render shows its own loading page, so the "waking the server" UI state isn't needed for the first visit. It is still needed when a tab outlives the 15-minute idle window: the next API call hits a sleeping instance, so the web app shows a waking banner and retries GETs (D-045, 04 section 8.3). Chat 8 decides whether to keep the instance warm.
+- Lost: the UI loads instantly from a CDN while the API wakes. On a cold start, the whole page waits for Render's spin-up (about a minute), and Render shows its own loading page, so the "waking the server" UI state isn't needed for the first visit. It is still needed when a tab outlives the 15-minute idle window: the next API call hits a sleeping instance, so the web app shows a waking banner and retries GETs (D-045, 04 section 8.3). Cold starts are accepted; there is no keep-warm ping (`08-deploy-perf-demo.md`).
 - The API process serves static files, a trivial load at this scale.

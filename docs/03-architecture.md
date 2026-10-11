@@ -220,7 +220,7 @@ Why this shape: the model's only job is language to structure, which strict tool
 - One Render free web service. Build: `npm ci && npm run build` (Vite builds `apps/web/dist`; `tsc -b` builds `packages/shared` and `apps/api`). Start: `node apps/api/dist/main.js`.
 - On startup the API runs pending migrations (idempotent), then serves `/api/*` and the static web build, with an SPA fallback to `index.html` for client routes.
 - `GET /api/health` returns 200 when the database answers `SELECT 1`.
-- Turso free database for persistence (D-005). Render free instances spin down after 15 minutes without traffic and take about a minute to start, showing Render's own loading page meanwhile. That page covers the first visit, so the web app needs no waking state there. A tab left open past the 15-minute idle window does: its next API call hits a sleeping instance, and the web app shows `ServerStatusBanner` and retries GETs once the server answers (D-045, 04 section 8.3). The README warns about the first load and Chat 8 decides on keeping it warm. Render's 750 free instance hours a month cover one always-on service.
+- Turso free database for persistence (D-005). Render free instances spin down after 15 minutes without traffic and take about a minute to start, showing Render's own loading page meanwhile. That page covers the first visit, so the web app needs no waking state there. A tab left open past the 15-minute idle window does: its next API call hits a sleeping instance, and the web app shows `ServerStatusBanner` and retries GETs once the server answers (D-045, 04 section 8.3). Cold starts are accepted; the README warns about the first load; there is no keep-warm ping (`08-deploy-perf-demo.md`). Render's 750 free instance hours a month cover intermittent reviewer use without staying always-on.
 
 ## 11. Acceptance criteria for this file
 
@@ -246,11 +246,11 @@ Why this shape: the model's only job is language to structure, which strict tool
 
 | # | Question | Default | Owner |
 | --- | --- | --- | --- |
-| 1 | Keep the free instance warm (scheduled ping), or accept the cold start and warn in the README? | Decide with real cold-start numbers | Chat 8 |
-| 2 | Which Render and Turso regions, to keep database round trips short? | Render: `singapore` (D-063). Turso: the closest region, picked at S0 | S0, Chat 8 |
+| 1 | ~~Keep the free instance warm, or accept the cold start and warn in the README?~~ | Resolved: accept cold starts (`08` §3) | Chat 8 |
+| 2 | ~~Which Render and Turso regions, to keep database round trips short?~~ | Resolved: Render `singapore` (D-063); Turso as created in S0 (`08` §2) | S0, Chat 8 |
 | 3 | ~~Exact structured-query JSON schema within the strict-tool limits~~ | Resolved: D-042, 04 section 7.2 | Chat 4 |
 | 4 | ~~Component tests: mock the API with MSW, or test hooks against a fake client?~~ | Resolved: MSW (D-049) | Chat 5 |
-| 5 | Turso Cloud is moving to its rewritten engine. Does our SQL subset (D-025) run unchanged on the live database? | A smoke test against the deployed database in S9 | Chat 8 |
+| 5 | Turso Cloud is moving to its rewritten engine. Does our SQL subset (D-025) run unchanged on the live database? | Smoke on live DB in S9 per `08` §5 | Chat 8 / S9 |
 
 ## Sources
 

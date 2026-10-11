@@ -49,7 +49,7 @@ Goes into the repo as `docs/04-api-and-ui.md`. Where this file and an earlier do
 - Every endpoint is under `/api`. JSON in and out, `camelCase` keys, UTF-8.
 - Write endpoints (`POST`, `PATCH`) require `Content-Type: application/json`; anything else is 415.
 - No API versioning prefix (03 section 12).
-- Fastify trusts only the immediate peer, Render's proxy (`trustProxy: (_address, hop) => hop === 0`), so `request.ip` is the client address Render appends to `X-Forwarded-For` (used by the login rate limit). `trustProxy: true` would take the left-most entry, which the client controls, and let it get round the limit; Fastify 5 ignores a numeric hop count. Changed in S2 after review. Chat 8 confirms with a log line on the live service.
+- Fastify trusts only the immediate peer, Render's proxy (`trustProxy: (_address, hop) => hop === 0`), so `request.ip` is the client address Render appends to `X-Forwarded-For` (used by the login rate limit). `trustProxy: true` would take the left-most entry, which the client controls, and let it get round the limit; Fastify 5 ignores a numeric hop count. Changed in S2 after review. Confirm with a log line on the live service in S9 (`08` §5).
 - Responses to authenticated endpoints carry `Cache-Control: no-store` (salary data must not sit in shared or disk caches).
 
 ### 4.2 Value formats
@@ -1091,10 +1091,10 @@ Each screen lists its content and its loading, empty and error states. "HR roles
 
 | # | Question | Default until answered | Owner |
 | --- | --- | --- | --- |
-| 1 | What does a `fetch` to `/api` receive while Render spins the service up: a held request, an HTML page, or a 5xx? | The client handles all three (D-045). Chat 8 observes it once and notes the result | Chat 8 |
-| 2 | Does trusting only the proxy hop (4.1) give the real client IP on Render, so the login limit is per user rather than global? | Assumed yes; Chat 8 checks the logged `request.ip` | Chat 8 |
-| 3 | Do insights requests that load up to 10,000 rows from Turso stay fast enough (target under 500 ms)? | Measure. Fallback: an in-process cache of the active projection, cleared on every employee or salary write | Chat 8 |
-| 4 | How long does the first Ask call take while Anthropic compiles the tool grammar, and does it fit the 15-second timeout? | Measure on deploy; the grammar is then cached for 24 hours | Chat 8 |
+| 1 | What does a `fetch` to `/api` receive while Render spins the service up: a held request, an HTML page, or a 5xx? | Client handles all three (D-045). Observe once in S9 (`08` §5) | Chat 8 / S9 |
+| 2 | Does trusting only the proxy hop (4.1) give the real client IP on Render, so the login limit is per user rather than global? | Assumed yes; check logged `request.ip` in S9 (`08` §5) | Chat 8 / S9 |
+| 3 | Do insights requests that load up to 10,000 rows from Turso stay fast enough (target under 500 ms)? | Measure in S10 per `08` §6. Fallback: in-process active-projection cache, cleared on every employee or salary write | Chat 8 / S10 |
+| 4 | How long does the first Ask call take while the provider compiles or warms, and does it fit the 15-second timeout? | Measure on deploy in S10 per `08` §6 | Chat 8 / S10 |
 | 5 | Should Finance get a CSV of aggregate tables? | No in v1 (01 open question, carried) | After v1 |
 
 ## Sources
