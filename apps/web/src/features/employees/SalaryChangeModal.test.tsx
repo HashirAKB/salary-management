@@ -1,9 +1,11 @@
 import type { EmployeeDetail, Role } from '@acme/shared';
-import { screen, within } from '@testing-library/react';
+import { changePct } from '@acme/shared';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { describe, expect, it } from 'vitest';
 import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
+import { aSalaryChangeItem, aSalaryHistory } from '../../../test/fixtures/salary.ts';
 import { aMeResponse } from '../../../test/fixtures/me.ts';
 import { aProblem } from '../../../test/fixtures/problem.ts';
 import { render } from '../../../test/render.tsx';
@@ -136,5 +138,127 @@ describe('record salary change modal (04 section 8.5 S-6)', () => {
     expect(within(dialog).getByRole('combobox', { name: 'Level' })).toHaveAccessibleDescription(
       'Choose a higher level.',
     );
+  });
+});
+
+const servesBand = () =>
+  server.use(
+    http.get('/api/pay-bands/IN/1/L3', () =>
+      HttpResponse.json({
+        countryCode: 'IN',
+        jobTitleId: 1,
+        levelCode: 'L3',
+        min: { amountMinor: 160000000, currency: 'INR' },
+        mid: { amountMinor: 204000000, currency: 'INR' },
+        max: { amountMinor: 250000000, currency: 'INR' },
+      }),
+    ),
+  );
+
+/** A merit raise from INR 19,80,000 to INR 20,00,000; GETs then serve the recorded state. */
+function servesMeritRaise() {
+  const raised = anEmployeeDetail({ salary: { amountMinor: 200000000, currency: 'INR' } });
+  const change = aSalaryChangeItem({
+    id: 4,
+    effectiveDate: '2026-10-09',
+    reason: 'merit',
+    amount: { amountMinor: 200000000, currency: 'INR' },
+    previousAmount: { amountMinor: 198000000, currency: 'INR' },
+    changePct: changePct(198000000, 200000000),
+    level: { code: 'L3', name: 'Senior' },
+    previousJobTitle: { id: 1, name: 'Software Engineer' },
+    previousLevel: { code: 'L3', name: 'Senior' },
+    changedBy: { displayName: 'HR Admin (demo)' },
+  });
+  const state = { recorded: false };
+  server.use(
+    http.get('/api/employees/4217', () =>
+      HttpResponse.json(state.recorded ? raised : anEmployeeDetail()),
+    ),
+    http.get('/api/employees/4217/salary-changes', () =>
+      HttpResponse.json(aSalaryHistory(state.recorded ? [change] : [])),
+    ),
+    http.post('/api/employees/4217/salary-changes', () => {
+      state.recorded = true;
+      return HttpResponse.json(
+        { employee: raised, change },
+        { status: 201, headers: { Location: '/api/employees/4217' } },
+      );
+    }),
+  );
+}
+
+async function fillMerit(user: User, dialog: HTMLElement) {
+  await choose(user, 'Reason', 'Merit increase');
+  await user.type(within(dialog).getByLabelText('New annual salary'), '2000000');
+}
+
+describe('record salary change outcomes and preview (04 sections 8.5 S-6, 8.6)', () => {
+  it('closes the modal, refreshes the history and toasts after a success', async () => {
+    servesEmployee();
+    servesMeritRaise();
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openModal(user);
+    await fillMerit(user, dialog);
+    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
+
+    expect(await screen.findByText('Salary change recorded.')).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    const history = await screen.findByRole('region', { name: 'Salary history' });
+    expect(await within(history).findByText('Merit increase')).toBeVisible();
+    const salary = screen.getByRole('region', { name: 'Salary' });
+    expect(within(salary).getByText('INR 20,00,000')).toBeVisible();
+  });
+
+  it('closes, refreshes and toasts the detail on EMPLOYEE_TERMINATED', async () => {
+    const state = { current: anEmployeeDetail() };
+    server.use(
+      http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))),
+      http.get('/api/employees/4217', () => HttpResponse.json(state.current)),
+      http.post('/api/employees/4217/salary-changes', () => {
+        state.current = anEmployeeDetail({ status: 'terminated', terminationDate: '2026-10-08' });
+        return problem(422, {
+          status: 422,
+          code: 'EMPLOYEE_TERMINATED',
+          detail: "A terminated employee's salary can't be changed.",
+        });
+      }),
+    );
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openModal(user);
+    await fillMerit(user, dialog);
+    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
+
+    expect(
+      await screen.findByText("A terminated employee's salary can't be changed."),
+    ).toBeVisible();
+    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+    expect(await screen.findByText(/^Terminated on 8 Oct 2026/)).toBeVisible();
+  });
+
+  it('previews the same change % that the history row shows for the same amounts', async () => {
+    servesEmployee();
+    servesMeritRaise();
+    servesBand();
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openModal(user);
+    await fillMerit(user, dialog);
+
+    const preview = await within(dialog).findByRole('group', { name: 'Preview' });
+    expect(within(preview).getByText('INR 19,80,000 to INR 20,00,000')).toBeVisible();
+    expect(within(preview).getByText('+1.0%')).toBeVisible();
+    expect(await within(preview).findByText('New compa-ratio 0.98')).toBeVisible();
+    expect(within(preview).getByText('Inside band')).toBeVisible();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
+    const history = await screen.findByRole('region', { name: 'Salary history' });
+    const row = (await within(history).findByText('Merit increase')).closest('tr')!;
+    expect(within(row).getByText('+1.0%')).toBeVisible();
   });
 });
