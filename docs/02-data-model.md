@@ -1,7 +1,7 @@
 # 02 Data model and seed
 
 Chat 2 output. Schema, money handling, salary history, users and roles, indexes, and the seed spec for 10,000 employees plus three demo users.
-Inputs: `decisions.md` (D-002, D-006, D-012 to D-019), `01-requirements.md` (F1 to F8), `00-brief-analysis.md` (H2, H3, H6, H10).
+Inputs: `decisions.md` (D-002, D-006, D-012 to D-019), `01-requirements.md` (F1 to F8).
 A coding agent should be able to write the migration, the repositories and the seed script from this file alone.
 
 ## 1. Decisions this file settles
