@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { isoDateSchema } from './common.ts';
-import { moneySchema } from './employee.ts';
+import { commaList, moneySchema } from './employee.ts';
 
 const countrySchema = z.object({ code: z.string(), name: z.string() });
 
@@ -29,3 +29,58 @@ export const insightsSummaryResponseSchema = z.object({
 });
 
 export type InsightsSummaryResponse = z.infer<typeof insightsSummaryResponseSchema>;
+
+// I2 (04 section 5.6). Lists are comma-separated as in E1.
+export const PAY_DISTRIBUTION_GROUPS = [
+  'none',
+  'country',
+  'department',
+  'jobTitle',
+  'level',
+  'gender',
+] as const;
+
+export const payDistributionQuerySchema = z.strictObject({
+  groupBy: z.enum(PAY_DISTRIBUTION_GROUPS).default('country'),
+  country: commaList.optional(),
+  department: commaList.optional(),
+  jobTitle: commaList.optional(),
+  level: commaList.optional(),
+  gender: commaList.optional(),
+});
+
+export type PayDistributionQuery = z.infer<typeof payDistributionQuerySchema>;
+
+const payStatsSchema = z.object({
+  min: moneySchema,
+  p25: moneySchema,
+  median: moneySchema,
+  p75: moneySchema,
+  max: moneySchema,
+  average: moneySchema,
+  total: moneySchema,
+});
+
+export const payDistributionResponseSchema = z.object({
+  fxAsOf: isoDateSchema,
+  groupBy: z.enum(PAY_DISTRIBUTION_GROUPS),
+  filters: z.object({
+    countries: z.array(z.string()),
+    departmentIds: z.array(z.number().int()),
+    jobTitleIds: z.array(z.number().int()),
+    levelCodes: z.array(z.string()),
+    genders: z.array(z.string()),
+  }),
+  groups: z.array(
+    z.object({
+      key: z.string(),
+      label: z.string(),
+      headcount: z.number().int().nullable(),
+      suppressed: z.boolean(),
+      usd: payStatsSchema.nullable(),
+      local: payStatsSchema.nullable(),
+    }),
+  ),
+});
+
+export type PayDistributionResponse = z.infer<typeof payDistributionResponseSchema>;
