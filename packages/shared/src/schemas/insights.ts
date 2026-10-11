@@ -84,3 +84,47 @@ export const payDistributionResponseSchema = z.object({
 });
 
 export type PayDistributionResponse = z.infer<typeof payDistributionResponseSchema>;
+
+// I3 (04 section 5.6). Booleans arrive as "true" or "false" in the query string.
+export const payEquityQuerySchema = z.strictObject({
+  country: commaList.optional(),
+  department: commaList.optional(),
+  flaggedOnly: z.stringbool().default(false),
+  includeNotComparable: z.stringbool().default(false),
+});
+
+export type PayEquityQuery = z.infer<typeof payEquityQuerySchema>;
+
+export const payEquityResponseSchema = z.object({
+  fxAsOf: isoDateSchema,
+  thresholdPct: z.number(),
+  minPerGender: z.number().int(),
+  org: z.object({
+    meanGapPct: z.number().nullable(),
+    medianGapPct: z.number().nullable(),
+    women: z.number().int(),
+    men: z.number().int(),
+    basis: z.literal('usd'),
+  }),
+  cohortCounts: z.object({
+    withEmployees: z.number().int(),
+    comparable: z.number().int(),
+    flagged: z.number().int(),
+  }),
+  cohorts: z.array(
+    z.object({
+      country: countrySchema,
+      jobTitle: z.object({ id: z.number().int(), name: z.string() }),
+      level: countrySchema,
+      comparable: z.boolean(),
+      women: z.number().int().nullable(),
+      men: z.number().int().nullable(),
+      meanWomen: moneySchema.nullable(),
+      meanMen: moneySchema.nullable(),
+      gapPct: z.number().nullable(),
+      flagged: z.boolean(),
+    }),
+  ),
+});
+
+export type PayEquityResponse = z.infer<typeof payEquityResponseSchema>;
