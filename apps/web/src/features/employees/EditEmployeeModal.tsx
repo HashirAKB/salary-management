@@ -110,6 +110,14 @@ function EditForm({ employee, onClose }: Omit<Props, 'opened'>): ReactElement {
           error={errors.gender}
           allowDeselect={false}
         />
+        <TextInput label="Job title" value={employee.jobTitle.name} disabled readOnly />
+        <TextInput
+          label="Level"
+          value={`${employee.level.code} ${employee.level.name}`}
+          disabled
+          readOnly
+        />
+        <TextInput label="Country" value={employee.country.name} disabled readOnly />
         <Text size="sm" c="dimmed">
           Change title or level by recording a salary change.
         </Text>

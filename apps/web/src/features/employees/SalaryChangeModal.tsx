@@ -158,6 +158,8 @@ function SalaryChangeForm({ employee, onClose }: Omit<Props, 'opened'>): ReactEl
       setLevelCode(employee.level.code);
     } else if (next === 'promotion') {
       setLevelCode('');
+    } else if (levelCode === '') {
+      setLevelCode(employee.level.code);
     }
   };
 
@@ -171,6 +173,7 @@ function SalaryChangeForm({ employee, onClose }: Omit<Props, 'opened'>): ReactEl
     const amountMinor = parseMajorToMinor(amount);
     const found: Errors = {};
     if (amountMinor === null) found.amount = 'Enter the new annual salary.';
+    else if (amountMinor <= 0) found.amount = 'Enter an amount greater than zero.';
     if (!shownLevel) found.levelCode = 'Choose a level.';
     if (Object.keys(found).length > 0) return setErrors(found);
     const parsed = salaryChangeBodySchema.safeParse({

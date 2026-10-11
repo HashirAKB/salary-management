@@ -263,6 +263,20 @@ describe('employee list page (04 section 8.5)', () => {
     expect(screen.queryByText('This page is past the end of the results.')).not.toBeInTheDocument();
   });
 
+  it('keeps "Add employee" and drops the "Showing" line when filters match nobody', async () => {
+    loggedInAs('hr_admin');
+    server.use(
+      http.get('/api/employees', () =>
+        HttpResponse.json(anEmployeeListResponse({ items: [], total: 0, totalPages: 0 })),
+      ),
+    );
+    render(<AppRoutes />, { route: '/employees?q=zzzz' });
+
+    expect(await screen.findByText('No employees match these filters.')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'Add employee' })).toHaveLength(1);
+    expect(screen.queryByText(/^Showing/)).not.toBeInTheDocument();
+  });
+
   it.each<[Role, boolean]>([
     ['hr_admin', true],
     ['hr_viewer', false],

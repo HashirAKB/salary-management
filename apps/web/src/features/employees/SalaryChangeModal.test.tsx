@@ -87,6 +87,31 @@ describe('record salary change modal (04 section 8.5 S-6)', () => {
     expect(screen.queryByRole('option', { name: 'L3 Senior' })).toBeNull();
   });
 
+  it('keeps the current level selected for a correction', async () => {
+    servesEmployee();
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openModal(user);
+    await choose(user, 'Reason', 'Correction');
+
+    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toHaveValue('L3 Senior');
+    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toBeEnabled();
+  });
+
+  it('rejects a salary of 0 with a plain message', async () => {
+    servesEmployee();
+    const user = userEvent.setup();
+    renderDetail();
+
+    const dialog = await openModal(user);
+    await choose(user, 'Reason', 'Merit increase');
+    await user.type(within(dialog).getByLabelText('New annual salary'), '0');
+    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
+
+    expect(await within(dialog).findByText('Enter an amount greater than zero.')).toBeVisible();
+  });
+
   it('defaults the date to today, and bounds it by today and the current salary date', async () => {
     servesEmployee();
     const user = userEvent.setup();

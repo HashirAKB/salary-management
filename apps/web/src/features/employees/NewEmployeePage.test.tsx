@@ -149,6 +149,26 @@ describe('add employee page (04 section 8.5 S-4)', () => {
     expect(posted).toBe(false);
   });
 
+  it('rejects a salary of 0 with a plain message and sends nothing', async () => {
+    asAdmin();
+    servesBand();
+    let posted = false;
+    server.use(
+      http.post('/api/employees', () => {
+        posted = true;
+        return HttpResponse.json(created(), { status: 201 });
+      }),
+    );
+    const user = userEvent.setup();
+    renderPage();
+    await fillForm(user, '0');
+
+    await submit(user);
+
+    expect(await screen.findByText('Enter an amount greater than zero.')).toBeVisible();
+    expect(posted).toBe(false);
+  });
+
   it('maps errors[] from a 400 onto the matching fields', async () => {
     asAdmin();
     servesBand();

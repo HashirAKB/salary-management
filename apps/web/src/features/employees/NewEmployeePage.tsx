@@ -128,6 +128,8 @@ export function NewEmployeePage(): ReactElement {
     if (Object.keys(missing).length > 0) return setErrors(missing);
     if (amountMinor === null || !currency)
       return setErrors({ startingSalary: 'Enter an amount like 20480.50.' });
+    if (amountMinor <= 0)
+      return setErrors({ startingSalary: 'Enter an amount greater than zero.' });
 
     const parsed = createEmployeeBodySchema.safeParse({
       firstName: values.firstName,
