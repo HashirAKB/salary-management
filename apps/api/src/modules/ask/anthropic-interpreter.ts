@@ -36,10 +36,12 @@ export class AnthropicInterpreter implements QueryInterpreter {
     suggestion: z.string(),
   });
 
-  constructor(
-    private readonly client: MessagesClient,
-    private readonly options: { model: string; reference: AskReference },
-  ) {
+  private readonly client: MessagesClient;
+  private readonly options: { model: string; reference: AskReference };
+
+  constructor(client: MessagesClient, options: { model: string; reference: AskReference }) {
+    this.client = client;
+    this.options = options;
     this.tools = buildToolSchemas(options.reference);
     this.querySchema = buildStructuredQuerySchema(options.reference);
   }
