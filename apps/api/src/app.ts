@@ -14,6 +14,7 @@ import { insightsRoutes } from './modules/insights/routes.ts';
 import { healthRoutes } from './modules/health/routes.ts';
 import { referenceRoutes } from './modules/reference/routes.ts';
 import { salaryRoutes } from './modules/salary/routes.ts';
+import type { QueryInterpreter } from './modules/ask/interpreter.ts';
 import type { SalaryWrites } from './modules/salary/service.ts';
 
 export type AppDeps = {
@@ -26,6 +27,8 @@ export type AppDeps = {
   logStream?: { write(line: string): void };
   /** Replaces the salary change writes; tests inject a failing one to prove the rollback. */
   salaryWrites?: SalaryWrites;
+  /** Replaces the Anthropic interpreter; tests inject the fake. Unused until the ask routes exist. */
+  interpreter?: QueryInterpreter;
 };
 
 // The composition root used by main.ts and every test (03 section 6, rule 1).
