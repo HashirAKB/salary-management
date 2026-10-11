@@ -76,8 +76,14 @@ export class GeminiInterpreter implements QueryInterpreter {
         }),
         signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      reply = (await response.json()) as GeminiReply;
+      const payload = (await response.json().catch(() => ({}))) as GeminiReply & {
+        error?: { message?: string };
+      };
+      if (!response.ok) {
+        const detail = payload.error?.message;
+        throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
+      }
+      reply = payload;
     } catch (error) {
       throw new InterpreterError(error instanceof Error ? error.message : 'request failed');
     }

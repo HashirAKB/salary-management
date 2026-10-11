@@ -32,7 +32,7 @@ export class ConfigError extends Error {
 }
 
 // ADR 0009: the model each provider uses unless ASK_MODEL says otherwise.
-const DEFAULT_MODELS = { gemini: 'gemini-2.5-flash', anthropic: 'claude-haiku-5-5' } as const;
+const DEFAULT_MODELS = { gemini: 'gemini-flash-latest', anthropic: 'claude-haiku-5-5' } as const;
 
 // An empty value (as copied from .env.example) counts as not set.
 const optional = <T extends z.ZodType>(schema: T) =>
