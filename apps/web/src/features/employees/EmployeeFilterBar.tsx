@@ -19,6 +19,8 @@ const BAND_OPTIONS = [
   { value: 'inside', label: 'Inside band' },
 ];
 
+const FIELD = { flex: '1 1 10rem', minWidth: 0 } as const;
+
 type ListKey = 'country' | 'department' | 'jobTitle' | 'level' | 'gender';
 
 /** Filter bar of S-2 (04 section 8.5); every change goes through `setFilters`. */
@@ -68,12 +70,14 @@ export function EmployeeFilterBar({
       value={query[key] ?? []}
       onChange={(values) => setFilters({ [key]: values.length > 0 ? values : undefined })}
       clearable
+      style={FIELD}
     />
   );
 
   return (
     <Group align="flex-end" gap="sm">
       <TextInput
+        style={{ flex: '1 1 16rem', minWidth: 0 }}
         label="Search"
         placeholder="Search name or employee ID"
         value={search}
@@ -90,6 +94,7 @@ export function EmployeeFilterBar({
       <Select
         label="Status"
         allowDeselect={false}
+        style={FIELD}
         data={STATUS_OPTIONS}
         value={query.status}
         onChange={(value) => value && setFilters({ status: value as EmployeeListQuery['status'] })}
@@ -97,6 +102,7 @@ export function EmployeeFilterBar({
       <Select
         label="Pay band"
         allowDeselect={false}
+        style={FIELD}
         data={BAND_OPTIONS}
         value={query.band ?? 'any'}
         onChange={(value) =>
@@ -105,6 +111,7 @@ export function EmployeeFilterBar({
       />
       <TextInput
         type="date"
+        style={FIELD}
         label="No salary change since"
         value={query.salaryUnchangedSince ?? ''}
         onChange={(event) =>

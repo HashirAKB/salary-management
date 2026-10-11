@@ -31,31 +31,33 @@ function position(item: SalaryChangeItem): string {
 /** The history rows of S-3 (04 section 8.5), newest first as served. */
 export function SalaryHistoryTable({ items }: { items: SalaryChangeItem[] }): ReactElement {
   return (
-    <Table>
-      <Table.Thead>
-        <Table.Tr>
-          <Table.Th>Effective date</Table.Th>
-          <Table.Th>Reason</Table.Th>
-          <Table.Th>Amount</Table.Th>
-          <Table.Th>Change</Table.Th>
-          <Table.Th>Position</Table.Th>
-          <Table.Th>Recorded by</Table.Th>
-        </Table.Tr>
-      </Table.Thead>
-      <Table.Tbody>
-        {items.map((item) => (
-          <Table.Tr key={item.id}>
-            <Table.Td>{formatDate(item.effectiveDate)}</Table.Td>
-            <Table.Td>{REASONS[item.reason]}</Table.Td>
-            <Table.Td>
-              <Money value={item.amount} />
-            </Table.Td>
-            <Table.Td>{formatChangePct(item.changePct)}</Table.Td>
-            <Table.Td>{position(item)}</Table.Td>
-            <Table.Td>{item.changedBy?.displayName ?? 'Imported'}</Table.Td>
+    <Table.ScrollContainer minWidth={600}>
+      <Table>
+        <Table.Thead>
+          <Table.Tr>
+            <Table.Th>Effective date</Table.Th>
+            <Table.Th>Reason</Table.Th>
+            <Table.Th>Amount</Table.Th>
+            <Table.Th>Change</Table.Th>
+            <Table.Th>Position</Table.Th>
+            <Table.Th>Recorded by</Table.Th>
           </Table.Tr>
-        ))}
-      </Table.Tbody>
-    </Table>
+        </Table.Thead>
+        <Table.Tbody>
+          {items.map((item) => (
+            <Table.Tr key={item.id}>
+              <Table.Td>{formatDate(item.effectiveDate)}</Table.Td>
+              <Table.Td>{REASONS[item.reason]}</Table.Td>
+              <Table.Td>
+                <Money value={item.amount} />
+              </Table.Td>
+              <Table.Td>{formatChangePct(item.changePct)}</Table.Td>
+              <Table.Td>{position(item)}</Table.Td>
+              <Table.Td>{item.changedBy?.displayName ?? 'Imported'}</Table.Td>
+            </Table.Tr>
+          ))}
+        </Table.Tbody>
+      </Table>
+    </Table.ScrollContainer>
   );
 }
