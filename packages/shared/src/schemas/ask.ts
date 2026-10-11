@@ -58,6 +58,32 @@ export interface StructuredQuery {
   };
 }
 
-export function buildStructuredQuerySchema(_reference: AskReference): z.ZodType<StructuredQuery> {
-  throw new Error('not implemented');
+// The API doesn't guarantee the capitalisation of enum values, so match case-insensitively
+// and hand back the canonical spelling.
+function caseInsensitiveEnum<T extends string>(values: readonly T[]) {
+  return z.preprocess(
+    (input) =>
+      typeof input === 'string'
+        ? (values.find((v) => v.toLowerCase() === input.toLowerCase()) ?? input)
+        : input,
+    z.enum(values as [T, ...T[]]),
+  );
+}
+
+function filterList(values: readonly string[]) {
+  return z.array(caseInsensitiveEnum(values)).max(values.length);
+}
+
+export function buildStructuredQuerySchema(reference: AskReference): z.ZodType<StructuredQuery> {
+  return z.strictObject({
+    metric: caseInsensitiveEnum(ASK_METRICS),
+    groupBy: caseInsensitiveEnum(ASK_GROUP_BY),
+    filters: z.strictObject({
+      countries: filterList(reference.countries.map((c) => c.code)),
+      departments: filterList(reference.departments.map((d) => d.name)),
+      jobTitles: filterList(reference.jobTitles.map((j) => j.name)),
+      levels: filterList(reference.levels.map((l) => l.code)),
+      genders: filterList(reference.genders.map((g) => g.code)),
+    }),
+  });
 }
