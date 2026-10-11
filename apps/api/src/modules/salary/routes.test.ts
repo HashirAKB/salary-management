@@ -6,6 +6,7 @@ import { currentSalaryMismatches } from '../../../test/invariants.ts';
 import { testApp, testDb } from '../../../test/helpers.ts';
 import type { Db } from '../../db/client.ts';
 import { SOFTWARE_ENGINEER } from '../../seed/reference.ts';
+import { drizzleSalaryWrites, type SalaryWrites } from './service.ts';
 
 const NOW = '2026-10-09T09:00:00.000Z';
 
@@ -213,6 +214,46 @@ describe('POST /api/employees/:id/salary-changes (S2)', () => {
 
       expect(response.statusCode).toBe(404);
       expect(response.json()).toMatchObject({ code: 'EMPLOYEE_NOT_FOUND', status: 404 });
+    });
+  });
+
+  describe('atomicity', () => {
+    // Injected failing repository: the history insert is real, the employee update throws.
+    const failingSecondWrite: SalaryWrites = {
+      insertChange: drizzleSalaryWrites.insertChange,
+      updateEmployee: async () => {
+        throw new Error('injected failure on the second write');
+      },
+    };
+
+    it('keeps neither the history row nor the employee update when the second write fails', async () => {
+      const db = await testDb();
+      const { id } = await anEmployee().insert(db);
+      const { cookie } = await loggedInAs(db, 'hr_admin');
+      app = testApp({ db, salaryWrites: failingSecondWrite });
+      const get = async () =>
+        (
+          await app!.inject({ method: 'GET', url: `/api/employees/${id}`, headers: { cookie } })
+        ).json();
+      const before = await get();
+
+      const response = await app.inject({
+        method: 'POST',
+        url: `/api/employees/${id}/salary-changes`,
+        headers: { cookie },
+        payload: {
+          effectiveDate: '2026-10-09',
+          reason: 'merit',
+          amount: { amountMinor: Math.round(before.salary.amountMinor * 1.03), currency: 'INR' },
+          jobTitleId: SOFTWARE_ENGINEER,
+          levelCode: 'L3',
+        },
+      });
+
+      expect(response.statusCode).toBe(500);
+      expect(await rows(db, id)).toHaveLength(1);
+      expect(await get()).toEqual(before);
+      expect(await currentSalaryMismatches(db)).toEqual([]);
     });
   });
 });
