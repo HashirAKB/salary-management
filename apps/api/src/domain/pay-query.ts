@@ -127,7 +127,12 @@ export function aggregatePay(
 ): GroupResult[] {
   if (rows.length === 0) return [];
   if (groupBy === 'none') {
-    return [resultFor('all', 'All active employees', rows, metrics)];
+    const label = 'All active employees';
+    return [
+      rows.length < minGroupSize
+        ? suppressedResult('all', label)
+        : resultFor('all', label, rows, metrics),
+    ];
   }
 
   const byKey = new Map<string, PayRow[]>();
