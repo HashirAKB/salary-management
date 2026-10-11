@@ -1,4 +1,8 @@
-import { employeeDetailSchema, type EmployeeDetail } from '@acme/shared';
+import {
+  employeeDetailSchema,
+  salaryHistoryResponseSchema,
+  type EmployeeDetail,
+} from '@acme/shared';
 import { Alert, Badge, Button, Group, Paper, Skeleton, Stack, Text, Title } from '@mantine/core';
 import { useQuery } from '@tanstack/react-query';
 import { useState, type ReactElement } from 'react';
@@ -8,6 +12,7 @@ import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
 import { EditEmployeeModal } from './EditEmployeeModal.tsx';
+import { SalaryHistoryTable } from './SalaryHistoryTable.tsx';
 import { TerminateModal } from './TerminateModal.tsx';
 
 const BAND_TEXT = { below: 'Below band', above: 'Above band' } as const;
@@ -19,7 +24,7 @@ const GENDERS = {
 } as const;
 
 function Card({ title, children }: { title: string; children: ReactElement | ReactElement[] }) {
-  const id = `card-${title.toLowerCase()}`;
+  const id = `card-${title.toLowerCase().replace(/\s+/g, '-')}`;
   return (
     <Paper component="section" aria-labelledby={id} withBorder p="md">
       <Stack>
@@ -96,6 +101,14 @@ export function EmployeeDetailPage(): ReactElement {
     queryFn: () => apiFetch(`/api/employees/${id}`, { schema: employeeDetailSchema }),
   });
 
+  const canReadSalary = me.permissions.includes('salary.read');
+  const history = useQuery({
+    queryKey: ['employee', id, 'salary-changes'],
+    queryFn: () =>
+      apiFetch(`/api/employees/${id}/salary-changes`, { schema: salaryHistoryResponseSchema }),
+    enabled: canReadSalary,
+  });
+
   if (employee.isError) {
     const notFound =
       employee.error instanceof ApiError && employee.error.code === 'EMPLOYEE_NOT_FOUND';
@@ -164,6 +177,11 @@ export function EmployeeDetailPage(): ReactElement {
         </Alert>
       )}
       <SalaryCard employee={data} />
+      {canReadSalary && history.data && (
+        <Card title="Salary history">
+          <SalaryHistoryTable items={history.data.items} />
+        </Card>
+      )}
       <DetailsCard employee={data} />
       {canWrite && (
         <>
