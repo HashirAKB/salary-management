@@ -8,3 +8,4 @@ export * from './percent.ts';
 export * from './schemas/reference.ts';
 export * from './schemas/salary.ts';
 export * from './schemas/insights.ts';
+export * from './schemas/ask.ts';
