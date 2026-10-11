@@ -5,7 +5,7 @@ import {
   type SalaryChangeItem,
   type SalaryHistoryResponse,
 } from '@acme/shared';
-import { and, eq, inArray } from 'drizzle-orm';
+import { and, asc, eq, inArray } from 'drizzle-orm';
 import type { Db } from '../../db/client.ts';
 import { employees, jobTitles, levels, payBands, salaryChanges, users } from '../../db/schema.ts';
 import { checkSalaryChange, type SalaryRuleCode } from '../../domain/salary-rules.ts';
@@ -144,10 +144,57 @@ export async function recordSalaryChange(
   return { employee: await getEmployee(db, employeeId), change };
 }
 
-// S1 (04 section 5.5): the employee's history, newest first.
+// S1 (04 section 5.5): the employee's history, newest first. Previous values come from the
+// next-older row, computed here (D-025); rows of one date follow `id`.
 export async function listSalaryHistory(
-  _db: Db,
-  _employeeId: number,
+  db: Db,
+  employeeId: number,
 ): Promise<SalaryHistoryResponse> {
-  throw new Error('not implemented');
+  const [employee] = await db
+    .select({ id: employees.id })
+    .from(employees)
+    .where(eq(employees.id, employeeId));
+  if (!employee) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
+
+  const [rows, titleRows, levelRows, userRows] = await Promise.all([
+    db
+      .select()
+      .from(salaryChanges)
+      .where(eq(salaryChanges.employeeId, employeeId))
+      .orderBy(asc(salaryChanges.effectiveDate), asc(salaryChanges.id)),
+    db.select().from(jobTitles),
+    db.select().from(levels),
+    db.select({ id: users.id, displayName: users.displayName }).from(users),
+  ]);
+  const title = (id: number) => {
+    const row = titleRows.find((t) => t.id === id)!;
+    return { id: row.id, name: row.name };
+  };
+  const level = (code: string) => {
+    const row = levelRows.find((l) => l.code === code)!;
+    return { code: row.code, name: row.name };
+  };
+
+  const items = rows.map((row, index): SalaryChangeItem => {
+    const older = rows[index - 1];
+    const amount = { amountMinor: row.amountMinor, currency: row.currencyCode };
+    const recorder = userRows.find((u) => u.id === row.changedByUserId);
+    return {
+      id: row.id,
+      effectiveDate: row.effectiveDate,
+      reason: row.reason,
+      amount,
+      previousAmount: older
+        ? { amountMinor: older.amountMinor, currency: older.currencyCode }
+        : null,
+      changePct: older ? changePct(older.amountMinor, row.amountMinor) : null,
+      jobTitle: title(row.jobTitleId),
+      level: level(row.levelCode),
+      previousJobTitle: older ? title(older.jobTitleId) : null,
+      previousLevel: older ? level(older.levelCode) : null,
+      changedBy: recorder ? { displayName: recorder.displayName } : null,
+      createdAt: row.createdAt,
+    };
+  });
+  return { items: items.reverse() };
 }
