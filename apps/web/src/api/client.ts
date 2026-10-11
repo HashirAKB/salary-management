@@ -71,7 +71,12 @@ export function onUnauthenticated(listener: () => void): () => void {
   return () => unauthenticatedListeners.delete(listener);
 }
 
-async function sendOnce(path: string, method: string, body?: unknown): Promise<Response> {
+async function sendOnce(
+  path: string,
+  method: string,
+  body?: unknown,
+  expectJson = false,
+): Promise<Response> {
   const finish = connection.requestStarted();
   try {
     const response = await fetch(path, {
@@ -90,6 +95,7 @@ async function sendOnce(path: string, method: string, body?: unknown): Promise<R
         unauthenticatedListeners.forEach((listener) => listener());
       throw error;
     }
+    if (expectJson && !isJson(response)) throw new ServerWakingError(method !== 'GET');
     return response;
   } catch (error) {
     if (error instanceof TypeError) {
@@ -104,13 +110,18 @@ async function sendOnce(path: string, method: string, body?: unknown): Promise<R
 }
 
 /** Retries a GET once after the server wakes; a write is never retried (D-045). */
-async function send(path: string, method: string, body?: unknown): Promise<Response> {
+async function send(
+  path: string,
+  method: string,
+  body?: unknown,
+  expectJson = false,
+): Promise<Response> {
   try {
-    return await sendOnce(path, method, body);
+    return await sendOnce(path, method, body, expectJson);
   } catch (error) {
     if (method !== 'GET' || !(error instanceof ServerWakingError)) throw error;
     if (!(await connection.recovered())) throw error;
-    return sendOnce(path, method, body);
+    return sendOnce(path, method, body, expectJson);
   }
 }
 
@@ -119,11 +130,7 @@ export async function apiFetch<T = void>(
   path: string,
   { method = 'GET', body, schema }: ApiRequest<T> = {},
 ): Promise<T> {
-  const response = await send(path, method, body);
-  if (schema && !isJson(response)) {
-    connection.serverWaking();
-    throw new ServerWakingError();
-  }
+  const response = await send(path, method, body, schema !== undefined);
   return (schema ? schema.parse(await response.json()) : undefined) as T;
 }
 
