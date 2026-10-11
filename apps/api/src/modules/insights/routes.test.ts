@@ -21,7 +21,9 @@ describe('GET /api/insights/summary (I1)', () => {
   ) {
     const db = await testDb();
     await seed(db);
-    const { cookie } = await loggedInAs(db, options.role ?? 'hr_admin');
+    const { cookie } = await loggedInAs(db, options.role ?? 'hr_admin', {
+      ...(options.today ? { createdAt: `${options.today}T08:00:00.000Z` } : {}),
+    });
     app = testApp({
       db,
       ...(options.today ? { clock: fixedClock(`${options.today}T09:00:00.000Z`) } : {}),
