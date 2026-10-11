@@ -8,6 +8,9 @@ export default defineConfig({
     },
   },
   test: {
+    // Eleven jsdom workers on 12 cores starve each other; the first test of a web file then runs
+    // past its timeout. Fewer workers finish sooner than a run that retries.
+    maxWorkers: 6,
     projects: [
       { test: { name: 'shared', root: 'packages/shared', environment: 'node' } },
       {

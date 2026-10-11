@@ -1,4 +1,8 @@
-import { employeeDetailSchema, type EmployeeDetail } from '@acme/shared';
+import {
+  employeeDetailSchema,
+  salaryHistoryResponseSchema,
+  type EmployeeDetail,
+} from '@acme/shared';
 import { Alert, Badge, Button, Group, Paper, Skeleton, Stack, Text, Title } from '@mantine/core';
 import { useQuery } from '@tanstack/react-query';
 import { useState, type ReactElement } from 'react';
@@ -8,6 +12,8 @@ import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
 import { formatCompaRatio, formatDate } from '../../format.ts';
 import { EditEmployeeModal } from './EditEmployeeModal.tsx';
+import { SalaryChangeModal } from './SalaryChangeModal.tsx';
+import { SalaryHistoryTable } from './SalaryHistoryTable.tsx';
 import { TerminateModal } from './TerminateModal.tsx';
 
 const BAND_TEXT = { below: 'Below band', above: 'Above band' } as const;
@@ -19,7 +25,7 @@ const GENDERS = {
 } as const;
 
 function Card({ title, children }: { title: string; children: ReactElement | ReactElement[] }) {
-  const id = `card-${title.toLowerCase()}`;
+  const id = `card-${title.toLowerCase().replace(/\s+/g, '-')}`;
   return (
     <Paper component="section" aria-labelledby={id} withBorder p="md">
       <Stack>
@@ -90,10 +96,18 @@ function DetailsCard({ employee }: { employee: EmployeeDetail }): ReactElement {
 export function EmployeeDetailPage(): ReactElement {
   const me = useViewer();
   const { id } = useParams();
-  const [modal, setModal] = useState<'edit' | 'terminate'>();
+  const [modal, setModal] = useState<'edit' | 'terminate' | 'salary'>();
   const employee = useQuery({
     queryKey: ['employee', id],
     queryFn: () => apiFetch(`/api/employees/${id}`, { schema: employeeDetailSchema }),
+  });
+
+  const canReadSalary = me.permissions.includes('salary.read');
+  const history = useQuery({
+    queryKey: ['employee', id, 'salary-changes'],
+    queryFn: () =>
+      apiFetch(`/api/employees/${id}/salary-changes`, { schema: salaryHistoryResponseSchema }),
+    enabled: canReadSalary,
   });
 
   if (employee.isError) {
@@ -131,6 +145,7 @@ export function EmployeeDetailPage(): ReactElement {
   const data = employee.data;
   const terminated = data.status === 'terminated';
   const canWrite = me.permissions.includes('employee.write');
+  const canWriteSalary = me.permissions.includes('salary.write') && !terminated;
   return (
     <Stack>
       <Group justify="space-between" align="flex-start">
@@ -145,8 +160,11 @@ export function EmployeeDetailPage(): ReactElement {
           <Text>{`${data.jobTitle.name}, ${data.level.code} ${data.level.name}, ${data.country.name}`}</Text>
           <Text>{`Hired ${formatDate(data.hireDate)}`}</Text>
         </Stack>
-        {canWrite && (
+        {(canWrite || canWriteSalary) && (
           <Group>
+            {canWriteSalary && (
+              <Button onClick={() => setModal('salary')}>Record salary change</Button>
+            )}
             <Button variant="default" onClick={() => setModal('edit')}>
               Edit details
             </Button>
@@ -164,7 +182,19 @@ export function EmployeeDetailPage(): ReactElement {
         </Alert>
       )}
       <SalaryCard employee={data} />
+      {canReadSalary && history.data && (
+        <Card title="Salary history">
+          <SalaryHistoryTable items={history.data.items} />
+        </Card>
+      )}
       <DetailsCard employee={data} />
+      {canWriteSalary && (
+        <SalaryChangeModal
+          employee={data}
+          opened={modal === 'salary'}
+          onClose={() => setModal(undefined)}
+        />
+      )}
       {canWrite && (
         <>
           <EditEmployeeModal
