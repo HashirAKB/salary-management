@@ -299,7 +299,7 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
 | I | pay distribution groups by each dimension (`it.each`) and applies filters |
 | I | pay equity returns the flagged cohort first, hides not-comparable cohorts unless asked, and honours `flaggedOnly` |
 | I | Finance and HR get the same pay-equity body (D-047) |
-| C | a suppressed row shows "Fewer than 5" |
+| C | a suppressed row shows "Hidden to protect small groups" |
 | C | HR roles see the outside-band and stale cards as links; Finance sees plain counts |
 | C | pay equity shows "Too few to compare" rows and a "Review" badge with text on flagged rows |
 | C | changing "Group by" updates the URL and the table |

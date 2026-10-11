@@ -501,7 +501,7 @@ feat(web): add record salary change modal
 
 **Goal.** Anyone can answer "how do we pay people" in one screen, and HR can see where women and men in the same role are paid differently.
 
-**Demo.** As Finance: total payroll by country in USD; median by level for Software Engineers in India; a "Fewer than 5" row. As HR Admin: the pay-equity table with the three flagged cohorts, and the outside-band card linking to the filtered list.
+**Demo.** As Finance: total payroll by country in USD; median by level for Software Engineers in India; a "Hidden to protect small groups" row. As HR Admin: the pay-equity table with the three flagged cohorts, and the outside-band card linking to the filtered list.
 
 **Scope.**
 - `domain/percentiles.ts`, `domain/pay-query.ts` (engine, D-040), `domain/pay-equity.ts`, insights repository (active projection), I1, I2, I3.

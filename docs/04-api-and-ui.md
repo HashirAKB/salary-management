@@ -848,7 +848,7 @@ Sentence: `{metric phrase}{group phrase} for {scope}: {value}{base}.`
 | Base | Money and outside-band metrics: `, based on N active employees`. Headcount: nothing |
 | Like-for-like | True when the filters pin exactly one country, one job title and one level and `groupBy` is `none` |
 | Empty | `No active employees match {scope}.` |
-| Suppressed (Finance) | `Fewer than 5 employees match {scope}, so this figure is hidden.` |
+| Suppressed (Finance) | `Some figures are hidden to protect groups of fewer than 5 employees.` |
 | Gap not comparable | `Too few women or men in {scope} to compare (at least 5 of each needed).` |
 | FX | Never in the sentence; the UI shows `FX as of` under the answer |
 
@@ -1013,7 +1013,7 @@ Each screen lists its content and its loading, empty and error states. "HR roles
 **S-8 Insights (`/insights`)** (all roles)
 - Summary cards: Active headcount; Annual payroll (USD); Paid outside band (`560`, with `281 below, 279 above`); No salary change since `9 Oct 2024`. For HR roles the last two cards link to `/employees?band=outside` and `/employees?salaryUnchangedSince=2024-10-09`; Finance sees the counts without links.
 - Payroll by country: table (Country, Headcount, Payroll local, Payroll USD, share of total USD) and a horizontal bar chart of payroll USD.
-- Pay distribution: segmented control "Group by" (Country, Department, Job title, Level, Gender) and filters Country, Department, Job title, Level, all in the URL. Table: Group, Headcount, Min, P25, Median, P75, Max, Average (USD; local shown underneath when the group has one currency). Bar chart of the median per group. Suppressed groups show "Fewer than 5" across the row.
+- Pay distribution: segmented control "Group by" (Country, Department, Job title, Level, Gender) and filters Country, Department, Job title, Level, all in the URL. Table: Group, Headcount, Min, P25, Median, P75, Max, Average (USD; local shown underneath when the group has one currency). Bar chart of the median per group. Suppressed groups show "Hidden to protect small groups" across the row.
 - FX note at the bottom.
 - Loading: card and table skeletons. Empty (filters match no one): "No active employees match these filters." Error: alert per section with "Retry".
 
