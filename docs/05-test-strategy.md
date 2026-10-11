@@ -283,6 +283,7 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
 | U | local figures appear only when a group has one currency |
 | U | outside-band counts split below and above, and the band limits count as inside |
 | U | groups under the minimum size are suppressed with no values; the HR minimum suppresses nothing |
+| U | exactly one suppressed group also hides the smallest visible group (ties by key); two suppressed, a single group, or the HR minimum add nothing (D-071) |
 | U | `groupBy: none` returns one `all` group; empty groups are omitted; levels sort by rank, others by name |
 | U | gender gap is `(men - women) / men * 100`, positive when women are paid less |
 | U | `compaRatio` and `gapPct` round half away from zero from integers (`compaRatio(100500, 100000)` is `1.01`, not floating-point `1.00`; a gap under 0.05% either way is `0`, never `-0`) |

@@ -711,6 +711,7 @@ Steps:
 2. Group rows by the dimension (`none` is one group).
 3. Per group: `headcount`; USD per row via `toUsdMinor`; `total` and `average` (half up to the cent) and percentiles (D-024) over USD values; the same in local currency when the group has one currency; `outsideBandCount` split below and above; `genderGap` per 02 section 4 with the 5-and-5 minimum, in local currency when single-currency, else USD.
 4. If `headcount < minGroupSize`, return the group with `suppressed: true` and no values.
+   Then, when `minGroupSize > 1` and exactly one group is suppressed, also suppress the smallest visible group, ties by key (D-071), so the hidden group can't be recovered from the total. A group hidden this way can have 5 or more people.
 5. Sort groups as in I2.
 
 `domain/pay-equity.ts` computes I3 from the same `PayRow[]`, so I2, I3 and Ask share one load path.
