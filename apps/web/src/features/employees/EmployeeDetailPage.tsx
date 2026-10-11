@@ -111,8 +111,10 @@ export function EmployeeDetailPage(): ReactElement {
   });
 
   if (employee.isError) {
+    // A malformed id (400) can only mean this page's one param is wrong, so it reads as not found.
     const notFound =
-      employee.error instanceof ApiError && employee.error.code === 'EMPLOYEE_NOT_FOUND';
+      employee.error instanceof ApiError &&
+      (employee.error.code === 'EMPLOYEE_NOT_FOUND' || employee.error.code === 'VALIDATION_FAILED');
     return notFound ? (
       <Stack align="flex-start">
         <Text>Employee not found.</Text>
