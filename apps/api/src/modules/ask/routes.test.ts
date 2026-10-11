@@ -54,6 +54,31 @@ describe('POST /api/ask (K1)', () => {
     expect(await db.select().from(askLog)).toEqual([]);
   });
 
+  it('with the gemini provider and only an Anthropic key returns 503 ASK_UNAVAILABLE', async () => {
+    const db = await testDb();
+    const { cookie } = await loggedInAs(db, 'hr_admin');
+    app = testApp({
+      db,
+      config: {
+        ...testConfig,
+        askProvider: 'gemini',
+        geminiApiKey: undefined,
+        anthropicApiKey: 'a-key',
+      },
+      interpreter: fakeInterpreter(),
+    });
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/ask',
+      headers: { cookie },
+      payload: { question: questionOf('q01') },
+    });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toMatchObject({ code: 'ASK_UNAVAILABLE' });
+  });
+
   it('returns the answer, the interpreted query and the interpretation list, and logs answered', async () => {
     const { db, ask } = await setup({ seed: threeIndians });
 
