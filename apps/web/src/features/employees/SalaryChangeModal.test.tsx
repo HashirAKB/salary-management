@@ -251,7 +251,7 @@ describe('record salary change outcomes and preview (04 sections 8.5 S-6, 8.6)',
     await fillMerit(user, dialog);
 
     const preview = await within(dialog).findByRole('group', { name: 'Preview' });
-    expect(within(preview).getByText('INR 19,80,000 to INR 20,00,000')).toBeVisible();
+    expect(preview).toHaveTextContent('INR 19,80,000 to INR 20,00,000');
     expect(within(preview).getByText('+1.0%')).toBeVisible();
     expect(await within(preview).findByText('New compa-ratio 0.98')).toBeVisible();
     expect(within(preview).getByText('Inside band')).toBeVisible();
