@@ -1,15 +1,20 @@
 import {
+  changePct,
+  compaRatio,
+  payBandResponseSchema,
   salaryChangeBodySchema,
   type EmployeeDetail,
   type SalaryChangeBody,
   type SalaryChangeReason,
 } from '@acme/shared';
 import { Alert, Button, Group, Modal, Select, Stack, Text, TextInput } from '@mantine/core';
-import { useMutation } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type FormEvent, type ReactElement } from 'react';
 import { ApiError, apiFetch } from '../../api/client.ts';
+import { Money } from '../../components/Money.tsx';
 import { useViewer } from '../../components/Shell.tsx';
-import { parseMajorToMinor } from '../../format.ts';
+import { useToast } from '../../components/Toasts.tsx';
+import { formatChangePct, formatCompaRatio, parseMajorToMinor } from '../../format.ts';
 import { useReference } from './useReference.ts';
 
 type Props = { employee: EmployeeDetail; opened: boolean; onClose: () => void };
@@ -38,8 +43,58 @@ const FIELD_OF_CODE: Record<string, Field> = {
   PROMOTION_LEVEL_NOT_HIGHER: 'levelCode',
 };
 
-function SalaryChangeForm({ employee }: Omit<Props, 'opened' | 'onClose'>): ReactElement {
+function Preview({
+  employee,
+  amountMinor,
+  jobTitleId,
+  levelCode,
+}: {
+  employee: EmployeeDetail;
+  amountMinor: number;
+  jobTitleId: string;
+  levelCode: string;
+}): ReactElement {
+  const band = useQuery({
+    queryKey: ['pay-band', employee.country.code, jobTitleId, levelCode],
+    queryFn: () =>
+      apiFetch(`/api/pay-bands/${employee.country.code}/${jobTitleId}/${levelCode}`, {
+        schema: payBandResponseSchema,
+      }),
+    enabled: levelCode !== '',
+    retry: false,
+  });
+  const { salary } = employee;
+  const next = { amountMinor, currency: salary.currency };
+  const bandData = band.data;
+  const position = bandData
+    ? amountMinor < bandData.min.amountMinor
+      ? 'Below band'
+      : amountMinor > bandData.max.amountMinor
+        ? 'Above band'
+        : 'Inside band'
+    : undefined;
+  return (
+    <Stack gap={4} role="group" aria-label="Preview">
+      <Text>
+        <Money value={salary} />
+        {' to '}
+        <Money value={next} />
+      </Text>
+      <Text>{formatChangePct(changePct(salary.amountMinor, amountMinor))}</Text>
+      {bandData && (
+        <>
+          <Text>{`New compa-ratio ${formatCompaRatio(compaRatio(amountMinor, bandData.mid.amountMinor))}`}</Text>
+          <Text>{position}</Text>
+        </>
+      )}
+    </Stack>
+  );
+}
+
+function SalaryChangeForm({ employee, onClose }: Omit<Props, 'opened'>): ReactElement {
   const me = useViewer();
+  const queryClient = useQueryClient();
+  const toast = useToast();
   const reference = useReference().data;
   const currentTitleId = String(employee.jobTitle.id);
   const currentRank = reference?.levels.find((l) => l.code === employee.level.code)?.rank ?? 0;
@@ -59,9 +114,24 @@ function SalaryChangeForm({ employee }: Omit<Props, 'opened' | 'onClose'>): Reac
 
   const record = useMutation({
     mutationFn: (body: SalaryChangeBody) =>
-      apiFetch(`/api/employees/${employee.id}/salary-changes`, { method: 'POST', body }),
+      apiFetch(`/api/employees/${employee.id}/salary-changes`, {
+        method: 'POST',
+        body,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['employee', String(employee.id)] });
+      void queryClient.invalidateQueries({ queryKey: ['employees'] });
+      toast('Salary change recorded.');
+      onClose();
+    },
     onError: (error) => {
       if (!(error instanceof ApiError)) return setFormError(error.message);
+      if (error.code === 'EMPLOYEE_TERMINATED') {
+        void queryClient.invalidateQueries({ queryKey: ['employee', String(employee.id)] });
+        void queryClient.invalidateQueries({ queryKey: ['employees'] });
+        toast(error.message);
+        return onClose();
+      }
       if (error.code === 'VALIDATION_FAILED') {
         const byField: Errors = {};
         const unmatched: string[] = [];
@@ -92,6 +162,7 @@ function SalaryChangeForm({ employee }: Omit<Props, 'opened' | 'onClose'>): Reac
   };
 
   const shownLevel = locked ? employee.level.code : levelCode;
+  const previewMinor = parseMajorToMinor(amount);
 
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
@@ -165,6 +236,14 @@ function SalaryChangeForm({ employee }: Omit<Props, 'opened' | 'onClose'>): Reac
           error={errors.levelCode}
           allowDeselect={false}
         />
+        {previewMinor !== null && previewMinor > 0 && (
+          <Preview
+            employee={employee}
+            amountMinor={previewMinor}
+            jobTitleId={jobTitleId}
+            levelCode={shownLevel}
+          />
+        )}
         <Group justify="flex-end">
           <Button type="submit" loading={record.isPending}>
             Record change
@@ -179,7 +258,7 @@ function SalaryChangeForm({ employee }: Omit<Props, 'opened' | 'onClose'>): Reac
 export function SalaryChangeModal({ employee, opened, onClose }: Props): ReactElement {
   return (
     <Modal opened={opened} onClose={onClose} title="Record salary change">
-      <SalaryChangeForm employee={employee} />
+      <SalaryChangeForm employee={employee} onClose={onClose} />
     </Modal>
   );
 }
