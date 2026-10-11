@@ -2,6 +2,7 @@ import type { EmployeeListItem } from '@acme/shared';
 import { employeeListResponseSchema, serializeEmployeeListQuery } from '@acme/shared';
 import {
   Alert,
+  Anchor,
   Badge,
   Button,
   Group,
@@ -18,7 +19,7 @@ import {
 } from '@mantine/core';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { useState, type ReactElement } from 'react';
-import { Link, useLocation } from 'react-router';
+import { Link, useLocation, useNavigate } from 'react-router';
 import { ApiError, apiDownload, apiFetch } from '../../api/client.ts';
 import { FxAsOf } from '../../components/FxAsOf.tsx';
 import { Money } from '../../components/Money.tsx';
@@ -45,12 +46,17 @@ const PAGE_SIZES = ['25', '50', '100'];
 const count = new Intl.NumberFormat('en-US');
 
 function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement {
+  const navigate = useNavigate();
+  const detail = `/employees/${employee.id}`;
   return (
-    <Table.Tr>
+    // The name is the keyboard and screen-reader link; clicking anywhere else on the row follows it too.
+    <Table.Tr style={{ cursor: 'pointer' }} onClick={() => void navigate(detail)}>
       <Table.Td>{employee.employeeCode}</Table.Td>
       <Table.Td>
         <Group gap="xs" wrap="nowrap">
-          <span>{`${employee.firstName} ${employee.lastName}`}</span>
+          <Anchor component={Link} to={detail} onClick={(event) => event.stopPropagation()}>
+            {`${employee.firstName} ${employee.lastName}`}
+          </Anchor>
           {employee.status === 'terminated' && (
             <Badge color="gray" variant="light">
               Terminated
@@ -225,48 +231,54 @@ export function EmployeeListPage(): ReactElement {
       )}
       {loadingNext && <Progress value={100} animated size={3} aria-label="Loading page" />}
       {showTable && (
-        <Table
-          striped
-          data-fetching={loadingNext || undefined}
-          style={loadingNext ? { opacity: 0.5 } : undefined}
-        >
-          <Table.Thead>
-            <Table.Tr>
-              {COLUMNS.map((column) => {
-                const key = SORTABLE[column as keyof typeof SORTABLE] as string | undefined;
-                if (!key) return <Table.Th key={column}>{column}</Table.Th>;
-                const active = key === sort;
-                return (
-                  <Table.Th
-                    key={column}
-                    aria-sort={active ? (order === 'asc' ? 'ascending' : 'descending') : undefined}
-                  >
-                    <UnstyledButton
-                      fw="inherit"
-                      onClick={() => sortBy(key as (typeof SORTABLE)[keyof typeof SORTABLE])}
+        <Table.ScrollContainer minWidth={900}>
+          <Table
+            striped
+            data-fetching={loadingNext || undefined}
+            style={loadingNext ? { opacity: 0.5 } : undefined}
+          >
+            <Table.Thead>
+              <Table.Tr>
+                {COLUMNS.map((column) => {
+                  const key = SORTABLE[column as keyof typeof SORTABLE] as string | undefined;
+                  if (!key) return <Table.Th key={column}>{column}</Table.Th>;
+                  const active = key === sort;
+                  return (
+                    <Table.Th
+                      key={column}
+                      aria-sort={
+                        active ? (order === 'asc' ? 'ascending' : 'descending') : undefined
+                      }
                     >
-                      {column}
-                      {active && <span aria-hidden>{order === 'asc' ? ' ▲' : ' ▼'}</span>}
-                    </UnstyledButton>
-                  </Table.Th>
-                );
-              })}
-            </Table.Tr>
-          </Table.Thead>
-          <Table.Tbody>
-            {data
-              ? data.items.map((employee) => <EmployeeRow key={employee.id} employee={employee} />)
-              : Array.from({ length: SKELETON_ROWS }, (_, row) => (
-                  <Table.Tr key={row}>
-                    {COLUMNS.map((column) => (
-                      <Table.Td key={column}>
-                        <Skeleton height={16} />
-                      </Table.Td>
-                    ))}
-                  </Table.Tr>
-                ))}
-          </Table.Tbody>
-        </Table>
+                      <UnstyledButton
+                        fw="inherit"
+                        onClick={() => sortBy(key as (typeof SORTABLE)[keyof typeof SORTABLE])}
+                      >
+                        {column}
+                        {active && <span aria-hidden>{order === 'asc' ? ' ▲' : ' ▼'}</span>}
+                      </UnstyledButton>
+                    </Table.Th>
+                  );
+                })}
+              </Table.Tr>
+            </Table.Thead>
+            <Table.Tbody>
+              {data
+                ? data.items.map((employee) => (
+                    <EmployeeRow key={employee.id} employee={employee} />
+                  ))
+                : Array.from({ length: SKELETON_ROWS }, (_, row) => (
+                    <Table.Tr key={row}>
+                      {COLUMNS.map((column) => (
+                        <Table.Td key={column}>
+                          <Skeleton height={16} />
+                        </Table.Td>
+                      ))}
+                    </Table.Tr>
+                  ))}
+            </Table.Tbody>
+          </Table>
+        </Table.ScrollContainer>
       )}
       {data && !empty && (
         <Group justify="space-between">
