@@ -1,4 +1,5 @@
 import { act, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { http, HttpResponse } from 'msw';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { aProblem } from '../../test/fixtures/problem.ts';
@@ -105,5 +106,43 @@ describe('health poll and GET retry (05 section 5.9 C row 3; D-045)', () => {
     expect(polls).toBe(2);
     expect(gets).toBe(2);
     await waitFor(() => expect(screen.queryByText(WAKING)).toBeNull());
+  });
+});
+
+describe('server down (05 section 5.9 C row 5; 04 section 8.2)', () => {
+  const DOWN = "The server isn't responding.";
+
+  async function wakeThenFailFor90Seconds(healthy: { value: boolean }) {
+    server.use(
+      http.get('/api/employees', () => new HttpResponse(null, { status: 503 })),
+      http.get('/api/health', () =>
+        healthy.value
+          ? HttpResponse.json({ status: 'ok' })
+          : new HttpResponse(null, { status: 503 }),
+      ),
+    );
+    render(<ServerStatusBanner />);
+    void apiFetch('/api/employees', { schema: { parse: (v) => v } }).catch(() => {});
+    await screen.findByText(WAKING);
+    act(() => scheduler.advance(90_000));
+  }
+
+  it('says the server is not responding, with Try again, after 90 seconds of failed polls', async () => {
+    await wakeThenFailFor90Seconds({ value: false });
+
+    expect(await screen.findByText(DOWN)).toBeVisible();
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
+    expect(screen.queryByText(WAKING)).toBeNull();
+  });
+
+  it('restarts the health poll on Try again and hides the banner on a 200', async () => {
+    const healthy = { value: false };
+    await wakeThenFailFor90Seconds(healthy);
+    await userEvent.setup().click(await screen.findByRole('button', { name: 'Try again' }));
+    healthy.value = true;
+    act(() => scheduler.advance(3000));
+
+    await waitFor(() => expect(screen.queryByText(DOWN)).toBeNull());
+    expect(screen.queryByText(WAKING)).toBeNull();
   });
 });
