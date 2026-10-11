@@ -125,3 +125,34 @@ describe('checkSalaryChange: promotion (D-022)', () => {
     expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
   });
 });
+
+describe('checkSalaryChange: correction (D-022)', () => {
+  const correction = { reason: 'correction' as const };
+
+  it('allows a lower amount', () => {
+    const change = { ...correction, amount: { amountMinor: 190_000_000, currency: 'INR' } };
+    expect(checkSalaryChange(context({ change }))).toBeNull();
+  });
+
+  it('allows a higher amount with a new title or level', () => {
+    expect(checkSalaryChange(context({ change: { ...correction, jobTitleId: 2 } }))).toBeNull();
+    expect(checkSalaryChange(context({ change: { ...correction, levelRank: 1 } }))).toBeNull();
+  });
+
+  it('allows the same amount with a new title or level', () => {
+    const amount = { amountMinor: 200_000_000, currency: 'INR' };
+    expect(
+      checkSalaryChange(context({ change: { ...correction, amount, jobTitleId: 2 } })),
+    ).toBeNull();
+    expect(
+      checkSalaryChange(context({ change: { ...correction, amount, levelRank: 3 } })),
+    ).toBeNull();
+  });
+
+  it('rejects a change that changes nothing', () => {
+    const amount = { amountMinor: 200_000_000, currency: 'INR' };
+    expect(checkSalaryChange(context({ change: { ...correction, amount } }))).toBe(
+      'CORRECTION_NO_CHANGE',
+    );
+  });
+});
