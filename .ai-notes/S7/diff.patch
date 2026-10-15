@@ -1,0 +1,3294 @@
+diff --git a/.claude/settings.json b/.claude/settings.json
+index 21e7c1f..96653ac 100644
+--- a/.claude/settings.json
++++ b/.claude/settings.json
+@@ -54,5 +54,6 @@
+        },
+        "enabledPlugins": {
+-              "render@claude-plugins-official": false
++              "render@claude-plugins-official": false,
++              "security-guidance@claude-plugins-official": false
+        }
+ }
+diff --git a/.claude/skills/tdd-build/SKILL.md b/.claude/skills/tdd-build/SKILL.md
+index a47c67c..d2234dc 100644
+--- a/.claude/skills/tdd-build/SKILL.md
++++ b/.claude/skills/tdd-build/SKILL.md
+@@ -20,5 +20,5 @@ You are building specific cycles of slice **$0**. The plan and spec are already
+ 2. Never edit, skip, weaken or delete a test to make it pass. If a test looks wrong, stop and ask.
+ 3. If `brief.md` is silent or contradicts something, stop with `BLOCKED:`, quote the field and options, wait.
+-4. Show evidence: after every test run, paste the command and its last ~10 summary lines.
++4. Evidence is the test run's tool output in this session. Don't repeat or paste it in your reply; state red or green in one line.
+ 5. When I correct something, append it to `.ai-notes/$0/overrides.md` immediately.
+ 6. Stage explicit paths. Nothing in `.ai-notes/` is ever staged.
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 39733a1..0bd5a77 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -11,4 +11,5 @@ import { registerAuth } from './modules/auth/plugin.ts';
+ import { authRoutes } from './modules/auth/routes.ts';
+ import { employeeRoutes } from './modules/employees/routes.ts';
++import { insightsRoutes } from './modules/insights/routes.ts';
+ import { healthRoutes } from './modules/health/routes.ts';
+ import { referenceRoutes } from './modules/reference/routes.ts';
+@@ -47,4 +48,5 @@ export function buildApp(deps: AppDeps): FastifyInstance {
+   referenceRoutes(app, { db: deps.db });
+   employeeRoutes(app, { db: deps.db, clock: deps.clock });
++  insightsRoutes(app, { db: deps.db, clock: deps.clock });
+   salaryRoutes(app, { db: deps.db, clock: deps.clock, writes: deps.salaryWrites });
+   return app;
+diff --git a/apps/api/src/domain/__fixtures__/pay-rows.ts b/apps/api/src/domain/__fixtures__/pay-rows.ts
+new file mode 100644
+index 0000000..3f13764
+--- /dev/null
++++ b/apps/api/src/domain/__fixtures__/pay-rows.ts
+@@ -0,0 +1,35 @@
++import type { PayRow } from '../pay-query.ts';
++
++// A complete USD row; each fixture overrides what it exercises.
++export function payRow(override: Partial<PayRow> = {}): PayRow {
++  return {
++    countryCode: 'US',
++    departmentId: 1,
++    jobTitleId: 1,
++    levelCode: 'L2',
++    gender: 'female',
++    salaryMinor: 1_000_000,
++    currency: 'USD',
++    usdPerUnitMicros: 1_000_000,
++    bandMinMinor: 800_000,
++    bandMaxMinor: 1_200_000,
++    salaryEffectiveDate: '2025-01-01',
++    ...override,
++  };
++}
++
++// Six salaries in minor units, deliberately unsorted. The expected values are the
++// PERCENTILE.INC results (h = (n - 1) * p, linear interpolation) worked out by hand
++// and cross-checked against Excel's definition:
++//   =PERCENTILE.INC(A1:A6, 0.25) -> 15750   (h = 1.25: 15000 + 0.25 * 3000)
++//   =PERCENTILE.INC(A1:A6, 0.5)  -> 19500   (h = 2.5:  18000 + 0.5 * 3000)
++//   =PERCENTILE.INC(A1:A6, 0.75) -> 27750   (h = 3.75: 21000 + 0.75 * 9000)
++export const EXCEL_SALARIES = [30_000, 12_000, 60_000, 18_000, 15_000, 21_000];
++
++export const EXCEL_PERCENTILES = {
++  min: 12_000,
++  p25: 15_750,
++  median: 19_500,
++  p75: 27_750,
++  max: 60_000,
++} as const;
+diff --git a/apps/api/src/domain/pay-equity.test.ts b/apps/api/src/domain/pay-equity.test.ts
+new file mode 100644
+index 0000000..55ce790
+--- /dev/null
++++ b/apps/api/src/domain/pay-equity.test.ts
+@@ -0,0 +1,103 @@
++import { describe, expect, it } from 'vitest';
++import { payRow } from './__fixtures__/pay-rows.ts';
++import { computePayEquity } from './pay-equity.ts';
++import type { PayRow } from './pay-query.ts';
++
++function team(gender: string, count: number, salaryMinor: number, rest: Partial<PayRow> = {}) {
++  return Array.from({ length: count }, () => payRow({ gender, salaryMinor, ...rest }));
++}
++
++describe('computePayEquity cohorts', () => {
++  it('flags a cohort at exactly 5.00% and not at 4.99% unrounded', () => {
++    const exact = computePayEquity([...team('male', 5, 100_000), ...team('female', 5, 95_000)]);
++    expect(exact.cohorts[0]).toMatchObject({ comparable: true, gapPct: 5, flagged: true });
++
++    // 4.99% rounds to 5.0 for display, yet must not be flagged.
++    const under = computePayEquity([...team('male', 5, 100_000), ...team('female', 5, 95_010)]);
++    expect(under.cohorts[0]).toMatchObject({ comparable: true, gapPct: 5, flagged: false });
++  });
++
++  it('does not flag a gap where women are paid more', () => {
++    const result = computePayEquity([...team('male', 5, 90_000), ...team('female', 5, 100_000)]);
++    expect(result.cohorts[0]).toMatchObject({ gapPct: -11.1, flagged: false });
++  });
++
++  it.each([
++    ['4 women', 4, 5],
++    ['4 men', 5, 4],
++  ])('a cohort with %s is not comparable and carries no numbers', (_name, women, men) => {
++    const result = computePayEquity([
++      ...team('female', women, 90_000),
++      ...team('male', men, 100_000),
++    ]);
++    expect(result.cohorts[0]).toEqual({
++      countryCode: 'US',
++      jobTitleId: 1,
++      levelCode: 'L2',
++      currency: 'USD',
++      comparable: false,
++      women: null,
++      men: null,
++      meanWomenMinor: null,
++      meanMenMinor: null,
++      gapPct: null,
++      flagged: false,
++    });
++  });
++
++  it('counts non-binary and not-disclosed in neither mean', () => {
++    const result = computePayEquity([
++      ...team('male', 5, 100_000),
++      ...team('female', 5, 100_000),
++      ...team('non_binary', 3, 1_000_000),
++      ...team('not_disclosed', 2, 1),
++    ]);
++    expect(result.cohorts).toHaveLength(1);
++    expect(result.cohorts[0]).toMatchObject({
++      women: 5,
++      men: 5,
++      meanWomenMinor: 100_000,
++      meanMenMinor: 100_000,
++      gapPct: 0,
++    });
++    expect(result.org).toMatchObject({ women: 5, men: 5 });
++  });
++
++  it('keeps cohorts apart by country, job title and level', () => {
++    const rows = [
++      ...team('male', 5, 100_000),
++      ...team('female', 5, 100_000),
++      ...team('male', 5, 100_000, { levelCode: 'L3' }),
++      ...team('female', 5, 100_000, { levelCode: 'L3' }),
++      ...team('male', 5, 100_000, { jobTitleId: 2 }),
++    ];
++    const result = computePayEquity(rows);
++    expect(result.cohorts.map((c) => [c.jobTitleId, c.levelCode, c.comparable])).toEqual([
++      [1, 'L2', true],
++      [1, 'L3', true],
++      [2, 'L2', false],
++    ]);
++  });
++});
++
++describe('computePayEquity organisation gap', () => {
++  it('computes mean and median gaps from per-employee USD', () => {
++    // EUR at 2.0 USD per unit: 50,000 EUR is 100,000 USD.
++    const eur = { currency: 'EUR', countryCode: 'DE', usdPerUnitMicros: 2_000_000 };
++    const rows = [
++      ...team('male', 2, 50_000, eur), // 100,000 USD each
++      ...team('male', 1, 100_000), // 100,000 USD
++      ...team('female', 2, 40_000, eur), // 80,000 USD each
++      ...team('female', 1, 60_000), // 60,000 USD
++    ];
++    // men mean 100,000, women mean (80,000 + 80,000 + 60,000) / 3 = 73,333.33
++    // median women 80,000 -> gap 20.0
++    const { org } = computePayEquity(rows);
++    expect(org).toEqual({ meanGapPct: 26.7, medianGapPct: 20, women: 3, men: 3 });
++  });
++
++  it('has no gap when there are no women or no men', () => {
++    const { org } = computePayEquity(team('male', 3, 100_000));
++    expect(org).toEqual({ meanGapPct: null, medianGapPct: null, women: 0, men: 3 });
++  });
++});
+diff --git a/apps/api/src/domain/pay-equity.ts b/apps/api/src/domain/pay-equity.ts
+new file mode 100644
+index 0000000..f05feb8
+--- /dev/null
++++ b/apps/api/src/domain/pay-equity.ts
+@@ -0,0 +1,125 @@
++import { gapPct, toUsdMinor } from '@acme/shared';
++import { percentile } from './percentiles.ts';
++import type { PayRow } from './pay-query.ts';
++
++export interface Cohort {
++  countryCode: string;
++  jobTitleId: number;
++  levelCode: string;
++  comparable: boolean;
++  women: number | null;
++  men: number | null;
++  // Mean pay in the cohort's local currency, minor units; null when not comparable.
++  meanWomenMinor: number | null;
++  meanMenMinor: number | null;
++  currency: string;
++  gapPct: number | null;
++  flagged: boolean;
++}
++
++export interface OrgGap {
++  meanGapPct: number | null;
++  medianGapPct: number | null;
++  women: number;
++  men: number;
++}
++
++export interface PayEquityResult {
++  org: OrgGap;
++  cohorts: Cohort[];
++}
++
++export const FLAG_THRESHOLD_PCT = 5;
++export const MIN_PER_GENDER = 5;
++
++function sum(values: readonly number[]): number {
++  return values.reduce((total, v) => total + v, 0);
++}
++
++function meanOf(values: readonly number[]): number {
++  return Math.round(sum(values) / values.length);
++}
++
++// Flag on the unrounded gap: (sumMen / nMen - sumWomen / nWomen) / (sumMen / nMen) >= 5%.
++// Cross-multiplied in BigInt so no rounding or float error can move a 4.99% gap to 5%.
++function isFlagged(men: readonly number[], women: readonly number[]): boolean {
++  const sumMen = BigInt(sum(men));
++  const sumWomen = BigInt(sum(women));
++  const nMen = BigInt(men.length);
++  const nWomen = BigInt(women.length);
++  const menScaled = sumMen * nWomen;
++  const womenScaled = sumWomen * nMen;
++  return (menScaled - womenScaled) * 100n >= BigInt(FLAG_THRESHOLD_PCT) * menScaled;
++}
++
++function cohortOf(rows: readonly PayRow[]): Cohort {
++  const first = rows[0]!;
++  const women = rows.filter((r) => r.gender === 'female').map((r) => r.salaryMinor);
++  const men = rows.filter((r) => r.gender === 'male').map((r) => r.salaryMinor);
++  const base = {
++    countryCode: first.countryCode,
++    jobTitleId: first.jobTitleId,
++    levelCode: first.levelCode,
++    currency: first.currency,
++  };
++  if (women.length < MIN_PER_GENDER || men.length < MIN_PER_GENDER) {
++    return {
++      ...base,
++      comparable: false,
++      women: null,
++      men: null,
++      meanWomenMinor: null,
++      meanMenMinor: null,
++      gapPct: null,
++      flagged: false,
++    };
++  }
++  const meanWomenMinor = meanOf(women);
++  const meanMenMinor = meanOf(men);
++  return {
++    ...base,
++    comparable: true,
++    women: women.length,
++    men: men.length,
++    meanWomenMinor,
++    meanMenMinor,
++    gapPct: gapPct(meanMenMinor, meanWomenMinor),
++    flagged: isFlagged(men, women),
++  };
++}
++
++function orgGap(rows: readonly PayRow[]): OrgGap {
++  const usdOf = (gender: string) =>
++    rows
++      .filter((r) => r.gender === gender)
++      .map((r) => toUsdMinor(r.salaryMinor, r.usdPerUnitMicros));
++  const women = usdOf('female');
++  const men = usdOf('male');
++  const both = women.length > 0 && men.length > 0;
++  return {
++    meanGapPct: both ? gapPct(meanOf(men), meanOf(women)) : null,
++    medianGapPct: both
++      ? gapPct(Math.round(percentile(men, 0.5)), Math.round(percentile(women, 0.5)))
++      : null,
++    women: women.length,
++    men: men.length,
++  };
++}
++
++// Cohort = country + job title + level (D-013); means stay in local currency.
++export function computePayEquity(rows: readonly PayRow[]): PayEquityResult {
++  const byCohort = new Map<string, PayRow[]>();
++  for (const row of rows) {
++    const key = `${row.countryCode}|${row.jobTitleId}|${row.levelCode}`;
++    byCohort.set(key, [...(byCohort.get(key) ?? []), row]);
++  }
++  const cohorts = [...byCohort.values()]
++    .map(cohortOf)
++    .sort(
++      (a, b) =>
++        a.countryCode.localeCompare(b.countryCode) ||
++        a.jobTitleId - b.jobTitleId ||
++        a.levelCode.localeCompare(b.levelCode),
++    );
++  return { org: orgGap(rows), cohorts };
++}
+diff --git a/apps/api/src/domain/pay-query.test.ts b/apps/api/src/domain/pay-query.test.ts
+new file mode 100644
+index 0000000..7427273
+--- /dev/null
++++ b/apps/api/src/domain/pay-query.test.ts
+@@ -0,0 +1,268 @@
++import { describe, expect, it } from 'vitest';
++import { payRow } from './__fixtures__/pay-rows.ts';
++import { aggregatePay } from './pay-query.ts';
++
++describe('aggregatePay: totals and averages (D-040, 02 section 4)', () => {
++  it('computes total and average from per-employee USD values, never from an aggregate', () => {
++    // 100_040 minor at 0.012 USD each is 1200.48, so each employee rounds down to 1200.
++    // Converting the local sum instead (200_080 -> 2400.96) would give 2401.
++    const rows = [
++      payRow({ currency: 'INR', salaryMinor: 100_040, usdPerUnitMicros: 12_000 }),
++      payRow({ currency: 'INR', salaryMinor: 100_040, usdPerUnitMicros: 12_000 }),
++    ];
++
++    const [group] = aggregatePay(rows, ['headcount', 'total', 'average'], 'none', 1);
++
++    expect(group?.headcount).toBe(2);
++    expect(group?.usd).toEqual({ total: 2400, average: 1200 });
++  });
++
++  it('rounds the average half up to the cent', () => {
++    const rows = [payRow({ salaryMinor: 1001 }), payRow({ salaryMinor: 1002 })];
++
++    const [group] = aggregatePay(rows, ['average'], 'none', 1);
++
++    expect(group?.usd).toEqual({ average: 1002 });
++  });
++
++  it('rounds interpolated percentiles to the cent and reports min and max', () => {
++    const rows = [1, 2, 3, 4].map((n) => payRow({ salaryMinor: n * 100 + 1 }));
++
++    const [group] = aggregatePay(rows, ['min', 'p25', 'median', 'p75', 'max'], 'none', 1);
++
++    // 101, 201, 301, 401: p25 = 176.0, median = 251.0, p75 = 326.0
++    expect(group?.usd).toEqual({ min: 101, p25: 176, median: 251, p75: 326, max: 401 });
++  });
++});
++
++describe('aggregatePay: local figures', () => {
++  it('reports local figures when the group has one currency', () => {
++    const rows = [
++      payRow({ currency: 'INR', salaryMinor: 500_000, usdPerUnitMicros: 12_000 }),
++      payRow({ currency: 'INR', salaryMinor: 700_000, usdPerUnitMicros: 12_000 }),
++    ];
++
++    const [group] = aggregatePay(rows, ['total', 'average', 'median'], 'none', 1);
++
++    expect(group?.local).toEqual({ total: 1_200_000, average: 600_000, median: 600_000 });
++  });
++
++  it('omits local figures when the group mixes currencies, keeping USD', () => {
++    const rows = [
++      payRow({ currency: 'USD', salaryMinor: 100_000 }),
++      payRow({ currency: 'INR', salaryMinor: 1_000_000, usdPerUnitMicros: 12_000 }),
++    ];
++
++    const [group] = aggregatePay(rows, ['total'], 'none', 1);
++
++    expect(group?.local).toBeNull();
++    expect(group?.usd).toEqual({ total: 100_000 + 12_000 });
++  });
++});
++
++describe('aggregatePay: outside band', () => {
++  it('splits below and above, and counts the band limits as inside', () => {
++    // band is 800_000 to 1_200_000 in the default row
++    const rows = [
++      payRow({ salaryMinor: 799_999 }),
++      payRow({ salaryMinor: 800_000 }),
++      payRow({ salaryMinor: 1_000_000 }),
++      payRow({ salaryMinor: 1_200_000 }),
++      payRow({ salaryMinor: 1_200_001 }),
++      payRow({ salaryMinor: 1_500_000 }),
++    ];
++
++    const [group] = aggregatePay(rows, ['outsideBandCount'], 'none', 1);
++
++    expect(group?.outsideBand).toEqual({ below: 1, above: 2, total: 3 });
++  });
++});
++
++describe('aggregatePay: minimum group size (D-012, D-040)', () => {
++  const rows = [
++    ...Array.from({ length: 6 }, () => payRow({ countryCode: 'US' })),
++    ...Array.from({ length: 5 }, () => payRow({ countryCode: 'DE', currency: 'EUR' })),
++    ...Array.from({ length: 3 }, () => payRow({ countryCode: 'IN', currency: 'INR' })),
++  ];
++  const metrics = ['headcount', 'total', 'outsideBandCount'] as const;
++
++  it('suppresses a group under the minimum with no values', () => {
++    const groups = aggregatePay(rows, metrics, 'country', 5);
++
++    expect(groups.find((g) => g.key === 'IN')).toEqual({
++      key: 'IN',
++      label: 'IN',
++      suppressed: true,
++      headcount: null,
++      usd: null,
++      local: null,
++      outsideBand: null,
++    });
++    expect(groups.find((g) => g.key === 'US')).toMatchObject({ suppressed: false, headcount: 6 });
++  });
++
++  it('keeps a group at exactly the minimum', () => {
++    const groups = aggregatePay(rows.slice(0, 5), metrics, 'country', 5);
++
++    expect(groups[0]?.suppressed).toBe(false);
++  });
++
++  it('suppresses the ungrouped all group when a filter leaves fewer than the minimum', () => {
++    const groups = aggregatePay(rows.slice(0, 3), metrics, 'none', 5);
++
++    expect(groups).toEqual([
++      {
++        key: 'all',
++        label: 'All active employees',
++        suppressed: true,
++        headcount: null,
++        usd: null,
++        local: null,
++        outsideBand: null,
++      },
++    ]);
++  });
++
++  it('suppresses nothing at the HR minimum of 1', () => {
++    const groups = aggregatePay([payRow()], metrics, 'country', 1);
++
++    expect(groups).toHaveLength(1);
++    expect(groups[0]).toMatchObject({ suppressed: false, headcount: 1 });
++  });
++});
++
++describe('aggregatePay: complementary suppression (D-071)', () => {
++  const metrics = ['headcount', 'total'] as const;
++  const team = (countryCode: string, count: number) =>
++    Array.from({ length: count }, () => payRow({ countryCode }));
++
++  it('also hides the smallest visible group when exactly one group is suppressed', () => {
++    const groups = aggregatePay(
++      [...team('US', 7), ...team('GB', 6), ...team('DE', 5), ...team('IN', 3)],
++      metrics,
++      'country',
++      5,
++    );
++
++    expect(groups.map((g) => [g.key, g.suppressed])).toEqual([
++      ['DE', true],
++      ['GB', false],
++      ['IN', true],
++      ['US', false],
++    ]);
++    expect(groups.find((g) => g.key === 'DE')).toMatchObject({
++      headcount: null,
++      usd: null,
++      local: null,
++      outsideBand: null,
++    });
++  });
++
++  it('breaks a tie for smallest by key', () => {
++    const groups = aggregatePay(
++      [...team('US', 5), ...team('DE', 5), ...team('IN', 3)],
++      metrics,
++      'country',
++      5,
++    );
++
++    expect(groups.filter((g) => !g.suppressed).map((g) => g.key)).toEqual(['US']);
++  });
++
++  it('adds nothing when two groups are already suppressed', () => {
++    const groups = aggregatePay(
++      [...team('US', 6), ...team('GB', 2), ...team('IN', 3)],
++      metrics,
++      'country',
++      5,
++    );
++
++    expect(groups.filter((g) => g.suppressed).map((g) => g.key)).toEqual(['GB', 'IN']);
++  });
++
++  it('adds nothing when the only group is the suppressed one', () => {
++    const groups = aggregatePay(team('IN', 3), metrics, 'country', 5);
++
++    expect(groups).toHaveLength(1);
++    expect(groups[0]?.suppressed).toBe(true);
++  });
++
++  it('adds nothing at the HR minimum of 1', () => {
++    const groups = aggregatePay([...team('US', 6), ...team('IN', 1)], metrics, 'country', 1);
++
++    expect(groups.every((g) => !g.suppressed)).toBe(true);
++  });
++});
++
++describe('aggregatePay: grouping and order', () => {
++  it('groupBy none returns one all group', () => {
++    const groups = aggregatePay(
++      [payRow(), payRow({ countryCode: 'IN' })],
++      ['headcount'],
++      'none',
++      1,
++    );
++
++    expect(groups).toHaveLength(1);
++    expect(groups[0]).toMatchObject({ key: 'all', label: 'All active employees', headcount: 2 });
++  });
++
++  it('omits empty groups: no rows, no groups', () => {
++    expect(aggregatePay([], ['headcount'], 'none', 1)).toEqual([]);
++    expect(aggregatePay([], ['headcount'], 'country', 1)).toEqual([]);
++  });
++
++  it('groups by each dimension using the row value as the key', () => {
++    const rows = [
++      payRow({
++        countryCode: 'US',
++        departmentId: 7,
++        jobTitleId: 3,
++        levelCode: 'L4',
++        gender: 'male',
++      }),
++    ];
++
++    expect(aggregatePay(rows, ['headcount'], 'country', 1)[0]?.key).toBe('US');
++    expect(aggregatePay(rows, ['headcount'], 'department', 1)[0]?.key).toBe('7');
++    expect(aggregatePay(rows, ['headcount'], 'jobTitle', 1)[0]?.key).toBe('3');
++    expect(aggregatePay(rows, ['headcount'], 'level', 1)[0]?.key).toBe('L4');
++    expect(aggregatePay(rows, ['headcount'], 'gender', 1)[0]?.key).toBe('male');
++  });
++
++  it('sorts levels by rank', () => {
++    const rows = ['L3', 'L1', 'L5', 'L2'].map((levelCode) => payRow({ levelCode }));
++
++    const keys = aggregatePay(rows, ['headcount'], 'level', 1).map((g) => g.key);
++
++    expect(keys).toEqual(['L1', 'L2', 'L3', 'L5']);
++  });
++
++  it('sorts genders in reference order', () => {
++    const rows = ['not_disclosed', 'male', 'non_binary', 'female'].map((gender) =>
++      payRow({ gender }),
++    );
++
++    const keys = aggregatePay(rows, ['headcount'], 'gender', 1).map((g) => g.key);
++
++    expect(keys).toEqual(['female', 'male', 'non_binary', 'not_disclosed']);
++  });
++
++  it('sorts countries, departments and titles by name, and labels groups with it', () => {
++    const rows = [
++      payRow({ countryCode: 'GB' }),
++      payRow({ countryCode: 'US' }),
++      payRow({ countryCode: 'DE' }),
++    ];
++    // Name order (Alpha, Middle, Zealand) is the reverse of code order, so a sort by key fails.
++    const labels = { GB: 'Zealand', US: 'Alpha', DE: 'Middle' };
++
++    const groups = aggregatePay(rows, ['headcount'], 'country', 1, labels);
++
++    expect(groups.map((g) => [g.key, g.label])).toEqual([
++      ['US', 'Alpha'],
++      ['DE', 'Middle'],
++      ['GB', 'Zealand'],
++    ]);
++  });
++});
+diff --git a/apps/api/src/domain/pay-query.ts b/apps/api/src/domain/pay-query.ts
+new file mode 100644
+index 0000000..e5f45b4
+--- /dev/null
++++ b/apps/api/src/domain/pay-query.ts
+@@ -0,0 +1,169 @@
++import { toUsdMinor } from '@acme/shared';
++import { GENDERS } from './genders.ts';
++import { percentile } from './percentiles.ts';
++
++export interface PayRow {
++  countryCode: string;
++  departmentId: number;
++  jobTitleId: number;
++  levelCode: string;
++  gender: string;
++  salaryMinor: number;
++  currency: string;
++  usdPerUnitMicros: number;
++  bandMinMinor: number;
++  bandMaxMinor: number;
++  salaryEffectiveDate: string;
++}
++
++export type Dimension = 'country' | 'department' | 'jobTitle' | 'level' | 'gender';
++export type Metric =
++  'headcount' | 'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max' | 'outsideBandCount';
++
++export type PayStats = Partial<
++  Record<'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max', number>
++>;
++
++export interface GroupResult {
++  key: string;
++  label: string;
++  // Suppressed groups carry no values (D-012, D-040).
++  suppressed: boolean;
++  headcount: number | null;
++  usd: PayStats | null;
++  // Present only when every row in the group has the same currency.
++  local: PayStats | null;
++  outsideBand: { below: number; above: number; total: number } | null;
++}
++
++function statsOf(values: readonly number[], metrics: readonly Metric[]): PayStats {
++  const total = values.reduce((sum, v) => sum + v, 0);
++  const all: PayStats = {
++    total,
++    average: Math.round(total / values.length),
++    median: Math.round(percentile(values, 0.5)),
++    p25: Math.round(percentile(values, 0.25)),
++    p75: Math.round(percentile(values, 0.75)),
++    min: Math.min(...values),
++    max: Math.max(...values),
++  };
++  const picked: PayStats = {};
++  for (const key of Object.keys(all) as (keyof PayStats)[]) {
++    if (metrics.includes(key)) picked[key] = all[key];
++  }
++  return picked;
++}
++
++function resultFor(
++  key: string,
++  label: string,
++  rows: readonly PayRow[],
++  metrics: readonly Metric[],
++): GroupResult {
++  const usd = rows.map((r) => toUsdMinor(r.salaryMinor, r.usdPerUnitMicros));
++  const singleCurrency = rows.every((r) => r.currency === rows[0]?.currency);
++  let outsideBand: GroupResult['outsideBand'] = null;
++  if (metrics.includes('outsideBandCount')) {
++    const below = rows.filter((r) => r.salaryMinor < r.bandMinMinor).length;
++    const above = rows.filter((r) => r.salaryMinor > r.bandMaxMinor).length;
++    outsideBand = { below, above, total: below + above };
++  }
++  return {
++    key,
++    label,
++    suppressed: false,
++    headcount: rows.length,
++    usd: statsOf(usd, metrics),
++    local: singleCurrency
++      ? statsOf(
++          rows.map((r) => r.salaryMinor),
++          metrics,
++        )
++      : null,
++    outsideBand,
++  };
++}
++
++export const KEY_OF: Record<Dimension, (row: PayRow) => string> = {
++  country: (r) => r.countryCode,
++  department: (r) => String(r.departmentId),
++  jobTitle: (r) => String(r.jobTitleId),
++  level: (r) => r.levelCode,
++  gender: (r) => r.gender,
++};
++
++// Levels L1 to L5 sort by rank as codes; genders follow the reference order (genders.ts).
++function compareGroups(
++  groupBy: Dimension,
++  a: { key: string; label: string },
++  b: { key: string; label: string },
++): number {
++  if (groupBy === 'level') return a.key.localeCompare(b.key);
++  if (groupBy === 'gender') {
++    const order = GENDERS.map((g) => g.code);
++    return order.indexOf(a.key) - order.indexOf(b.key);
++  }
++  return a.label.localeCompare(b.label);
++}
++
++function suppressedResult(key: string, label: string): GroupResult {
++  return {
++    key,
++    label,
++    suppressed: true,
++    headcount: null,
++    usd: null,
++    local: null,
++    outsideBand: null,
++  };
++}
++
++export function aggregatePay(
++  rows: readonly PayRow[],
++  metrics: readonly Metric[],
++  groupBy: Dimension | 'none',
++  minGroupSize: number,
++  labels: Readonly<Record<string, string>> = {},
++): GroupResult[] {
++  if (rows.length === 0) return [];
++  if (groupBy === 'none') {
++    const label = 'All active employees';
++    return [
++      rows.length < minGroupSize
++        ? suppressedResult('all', label)
++        : resultFor('all', label, rows, metrics),
++    ];
++  }
++
++  const byKey = new Map<string, PayRow[]>();
++  for (const row of rows) {
++    const key = KEY_OF[groupBy](row);
++    byKey.set(key, [...(byKey.get(key) ?? []), row]);
++  }
++
++  const groups = [...byKey.entries()].map(([key, groupRows]) => {
++    const label = labels[key] ?? key;
++    return {
++      key,
++      label,
++      rows: groupRows,
++      suppressed: groupRows.length < minGroupSize,
++    };
++  });
++
++  // D-071: with one group hidden, Finance could subtract the visible groups from the total and
++  // recover it, so the smallest visible group (ties by key) is hidden too.
++  const hidden = groups.filter((g) => g.suppressed);
++  if (hidden.length === 1) {
++    const [smallest] = groups
++      .filter((g) => !g.suppressed)
++      .sort((a, b) => a.rows.length - b.rows.length || a.key.localeCompare(b.key));
++    if (smallest) smallest.suppressed = true;
++  }
++
++  return groups
++    .map((g) =>
++      g.suppressed ? suppressedResult(g.key, g.label) : resultFor(g.key, g.label, g.rows, metrics),
++    )
++    .sort((a, b) => compareGroups(groupBy, a, b));
++}
+diff --git a/apps/api/src/domain/percentiles.test.ts b/apps/api/src/domain/percentiles.test.ts
+new file mode 100644
+index 0000000..818633e
+--- /dev/null
++++ b/apps/api/src/domain/percentiles.test.ts
+@@ -0,0 +1,30 @@
++import { describe, expect, it } from 'vitest';
++import { EXCEL_PERCENTILES, EXCEL_SALARIES } from './__fixtures__/pay-rows.ts';
++import { percentile } from './percentiles.ts';
++
++describe('percentile (D-024, Excel PERCENTILE.INC)', () => {
++  it.each([
++    { p: 0.25, expected: 1.75 },
++    { p: 0.5, expected: 2.5 },
++    { p: 0.75, expected: 3.25 },
++  ])('[1,2,3,4] at $p is $expected', ({ p, expected }) => {
++    expect(percentile([1, 2, 3, 4], p)).toBeCloseTo(expected, 10);
++  });
++
++  it('a single value is its own P25, median and P75, and the input is not mutated', () => {
++    const single = [42];
++    expect([0.25, 0.5, 0.75].map((p) => percentile(single, p))).toEqual([42, 42, 42]);
++
++    const unsorted = [3, 1, 2];
++    percentile(unsorted, 0.5);
++    expect(unsorted).toEqual([3, 1, 2]);
++  });
++
++  it('matches the Excel results stored with the pay-rows fixture', () => {
++    expect(percentile(EXCEL_SALARIES, 0)).toBe(EXCEL_PERCENTILES.min);
++    expect(percentile(EXCEL_SALARIES, 0.25)).toBe(EXCEL_PERCENTILES.p25);
++    expect(percentile(EXCEL_SALARIES, 0.5)).toBe(EXCEL_PERCENTILES.median);
++    expect(percentile(EXCEL_SALARIES, 0.75)).toBe(EXCEL_PERCENTILES.p75);
++    expect(percentile(EXCEL_SALARIES, 1)).toBe(EXCEL_PERCENTILES.max);
++  });
++});
+diff --git a/apps/api/src/domain/percentiles.ts b/apps/api/src/domain/percentiles.ts
+new file mode 100644
+index 0000000..2ee6a9c
+--- /dev/null
++++ b/apps/api/src/domain/percentiles.ts
+@@ -0,0 +1,9 @@
++// D-024: PERCENTILE.INC, h = (n - 1) * p, linear interpolation. Returns the unrounded value.
++export function percentile(values: readonly number[], p: number): number {
++  const sorted = [...values].sort((a, b) => a - b);
++  const h = (sorted.length - 1) * p;
++  const lower = Math.floor(h);
++  const low = sorted[lower]!;
++  if (lower + 1 >= sorted.length) return low;
++  return low + (h - lower) * (sorted[lower + 1]! - low);
++}
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+index b6ac368..f35ff81 100644
+--- a/apps/api/src/http/access-matrix.test.ts
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -24,4 +24,7 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
+   'POST /api/employees/:id/salary-changes': 'salary.write',
+   'GET /api/exports/employees.csv': 'export.employees',
++  'GET /api/insights/summary': 'insights.read',
++  'GET /api/insights/pay-distribution': 'insights.read',
++  'GET /api/insights/pay-equity': 'insights.read',
+ };
+ 
+diff --git a/apps/api/src/modules/employees/service.ts b/apps/api/src/modules/employees/service.ts
+index ff54cb2..3dd9558 100644
+--- a/apps/api/src/modules/employees/service.ts
++++ b/apps/api/src/modules/employees/service.ts
+@@ -49,5 +49,8 @@ import { buildEmployeesCsv } from './csv.ts';
+ // Values in the list filters must exist in the reference tables (brief ruling 1); the shared
+ // schema only checks their shape. The path names the offending item, e.g. `country[1]`.
+-async function checkListValues(db: Db, query: EmployeeListQuery): Promise<void> {
++export async function checkListValues(
++  db: Db,
++  query: Pick<EmployeeListQuery, 'country' | 'department' | 'jobTitle' | 'level' | 'gender'>,
++): Promise<void> {
+   const [countryRows, levelRows, departmentRows, titleRows] = await Promise.all([
+     db.select({ key: countries.code }).from(countries),
+diff --git a/apps/api/src/modules/insights/finance-matrix.test.ts b/apps/api/src/modules/insights/finance-matrix.test.ts
+new file mode 100644
+index 0000000..e7a8709
+--- /dev/null
++++ b/apps/api/src/modules/insights/finance-matrix.test.ts
+@@ -0,0 +1,148 @@
++import {
++  insightsSummaryResponseSchema,
++  payDistributionResponseSchema,
++  payEquityResponseSchema,
++} from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++
++// What Finance may see, reduced to one shape for every endpoint: a group either is hidden and
++// carries no figure at all, or has at least 5 people behind it (D-012).
++interface Group {
++  hidden: boolean;
++  people: number | null;
++  figures: unknown[];
++}
++
++const DISTRIBUTION_GROUPS = ['none', 'country', 'department', 'jobTitle', 'level', 'gender'];
++
++const endpoints: {
++  name: string;
++  url: string;
++  groups: (json: unknown) => Group[];
++  // D-071: one hidden group next to visible ones could be recovered by subtraction.
++  checksDifferencing: boolean;
++}[] = [
++  {
++    name: 'I1 by country',
++    url: '/api/insights/summary',
++    groups: (json) =>
++      insightsSummaryResponseSchema.parse(json).byCountry.map((g) => ({
++        hidden: g.suppressed,
++        people: g.headcount,
++        figures: [g.headcount, g.payrollLocal, g.payrollUsd],
++      })),
++    checksDifferencing: true,
++  },
++  ...DISTRIBUTION_GROUPS.map((groupBy) => ({
++    name: `I2 by ${groupBy}`,
++    url: `/api/insights/pay-distribution?groupBy=${groupBy}`,
++    groups: (json: unknown) =>
++      payDistributionResponseSchema.parse(json).groups.map((g) => ({
++        hidden: g.suppressed,
++        people: g.headcount,
++        figures: [g.headcount, g.usd, g.local],
++      })),
++    checksDifferencing: true,
++  })),
++  {
++    name: 'I3 cohorts',
++    url: '/api/insights/pay-equity?includeNotComparable=true',
++    groups: (json) =>
++      payEquityResponseSchema.parse(json).cohorts.map((c) => ({
++        hidden: !c.comparable,
++        people: c.women === null || c.men === null ? null : Math.min(c.women, c.men),
++        figures: [c.women, c.men, c.meanWomen, c.meanMen, c.gapPct],
++      })),
++    checksDifferencing: false,
++  },
++];
++
++describe('Finance never receives a group under 5 from an insights endpoint', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  // 19 active employees. Rates: EUR 1.16, INR 0.0115, USD 1.
++  // Germany: 10 Software Engineers, L3, 5 women and 5 men.
++  // United States: 5 Software Engineers, L2, 3 women and 2 men, and 2 Product Managers, L1,
++  //   not disclosed.
++  // India: 2 Data Analysts, L1, non-binary.
++  async function fixture(db: Db) {
++    for (let i = 0; i < 10; i++) {
++      await anEmployee()
++        .inCountry('DE')
++        .withGender(i < 5 ? 'female' : 'male')
++        .insert(db);
++    }
++    for (let i = 0; i < 5; i++) {
++      await anEmployee()
++        .inCountry('US')
++        .atLevel('L2')
++        .withGender(i < 3 ? 'female' : 'male')
++        .insert(db);
++    }
++    for (let i = 0; i < 2; i++) {
++      await anEmployee()
++        .inCountry('US')
++        .withTitle(3)
++        .atLevel('L1')
++        .withGender('not_disclosed')
++        .insert(db);
++      await anEmployee()
++        .inCountry('IN')
++        .withTitle(2)
++        .atLevel('L1')
++        .withGender('non_binary')
++        .insert(db);
++    }
++  }
++
++  it.each(endpoints)('$name', async ({ url, groups, checksDifferencing }) => {
++    const db = await testDb();
++    await fixture(db);
++    const { cookie } = await loggedInAs(db, 'finance');
++    app = testApp({ db });
++
++    const response = await app.inject({ method: 'GET', url, headers: { cookie } });
++
++    expect(response.statusCode).toBe(200);
++    const shown = groups(response.json());
++    expect(shown.length).toBeGreaterThan(0);
++    for (const group of shown) {
++      if (group.hidden) {
++        expect(group.figures.every((figure) => figure === null)).toBe(true);
++      } else {
++        expect(group.people).toBeGreaterThanOrEqual(5);
++      }
++    }
++    if (checksDifferencing) {
++      expect(shown.filter((g) => g.hidden)).not.toHaveLength(1);
++    }
++  });
++
++  it.each(DISTRIBUTION_GROUPS.slice(1))(
++    'hides at least one %s group in the fixture, so the matrix is not vacuous',
++    async (groupBy) => {
++      const db = await testDb();
++      await fixture(db);
++      const { cookie } = await loggedInAs(db, 'finance');
++      app = testApp({ db });
++
++      const response = await app.inject({
++        method: 'GET',
++        url: `/api/insights/pay-distribution?groupBy=${groupBy}`,
++        headers: { cookie },
++      });
++
++      const groups = payDistributionResponseSchema.parse(response.json()).groups;
++      expect(groups.some((g) => g.suppressed)).toBe(true);
++    },
++  );
++});
+diff --git a/apps/api/src/modules/insights/pay-distribution.test.ts b/apps/api/src/modules/insights/pay-distribution.test.ts
+new file mode 100644
+index 0000000..79bac91
+--- /dev/null
++++ b/apps/api/src/modules/insights/pay-distribution.test.ts
+@@ -0,0 +1,207 @@
++import { payDistributionResponseSchema } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++
++describe('GET /api/insights/pay-distribution (I2)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<void>) {
++    const db = await testDb();
++    await seed(db);
++    const { cookie } = await loggedInAs(db, 'hr_admin');
++    app = testApp({ db });
++    return async (query = '') => {
++      const response = await app!.inject({
++        method: 'GET',
++        url: `/api/insights/pay-distribution${query}`,
++        headers: { cookie },
++      });
++      const body =
++        response.statusCode === 200
++          ? payDistributionResponseSchema.parse(response.json())
++          : undefined;
++      return { response, body };
++    };
++  }
++
++  // Rates: EUR 1.16, USD 1. Job titles: 1 Software Engineer and 2 Data Analyst (Engineering, 1),
++  // 3 Product Manager (Product, 2).
++  // Germany (EUR), Software Engineer L3: two women on 9_500_000 and a man on 10_000_000, which
++  //   is 11_020_000, 11_020_000 and 11_600_000 in USD.
++  // United States (USD): a Data Analyst L2 man on 8_000_000 and a Product Manager L1
++  //   non-binary employee on 6_000_000.
++  // A terminated US employee on 99_999_999 is left out.
++  async function fixture(db: Db) {
++    const german = () => anEmployee().inCountry('DE').withSalary(9_500_000);
++    await german().insert(db);
++    await german().insert(db);
++    await anEmployee().inCountry('DE').withSalary(10_000_000).withGender('male').insert(db);
++    await anEmployee()
++      .inCountry('US')
++      .withTitle(2)
++      .atLevel('L2')
++      .withGender('male')
++      .withSalary(8_000_000)
++      .insert(db);
++    await anEmployee()
++      .inCountry('US')
++      .withTitle(3)
++      .atLevel('L1')
++      .withGender('non_binary')
++      .withSalary(6_000_000)
++      .insert(db);
++    await anEmployee().inCountry('US').withSalary(99_999_999).terminatedOn('2025-06-30').insert(db);
++  }
++
++  it.each([
++    ['none', [['all', 'All active employees', 5]]],
++    [
++      'country',
++      [
++        ['DE', 'Germany', 3],
++        ['US', 'United States', 2],
++      ],
++    ],
++    [
++      'department',
++      [
++        ['1', 'Engineering', 4],
++        ['2', 'Product', 1],
++      ],
++    ],
++    [
++      'jobTitle',
++      [
++        ['2', 'Data Analyst', 1],
++        ['3', 'Product Manager', 1],
++        ['1', 'Software Engineer', 3],
++      ],
++    ],
++    [
++      'level',
++      [
++        ['L1', 'L1 Associate', 1],
++        ['L2', 'L2 Intermediate', 1],
++        ['L3', 'L3 Senior', 3],
++      ],
++    ],
++    [
++      'gender',
++      [
++        ['female', 'Female', 2],
++        ['male', 'Male', 2],
++        ['non_binary', 'Non-binary', 1],
++      ],
++    ],
++  ])('groups by %s in order', async (groupBy, expected) => {
++    const get = await setup(fixture);
++
++    const { response, body } = await get(`?groupBy=${groupBy}`);
++
++    expect(response.statusCode).toBe(200);
++    expect(body?.groupBy).toBe(groupBy);
++    expect(body?.fxAsOf).toBe('2026-09-30');
++    expect(body?.groups.map((g) => [g.key, g.label, g.headcount])).toEqual(expected);
++  });
++
++  it('groups by country when groupBy is left out', async () => {
++    const get = await setup(fixture);
++
++    expect((await get()).body?.groupBy).toBe('country');
++  });
++
++  it('gives the seven figures in USD and, for a one-currency group, in local money', async () => {
++    const get = await setup(fixture);
++
++    const { body } = await get('?groupBy=country');
++
++    const usd = (amountMinor: number) => ({ amountMinor, currency: 'USD' });
++    const eur = (amountMinor: number) => ({ amountMinor, currency: 'EUR' });
++    expect(body?.groups[0]).toEqual({
++      key: 'DE',
++      label: 'Germany',
++      headcount: 3,
++      suppressed: false,
++      usd: {
++        min: usd(11_020_000),
++        p25: usd(11_020_000),
++        median: usd(11_020_000),
++        p75: usd(11_310_000),
++        max: usd(11_600_000),
++        average: usd(11_213_333),
++        total: usd(33_640_000),
++      },
++      local: {
++        min: eur(9_500_000),
++        p25: eur(9_500_000),
++        median: eur(9_500_000),
++        p75: eur(9_750_000),
++        max: eur(10_000_000),
++        average: eur(9_666_667),
++        total: eur(29_000_000),
++      },
++    });
++  });
++
++  it('leaves local out for a group that spans currencies', async () => {
++    const get = await setup(fixture);
++
++    const { body } = await get('?groupBy=department');
++
++    expect(body?.groups[0]?.usd).not.toBeNull();
++    expect(body?.groups[0]?.local).toBeNull();
++  });
++
++  it('applies the filters and echoes them', async () => {
++    const get = await setup(fixture);
++
++    const { body } = await get('?groupBy=gender&country=DE&department=1&jobTitle=1&level=L3');
++
++    expect(body?.filters).toEqual({
++      countries: ['DE'],
++      departmentIds: [1],
++      jobTitleIds: [1],
++      levelCodes: ['L3'],
++      genders: [],
++    });
++    expect(body?.groups.map((g) => [g.key, g.headcount])).toEqual([
++      ['female', 2],
++      ['male', 1],
++    ]);
++  });
++
++  it('filters by gender', async () => {
++    const get = await setup(fixture);
++
++    const { body } = await get('?groupBy=country&gender=male');
++
++    expect(body?.filters.genders).toEqual(['male']);
++    expect(body?.groups.map((g) => [g.key, g.headcount])).toEqual([
++      ['DE', 1],
++      ['US', 1],
++    ]);
++  });
++
++  it('returns no groups when nothing matches', async () => {
++    const get = await setup(fixture);
++
++    const { response, body } = await get('?country=IN');
++
++    expect(response.statusCode).toBe(200);
++    expect(body?.groups).toEqual([]);
++  });
++
++  it.each(['groupBy=salary', 'country=ZZ', 'band=below'])('rejects %s with 400', async (query) => {
++    const get = await setup(fixture);
++
++    expect((await get(`?${query}`)).response.statusCode).toBe(400);
++  });
++});
+diff --git a/apps/api/src/modules/insights/pay-equity.test.ts b/apps/api/src/modules/insights/pay-equity.test.ts
+new file mode 100644
+index 0000000..444525b
+--- /dev/null
++++ b/apps/api/src/modules/insights/pay-equity.test.ts
+@@ -0,0 +1,168 @@
++import { payEquityResponseSchema } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++import type { Role } from '../../db/schema.ts';
++
++describe('GET /api/insights/pay-equity (I3)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<void>, role: Role = 'hr_admin') {
++    const db = await testDb();
++    await seed(db);
++    const { cookie } = await loggedInAs(db, role);
++    app = testApp({ db });
++    return async (query = '') => {
++      const response = await app!.inject({
++        method: 'GET',
++        url: `/api/insights/pay-equity${query}`,
++        headers: { cookie },
++      });
++      const body =
++        response.statusCode === 200 ? payEquityResponseSchema.parse(response.json()) : undefined;
++      return { response, body };
++    };
++  }
++
++  // Rates: EUR 1.16, INR 0.0115, USD 1. Three cohorts, all active:
++  // Germany, Software Engineer, L3 (EUR): 5 women on 9_000_000, 5 men on 10_000_000. Mean gap
++  //   10.0%, flagged.
++  // United States, Software Engineer, L3 (USD): 5 women on 14_000_000, 5 men on 14_200_000.
++  //   Gap 1.4%, comparable, not flagged.
++  // India, Data Analyst, L2 (INR): 4 women and 5 men, all on 100_000_000. Not comparable.
++  // A terminated US woman on 1 is left out.
++  // Org in USD: 14 women, mean 9_057_143 (126_800_000 / 14), median 10_440_000; 15 men, mean
++  //   8_983_333 (134_750_000 / 15), median 11_600_000. Mean gap -0.8%, median gap 10.0%.
++  async function fixture(db: Db) {
++    const staff = async (
++      country: string,
++      gender: 'female' | 'male',
++      count: number,
++      salary: number,
++    ) => {
++      for (let i = 0; i < count; i++)
++        await anEmployee().inCountry(country).withGender(gender).withSalary(salary).insert(db);
++    };
++    await staff('DE', 'female', 5, 9_000_000);
++    await staff('DE', 'male', 5, 10_000_000);
++    await staff('US', 'female', 5, 14_000_000);
++    await staff('US', 'male', 5, 14_200_000);
++    const analyst = async (gender: 'female' | 'male', count: number) => {
++      for (let i = 0; i < count; i++)
++        await anEmployee()
++          .inCountry('IN')
++          .withTitle(2)
++          .atLevel('L2')
++          .withGender(gender)
++          .withSalary(100_000_000)
++          .insert(db);
++    };
++    await analyst('female', 4);
++    await analyst('male', 5);
++    await anEmployee().inCountry('US').withSalary(1).terminatedOn('2025-06-30').insert(db);
++  }
++
++  const cohortKeys = (body: { cohorts: { country: { code: string }; flagged: boolean }[] }) =>
++    body.cohorts.map((c) => [c.country.code, c.flagged]);
++
++  it('returns the flagged cohort first and hides the not-comparable one', async () => {
++    const get = await setup(fixture);
++
++    const { response, body } = await get();
++
++    expect(response.statusCode).toBe(200);
++    expect(body).toMatchObject({
++      fxAsOf: '2026-09-30',
++      thresholdPct: 5,
++      minPerGender: 5,
++      org: { meanGapPct: -0.8, medianGapPct: 10, women: 14, men: 15, basis: 'usd' },
++      cohortCounts: { withEmployees: 3, comparable: 2, flagged: 1 },
++    });
++    expect(body?.cohorts).toEqual([
++      {
++        country: { code: 'DE', name: 'Germany' },
++        jobTitle: { id: 1, name: 'Software Engineer' },
++        level: { code: 'L3', name: 'Senior' },
++        comparable: true,
++        women: 5,
++        men: 5,
++        meanWomen: { amountMinor: 9_000_000, currency: 'EUR' },
++        meanMen: { amountMinor: 10_000_000, currency: 'EUR' },
++        gapPct: 10,
++        flagged: true,
++      },
++      expect.objectContaining({ country: { code: 'US', name: 'United States' }, gapPct: 1.4 }),
++    ]);
++  });
++
++  it('adds the not-comparable cohort, last and without numbers, when asked', async () => {
++    const get = await setup(fixture);
++
++    const { body } = await get('?includeNotComparable=true');
++
++    expect(cohortKeys(body!)).toEqual([
++      ['DE', true],
++      ['US', false],
++      ['IN', false],
++    ]);
++    expect(body?.cohorts[2]).toEqual({
++      country: { code: 'IN', name: 'India' },
++      jobTitle: { id: 2, name: 'Data Analyst' },
++      level: { code: 'L2', name: 'Intermediate' },
++      comparable: false,
++      women: null,
++      men: null,
++      meanWomen: null,
++      meanMen: null,
++      gapPct: null,
++      flagged: false,
++    });
++  });
++
++  it('keeps only flagged cohorts with flaggedOnly, and the counts as before', async () => {
++    const get = await setup(fixture);
++
++    const { body } = await get('?flaggedOnly=true&includeNotComparable=true');
++
++    expect(cohortKeys(body!)).toEqual([['DE', true]]);
++    expect(body?.cohortCounts).toEqual({ withEmployees: 3, comparable: 2, flagged: 1 });
++  });
++
++  it('filters cohorts and their counts by country and department, not the org figures', async () => {
++    const get = await setup(fixture);
++
++    const byCountry = (await get('?country=US')).body;
++    const byDepartment = (await get('?department=2')).body;
++
++    expect(cohortKeys(byCountry!)).toEqual([['US', false]]);
++    expect(byCountry?.cohortCounts).toEqual({ withEmployees: 1, comparable: 1, flagged: 0 });
++    expect(byCountry?.org).toMatchObject({ women: 14, men: 15 });
++    expect(byDepartment?.cohorts).toEqual([]);
++    expect(byDepartment?.cohortCounts).toEqual({ withEmployees: 0, comparable: 0, flagged: 0 });
++  });
++
++  it('gives Finance and HR the same body (D-047)', async () => {
++    const hr = (await (await setup(fixture, 'hr_viewer'))('?includeNotComparable=true')).body;
++    await app?.close();
++    const finance = (await (await setup(fixture, 'finance'))('?includeNotComparable=true')).body;
++
++    expect(finance).toEqual(hr);
++    expect(finance?.cohorts).toHaveLength(3);
++  });
++
++  it.each(['country=ZZ', 'department=99', 'flaggedOnly=maybe', 'groupBy=country'])(
++    'rejects %s with 400',
++    async (query) => {
++      const get = await setup(fixture);
++
++      expect((await get(`?${query}`)).response.statusCode).toBe(400);
++    },
++  );
++});
+diff --git a/apps/api/src/modules/insights/repo.ts b/apps/api/src/modules/insights/repo.ts
+new file mode 100644
+index 0000000..f48aa5e
+--- /dev/null
++++ b/apps/api/src/modules/insights/repo.ts
+@@ -0,0 +1,117 @@
++import { and, asc, eq, inArray, type SQL } from 'drizzle-orm';
++import type { Db } from '../../db/client.ts';
++import {
++  countries,
++  departments,
++  employees,
++  fxRates,
++  jobTitles,
++  levels,
++  payBands,
++  type Gender,
++  type LevelCode,
++} from '../../db/schema.ts';
++import { GENDERS } from '../../domain/genders.ts';
++import type { PayRow } from '../../domain/pay-query.ts';
++
++export interface PayFilters {
++  countries?: string[];
++  departmentIds?: number[];
++  jobTitleIds?: number[];
++  levelCodes?: string[];
++  genders?: string[];
++}
++
++function filterConditions(filters: PayFilters): SQL[] {
++  const conditions: SQL[] = [eq(employees.status, 'active')];
++  if (filters.countries?.length) conditions.push(inArray(employees.countryCode, filters.countries));
++  if (filters.departmentIds?.length) {
++    conditions.push(inArray(jobTitles.departmentId, filters.departmentIds));
++  }
++  if (filters.jobTitleIds?.length) {
++    conditions.push(inArray(employees.jobTitleId, filters.jobTitleIds));
++  }
++  if (filters.levelCodes?.length) {
++    conditions.push(inArray(employees.levelCode, filters.levelCodes as LevelCode[]));
++  }
++  if (filters.genders?.length)
++    conditions.push(inArray(employees.gender, filters.genders as Gender[]));
++  return conditions;
++}
++
++// Every active employee as a pay row (D-016), with the band and FX rate its figures need.
++export async function loadActivePayRows(db: Db, filters: PayFilters = {}): Promise<PayRow[]> {
++  return db
++    .select({
++      countryCode: employees.countryCode,
++      departmentId: jobTitles.departmentId,
++      jobTitleId: employees.jobTitleId,
++      levelCode: employees.levelCode,
++      gender: employees.gender,
++      salaryMinor: employees.salaryMinor,
++      currency: employees.salaryCurrency,
++      usdPerUnitMicros: fxRates.usdPerUnitMicros,
++      bandMinMinor: payBands.minMinor,
++      bandMaxMinor: payBands.maxMinor,
++      salaryEffectiveDate: employees.salaryEffectiveDate,
++    })
++    .from(employees)
++    .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
++    .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
++    .innerJoin(
++      payBands,
++      and(
++        eq(payBands.countryCode, employees.countryCode),
++        eq(payBands.jobTitleId, employees.jobTitleId),
++        eq(payBands.levelCode, employees.levelCode),
++      ),
++    )
++    .where(and(...filterConditions(filters)))
++    .orderBy(asc(employees.id));
++}
++
++export async function loadCountryNames(db: Db): Promise<Record<string, string>> {
++  const rows = await db.select({ code: countries.code, name: countries.name }).from(countries);
++  return Object.fromEntries(rows.map((r) => [r.code, r.name]));
++}
++
++async function namesOf(
++  rows: Promise<{ key: string | number; name: string }[]>,
++): Promise<Record<string, string>> {
++  return Object.fromEntries((await rows).map((r) => [String(r.key), r.name]));
++}
++
++// Group labels for the I2 dimensions, keyed as the engine keys its groups.
++export async function loadGroupLabels(
++  db: Db,
++  groupBy: 'country' | 'department' | 'jobTitle' | 'level' | 'gender',
++): Promise<Record<string, string>> {
++  switch (groupBy) {
++    case 'country':
++      return loadCountryNames(db);
++    case 'department':
++      return namesOf(db.select({ key: departments.id, name: departments.name }).from(departments));
++    case 'jobTitle':
++      return namesOf(db.select({ key: jobTitles.id, name: jobTitles.name }).from(jobTitles));
++    case 'level':
++      return namesOf(
++        db
++          .select({ key: levels.code, name: levels.name })
++          .from(levels)
++          .then((rows) => rows.map((r) => ({ key: r.key, name: `${r.key} ${r.name}` }))),
++      );
++    case 'gender':
++      return Object.fromEntries(GENDERS.map((g) => [g.code, g.name]));
++  }
++}
++
++// Names for the I3 cohort labels, keyed by job title id and by level code.
++export async function loadCohortNames(
++  db: Db,
++): Promise<{ jobTitles: Record<string, string>; levels: Record<string, string> }> {
++  const [titles, levelRows] = await Promise.all([
++    namesOf(db.select({ key: jobTitles.id, name: jobTitles.name }).from(jobTitles)),
++    namesOf(db.select({ key: levels.code, name: levels.name }).from(levels)),
++  ]);
++  return { jobTitles: titles, levels: levelRows };
++}
+diff --git a/apps/api/src/modules/insights/routes.test.ts b/apps/api/src/modules/insights/routes.test.ts
+new file mode 100644
+index 0000000..f3eb186
+--- /dev/null
++++ b/apps/api/src/modules/insights/routes.test.ts
+@@ -0,0 +1,184 @@
++import { insightsSummaryResponseSchema } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++import { fixedClock } from '../../domain/clock.ts';
++import type { Role } from '../../db/schema.ts';
++
++describe('GET /api/insights/summary (I1)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(
++    seed: (db: Db) => Promise<void>,
++    options: { role?: Role; today?: string } = {},
++  ) {
++    const db = await testDb();
++    await seed(db);
++    const { cookie } = await loggedInAs(db, options.role ?? 'hr_admin', {
++      ...(options.today ? { createdAt: `${options.today}T08:00:00.000Z` } : {}),
++    });
++    app = testApp({
++      db,
++      ...(options.today ? { clock: fixedClock(`${options.today}T09:00:00.000Z`) } : {}),
++    });
++    return (query = '') =>
++      app!.inject({ method: 'GET', url: `/api/insights/summary${query}`, headers: { cookie } });
++  }
++
++  // Software Engineer, L3 everywhere. Band limits (minor units): Germany 7_600_000 to
++  // 11_400_000 EUR, India 164_000_000 to 246_000_000 INR, United States 11_800_000 to
++  // 17_600_000 USD. Rates: EUR 1.16, INR 0.0115, USD 1. "Today" is 2026-10-09, so salaries
++  // unchanged since before 2024-10-09 are stale; the hire date is 2022-01-10.
++  //
++  // Germany, 5 people (EUR): 3 x 9_500_000 inside and changed in 2025; 7_000_000 below;
++  //   12_000_000 above; the last two never changed. Local 47_500_000; USD 55_100_000.
++  // India, 3 people (INR): 2 x 205_000_000 inside, 100_000_000 below, none changed.
++  //   Local 510_000_000; USD 4_715_000 + 1_150_000 = 5_865_000.
++  // United States, 5 people (USD): 14_700_000 inside x 4, one changed on 2024-10-09 (not
++  //   stale), one on 2024-10-08 (stale), two in 2025; 20_000_000 above, changed in 2025.
++  //   Total 78_800_000.
++  // One terminated US employee on 99_999_999 is left out everywhere.
++  async function fixture(db: Db) {
++    const german = () => anEmployee().inCountry('DE').withSalary(9_500_000);
++    for (let i = 0; i < 3; i++)
++      await german()
++        .withHistory([merit('2025-03-01', 0)])
++        .insert(db);
++    await anEmployee().inCountry('DE').withSalary(7_000_000).insert(db);
++    await anEmployee().inCountry('DE').withSalary(12_000_000).insert(db);
++    for (let i = 0; i < 2; i++)
++      await anEmployee().inCountry('IN').withSalary(205_000_000).insert(db);
++    await anEmployee().inCountry('IN').withSalary(100_000_000).insert(db);
++    const american = () => anEmployee().inCountry('US').withSalary(14_700_000);
++    await american()
++      .withHistory([merit('2024-10-09', 0)])
++      .insert(db);
++    await american()
++      .withHistory([merit('2024-10-08', 0)])
++      .insert(db);
++    for (let i = 0; i < 2; i++)
++      await american()
++        .withHistory([merit('2025-03-01', 0)])
++        .insert(db);
++    await anEmployee()
++      .inCountry('US')
++      .withSalary(20_000_000)
++      .withHistory([merit('2025-03-01', 0)])
++      .insert(db);
++    await anEmployee().inCountry('US').withSalary(99_999_999).terminatedOn('2025-06-30').insert(db);
++  }
++
++  it('matches the hand-computed fixture', async () => {
++    const get = await setup(fixture);
++
++    const response = await get();
++
++    expect(response.statusCode).toBe(200);
++    expect(insightsSummaryResponseSchema.parse(response.json())).toEqual({
++      fxAsOf: '2026-09-30',
++      headcount: 13,
++      payrollUsd: { amountMinor: 139_765_000, currency: 'USD' },
++      byCountry: [
++        {
++          country: { code: 'DE', name: 'Germany' },
++          headcount: 5,
++          suppressed: false,
++          payrollLocal: { amountMinor: 47_500_000, currency: 'EUR' },
++          payrollUsd: { amountMinor: 55_100_000, currency: 'USD' },
++        },
++        {
++          country: { code: 'IN', name: 'India' },
++          headcount: 3,
++          suppressed: false,
++          payrollLocal: { amountMinor: 510_000_000, currency: 'INR' },
++          payrollUsd: { amountMinor: 5_865_000, currency: 'USD' },
++        },
++        {
++          country: { code: 'US', name: 'United States' },
++          headcount: 5,
++          suppressed: false,
++          payrollLocal: { amountMinor: 78_800_000, currency: 'USD' },
++          payrollUsd: { amountMinor: 78_800_000, currency: 'USD' },
++        },
++      ],
++      outsideBand: { below: 2, above: 2, total: 4 },
++      staleSalaries: { since: '2024-10-09', count: 6 },
++    });
++  });
++
++  it('leaves terminated employees out of every figure', async () => {
++    const get = await setup(async (db) => {
++      await anEmployee().inCountry('US').withSalary(10_000_000).insert(db);
++      await anEmployee()
++        .inCountry('US')
++        .withSalary(99_999_999)
++        .terminatedOn('2025-06-30')
++        .insert(db);
++    });
++
++    const body = insightsSummaryResponseSchema.parse((await get()).json());
++
++    expect(body.headcount).toBe(1);
++    expect(body.payrollUsd.amountMinor).toBe(10_000_000);
++    expect(body.byCountry).toHaveLength(1);
++    expect(body.outsideBand.total).toBe(1);
++    expect(body.staleSalaries.count).toBe(1);
++  });
++
++  it.each([
++    ['2026-10-09', '2024-10-09'],
++    ['2027-03-15', '2025-03-15'],
++  ])('staleSalaries.since on %s is %s, two years earlier', async (today, since) => {
++    const get = await setup(async () => {}, { today });
++
++    const body = insightsSummaryResponseSchema.parse((await get()).json());
++
++    expect(body.staleSalaries.since).toBe(since);
++  });
++
++  it('shows Finance a 3-person country as suppressed and HR Admin its numbers', async () => {
++    const finance = insightsSummaryResponseSchema.parse(
++      (await (await setup(fixture, { role: 'finance' }))()).json(),
++    );
++    await app?.close();
++    const hr = insightsSummaryResponseSchema.parse(
++      (await (await setup(fixture, { role: 'hr_admin' }))()).json(),
++    );
++
++    expect(finance.byCountry.find((c) => c.country.code === 'IN')).toEqual({
++      country: { code: 'IN', name: 'India' },
++      headcount: null,
++      suppressed: true,
++      payrollLocal: null,
++      payrollUsd: null,
++    });
++    // With only India hidden, Finance could subtract the others from the total (D-071), so
++    // the smallest visible country, Germany (tied with the United States on 5, by code), goes too.
++    expect(finance.byCountry.find((c) => c.country.code === 'DE')).toMatchObject({
++      headcount: null,
++      suppressed: true,
++      payrollLocal: null,
++      payrollUsd: null,
++    });
++    expect(finance.byCountry.find((c) => c.country.code === 'US')?.suppressed).toBe(false);
++    expect(finance.headcount).toBe(13);
++    expect(hr.byCountry.find((c) => c.country.code === 'IN')).toMatchObject({
++      headcount: 3,
++      suppressed: false,
++      payrollUsd: { amountMinor: 5_865_000, currency: 'USD' },
++    });
++  });
++
++  it('rejects an unknown query parameter', async () => {
++    const get = await setup(async () => {});
++
++    expect((await get('?country=US')).statusCode).toBe(400);
++  });
++});
+diff --git a/apps/api/src/modules/insights/routes.ts b/apps/api/src/modules/insights/routes.ts
+new file mode 100644
+index 0000000..01461ed
+--- /dev/null
++++ b/apps/api/src/modules/insights/routes.ts
+@@ -0,0 +1,41 @@
++import {
++  insightsSummaryQuerySchema,
++  payDistributionQuerySchema,
++  payEquityQuerySchema,
++  type InsightsSummaryResponse,
++  type PayDistributionQuery,
++  type PayDistributionResponse,
++  type PayEquityQuery,
++  type PayEquityResponse,
++} from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
++import { requires } from '../../http/guard.ts';
++import { getPayDistribution, getPayEquity, getSummary } from './service.ts';
++
++export function insightsRoutes(app: FastifyInstance, deps: { db: Db; clock: Clock }) {
++  // I1 (04 section 5.6).
++  app.get(
++    '/api/insights/summary',
++    { onRequest: requires('insights.read'), schema: { querystring: insightsSummaryQuerySchema } },
++    async (request): Promise<InsightsSummaryResponse> =>
++      getSummary(deps.db, request.viewer!, deps.clock.today()),
++  );
++
++  // I2 (04 section 5.6).
++  app.get(
++    '/api/insights/pay-distribution',
++    { onRequest: requires('insights.read'), schema: { querystring: payDistributionQuerySchema } },
++    async (request): Promise<PayDistributionResponse> =>
++      getPayDistribution(deps.db, request.viewer!, request.query as PayDistributionQuery),
++  );
++
++  // I3 (04 section 5.6).
++  app.get(
++    '/api/insights/pay-equity',
++    { onRequest: requires('insights.read'), schema: { querystring: payEquityQuerySchema } },
++    async (request): Promise<PayEquityResponse> =>
++      getPayEquity(deps.db, request.query as PayEquityQuery),
++  );
++}
+diff --git a/apps/api/src/modules/insights/service.ts b/apps/api/src/modules/insights/service.ts
+new file mode 100644
+index 0000000..0b7a183
+--- /dev/null
++++ b/apps/api/src/modules/insights/service.ts
+@@ -0,0 +1,189 @@
++import type {
++  InsightsSummaryResponse,
++  Money,
++  PayDistributionQuery,
++  PayDistributionResponse,
++  PayEquityQuery,
++  PayEquityResponse,
++} from '@acme/shared';
++import type { Db } from '../../db/client.ts';
++import type { Role } from '../../db/schema.ts';
++import { aggregateMinGroupSize } from '../../domain/permissions.ts';
++import { aggregatePay, KEY_OF, type Metric, type PayStats } from '../../domain/pay-query.ts';
++import { fxAsOf } from '../auth/sessions.ts';
++import { checkListValues } from '../employees/service.ts';
++import { FLAG_THRESHOLD_PCT, MIN_PER_GENDER, computePayEquity } from '../../domain/pay-equity.ts';
++import { loadActivePayRows, loadCohortNames, loadCountryNames, loadGroupLabels } from './repo.ts';
++
++const SUMMARY_METRICS: Metric[] = ['headcount', 'total', 'outsideBandCount'];
++
++// Today minus two years, the same date SQLite's date(today, '-2 years') gives.
++function twoYearsBefore(today: string): string {
++  const date = new Date(`${today}T00:00:00.000Z`);
++  date.setUTCFullYear(date.getUTCFullYear() - 2);
++  return date.toISOString().slice(0, 10);
++}
++
++const usd = (amountMinor: number) => ({ amountMinor, currency: 'USD' });
++
++// I1 (04 section 5.6): one projection, the engine run twice (none, country).
++export async function getSummary(
++  db: Db,
++  viewer: { role: Role },
++  today: string,
++): Promise<InsightsSummaryResponse> {
++  const [rows, countryNames, asOf] = await Promise.all([
++    loadActivePayRows(db),
++    loadCountryNames(db),
++    fxAsOf(db),
++  ]);
++  const minSize = aggregateMinGroupSize(viewer.role);
++  const [all] = aggregatePay(rows, SUMMARY_METRICS, 'none', minSize);
++  const countries = aggregatePay(rows, SUMMARY_METRICS, 'country', minSize, countryNames);
++  const currencyOf = new Map(rows.map((r) => [r.countryCode, r.currency]));
++  const since = twoYearsBefore(today);
++
++  return {
++    fxAsOf: asOf,
++    headcount: all?.headcount ?? 0,
++    payrollUsd: usd(all?.usd?.total ?? 0),
++    byCountry: countries.map((group) => ({
++      country: { code: group.key, name: group.label },
++      headcount: group.headcount,
++      suppressed: group.suppressed,
++      payrollLocal: group.local
++        ? { amountMinor: group.local.total!, currency: currencyOf.get(group.key)! }
++        : null,
++      payrollUsd: group.usd ? usd(group.usd.total!) : null,
++    })),
++    outsideBand: all?.outsideBand ?? { below: 0, above: 0, total: 0 },
++    staleSalaries: {
++      since,
++      count: rows.filter((r) => r.salaryEffectiveDate < since).length,
++    },
++  };
++}
++
++const DISTRIBUTION_METRICS: Metric[] = [
++  'headcount',
++  'min',
++  'p25',
++  'median',
++  'p75',
++  'max',
++  'average',
++  'total',
++];
++
++function moneyStats(stats: PayStats, currency: string) {
++  const money = (amountMinor: number | undefined): Money => ({
++    amountMinor: amountMinor!,
++    currency,
++  });
++  return {
++    min: money(stats.min),
++    p25: money(stats.p25),
++    median: money(stats.median),
++    p75: money(stats.p75),
++    max: money(stats.max),
++    average: money(stats.average),
++    total: money(stats.total),
++  };
++}
++
++// I2 (04 section 5.6): filters in SQL, then the engine once for the chosen dimension.
++export async function getPayDistribution(
++  db: Db,
++  viewer: { role: Role },
++  query: PayDistributionQuery,
++): Promise<PayDistributionResponse> {
++  await checkListValues(db, query);
++  const filters = {
++    countries: query.country ?? [],
++    departmentIds: (query.department ?? []).map(Number),
++    jobTitleIds: (query.jobTitle ?? []).map(Number),
++    levelCodes: query.level ?? [],
++    genders: query.gender ?? [],
++  };
++  const { groupBy } = query;
++  const [rows, labels, asOf] = await Promise.all([
++    loadActivePayRows(db, filters),
++    groupBy === 'none' ? Promise.resolve({}) : loadGroupLabels(db, groupBy),
++    fxAsOf(db),
++  ]);
++  const groups = aggregatePay(
++    rows,
++    DISTRIBUTION_METRICS,
++    groupBy,
++    aggregateMinGroupSize(viewer.role),
++    labels,
++  );
++  const currencyOf = new Map(
++    rows.map((r) => [groupBy === 'none' ? 'all' : KEY_OF[groupBy](r), r.currency]),
++  );
++
++  return {
++    fxAsOf: asOf,
++    groupBy,
++    filters,
++    groups: groups.map((group) => ({
++      key: group.key,
++      label: group.label,
++      headcount: group.headcount,
++      suppressed: group.suppressed,
++      usd: group.usd ? moneyStats(group.usd, 'USD') : null,
++      local: group.local ? moneyStats(group.local, currencyOf.get(group.key)!) : null,
++    })),
++  };
++}
++
++// I3 (04 section 5.6). The org gap compares every active woman with every man (D-013), so the
++// filters narrow the cohorts only. Every role gets the same body (D-047).
++export async function getPayEquity(db: Db, query: PayEquityQuery): Promise<PayEquityResponse> {
++  await checkListValues(db, query);
++  const [rows, countryNames, names, asOf] = await Promise.all([
++    loadActivePayRows(db),
++    loadCountryNames(db),
++    loadCohortNames(db),
++    fxAsOf(db),
++  ]);
++  const departmentIds = (query.department ?? []).map(Number);
++  const inScope = rows.filter(
++    (r) =>
++      (!query.country?.length || query.country.includes(r.countryCode)) &&
++      (departmentIds.length === 0 || departmentIds.includes(r.departmentId)),
++  );
++  const { org } = computePayEquity(rows);
++  const { cohorts } = computePayEquity(inScope);
++  const comparable = cohorts.filter((c) => c.comparable);
++  const shown = [
++    ...comparable.sort((a, b) => b.gapPct! - a.gapPct!),
++    ...(query.includeNotComparable ? cohorts.filter((c) => !c.comparable) : []),
++  ].filter((c) => !query.flaggedOnly || c.flagged);
++
++  return {
++    fxAsOf: asOf,
++    thresholdPct: FLAG_THRESHOLD_PCT,
++    minPerGender: MIN_PER_GENDER,
++    org: { ...org, basis: 'usd' },
++    cohortCounts: {
++      withEmployees: cohorts.length,
++      comparable: comparable.length,
++      flagged: cohorts.filter((c) => c.flagged).length,
++    },
++    cohorts: shown.map((c) => ({
++      country: { code: c.countryCode, name: countryNames[c.countryCode]! },
++      jobTitle: { id: c.jobTitleId, name: names.jobTitles[c.jobTitleId]! },
++      level: { code: c.levelCode, name: names.levels[c.levelCode]! },
++      comparable: c.comparable,
++      women: c.women,
++      men: c.men,
++      meanWomen:
++        c.meanWomenMinor === null ? null : { amountMinor: c.meanWomenMinor, currency: c.currency },
++      meanMen:
++        c.meanMenMinor === null ? null : { amountMinor: c.meanMenMinor, currency: c.currency },
++      gapPct: c.gapPct,
++      flagged: c.flagged,
++    })),
++  };
++}
+diff --git a/apps/web/package.json b/apps/web/package.json
+index 667bf3e..333ef33 100644
+--- a/apps/web/package.json
++++ b/apps/web/package.json
+@@ -10,4 +10,5 @@
+   "dependencies": {
+     "@acme/shared": "0.0.0",
++    "@mantine/charts": "9.7.1",
+     "@mantine/core": "9.7.1",
+     "@mantine/hooks": "9.7.1",
+@@ -15,5 +16,6 @@
+     "react": "19.2.8",
+     "react-dom": "19.2.8",
+-    "react-router": "8.4.0"
++    "react-router": "8.4.0",
++    "recharts": "3.10.1"
+   },
+   "devDependencies": {
+diff --git a/apps/web/src/AppRoutes.tsx b/apps/web/src/AppRoutes.tsx
+index 772dfdd..7753ae9 100644
+--- a/apps/web/src/AppRoutes.tsx
++++ b/apps/web/src/AppRoutes.tsx
+@@ -8,4 +8,6 @@ import { EmployeeDetailPage } from './features/employees/EmployeeDetailPage.tsx'
+ import { NewEmployeePage } from './features/employees/NewEmployeePage.tsx';
+ import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
++import { InsightsPage } from './features/insights/InsightsPage.tsx';
++import { PayEquityPage } from './features/insights/PayEquityPage.tsx';
+ import { LoginPage } from './features/auth/LoginPage.tsx';
+ import { landingPath } from './features/auth/useSession.ts';
+@@ -17,4 +19,6 @@ const SCREENS: Record<string, ComponentType> = {
+   '/employees/new': NewEmployeePage,
+   '/employees/:id': EmployeeDetailPage,
++  '/insights': InsightsPage,
++  '/insights/pay-equity': PayEquityPage,
+ };
+ 
+diff --git a/apps/web/src/features/insights/InsightsPage.test.tsx b/apps/web/src/features/insights/InsightsPage.test.tsx
+new file mode 100644
+index 0000000..4c2759c
+--- /dev/null
++++ b/apps/web/src/features/insights/InsightsPage.test.tsx
+@@ -0,0 +1,143 @@
++import type { PayDistributionResponse, Role } from '@acme/shared';
++import { screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { useLocation } from 'react-router';
++import { describe, expect, it } from 'vitest';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aDistributionResponse, aSummaryResponse } from '../../../test/fixtures/insights.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const Location = () => {
++  const { pathname, search } = useLocation();
++  return <output aria-label="location">{pathname + search}</output>;
++};
++
++const renderInsights = (route = '/insights') =>
++  render(
++    <>
++      <AppRoutes />
++      <Location />
++    </>,
++    { route },
++  );
++
++/** Serves the summary and the distribution; records each distribution request's query. */
++function servesInsights(
++  role: Role,
++  distribution: (groupBy: string) => PayDistributionResponse = () => aDistributionResponse(),
++  requests: URLSearchParams[] = [],
++) {
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))),
++    http.get('/api/insights/summary', () => HttpResponse.json(aSummaryResponse())),
++    http.get('/api/insights/pay-distribution', ({ request }) => {
++      const params = new URL(request.url).searchParams;
++      requests.push(params);
++      return HttpResponse.json(distribution(params.get('groupBy') ?? 'country'));
++    }),
++  );
++}
++
++describe('insights page (04 section 8.5, S-8)', () => {
++  it('shows "Hidden to protect small groups" on a suppressed row', async () => {
++    servesInsights('finance');
++
++    renderInsights();
++
++    const table = await screen.findByRole('table', { name: 'Pay distribution' });
++    const row = within(table).getByRole('row', { name: /India/ });
++    expect(within(row).getByText('Hidden to protect small groups')).toBeInTheDocument();
++    expect(within(table).getByRole('row', { name: /United States/ })).not.toHaveTextContent(
++      'Hidden to protect small groups',
++    );
++  });
++
++  it.each<Role>(['hr_admin', 'hr_viewer'])(
++    'links the outside-band and stale cards to the employee list for %s',
++    async (role) => {
++      servesInsights(role);
++
++      renderInsights();
++
++      const band = await screen.findByRole('link', { name: /Paid outside band/ });
++      expect(band).toHaveAttribute('href', '/employees?band=outside');
++      expect(band).toHaveTextContent('560');
++      expect(band).toHaveTextContent('281 below, 279 above');
++      const stale = screen.getByRole('link', { name: /No salary change since 9 Oct 2024/ });
++      expect(stale).toHaveAttribute('href', '/employees?salaryUnchangedSince=2024-10-09');
++      expect(stale).toHaveTextContent('1,234');
++    },
++  );
++
++  it('shows Finance the same two counts as plain text, not links', async () => {
++    servesInsights('finance');
++
++    renderInsights();
++
++    expect(await screen.findByText('Paid outside band')).toBeInTheDocument();
++    expect(screen.getByText('560')).toBeInTheDocument();
++    expect(screen.getByText('1,234')).toBeInTheDocument();
++    expect(screen.queryByRole('link', { name: /Paid outside band/ })).not.toBeInTheDocument();
++    expect(screen.queryByRole('link', { name: /No salary change since/ })).not.toBeInTheDocument();
++  });
++
++  it('shows each country its share of payroll: 0.0% for a tiny one, n/a for a hidden one', async () => {
++    servesInsights('finance');
++
++    renderInsights();
++
++    const table = await screen.findByRole('table', { name: 'Payroll by country' });
++    const us = within(table).getByRole('row', { name: /United States/ });
++    expect(within(us).getByText('99.0%')).toBeInTheDocument();
++    const germany = within(table).getByRole('row', { name: /Germany/ });
++    expect(within(germany).getByText('0.0%')).toBeInTheDocument();
++    const india = within(table).getByRole('row', { name: /India/ });
++    expect(within(india).getByText('n/a')).toBeInTheDocument();
++    expect(within(india).getByText('Hidden to protect small groups')).toBeInTheDocument();
++  });
++
++  it('changing "Group by" updates the URL, the request and the table', async () => {
++    const requests: URLSearchParams[] = [];
++    servesInsights(
++      'hr_admin',
++      (groupBy) =>
++        groupBy === 'department'
++          ? aDistributionResponse({
++              groupBy: 'department',
++              groups: [
++                {
++                  ...aDistributionResponse().groups[0]!,
++                  key: '1',
++                  label: 'Engineering',
++                },
++              ],
++            })
++          : aDistributionResponse(),
++      requests,
++    );
++    renderInsights();
++    const table = await screen.findByRole('table', { name: 'Pay distribution' });
++    expect(within(table).getByRole('row', { name: /United States/ })).toBeInTheDocument();
++
++    await userEvent.click(screen.getByRole('radio', { name: 'Department' }));
++
++    expect(await within(table).findByRole('row', { name: /Engineering/ })).toBeInTheDocument();
++    expect(screen.getByLabelText('location')).toHaveTextContent('/insights?groupBy=department');
++    expect(requests.at(-1)?.get('groupBy')).toBe('department');
++  });
++
++  it('sends the filters in the URL with the distribution request', async () => {
++    const requests: URLSearchParams[] = [];
++    servesInsights('hr_admin', () => aDistributionResponse(), requests);
++
++    renderInsights('/insights?country=IN,US&level=L3');
++
++    await screen.findByRole('table', { name: 'Pay distribution' });
++    expect(requests.at(-1)?.get('country')).toBe('IN,US');
++    expect(requests.at(-1)?.get('level')).toBe('L3');
++    expect(requests.at(-1)?.get('groupBy')).toBe('country');
++  });
++});
+diff --git a/apps/web/src/features/insights/InsightsPage.tsx b/apps/web/src/features/insights/InsightsPage.tsx
+new file mode 100644
+index 0000000..8f1c1cc
+--- /dev/null
++++ b/apps/web/src/features/insights/InsightsPage.tsx
+@@ -0,0 +1,311 @@
++import { sharePct } from '@acme/shared';
++import type {
++  InsightsSummaryResponse,
++  Money as MoneyValue,
++  PayDistributionResponse,
++} from '@acme/shared';
++import { BarChart } from '@mantine/charts';
++import {
++  Alert,
++  Button,
++  Card,
++  Group,
++  MultiSelect,
++  SegmentedControl,
++  Skeleton,
++  Stack,
++  Table,
++  Text,
++  Title,
++} from '@mantine/core';
++import type { ReactElement, ReactNode } from 'react';
++import { Link } from 'react-router';
++import { FxAsOf } from '../../components/FxAsOf.tsx';
++import { Money } from '../../components/Money.tsx';
++import { useViewer } from '../../components/Shell.tsx';
++import { formatDate, formatMoney, formatSharePct } from '../../format.ts';
++import { useReference } from '../employees/useReference.ts';
++import { useDistribution, useSummary } from './api.ts';
++import { useInsightsFilters } from './useInsightsFilters.ts';
++
++const HIDDEN = 'Hidden to protect small groups';
++const count = new Intl.NumberFormat('en-US');
++const GROUP_BY = [
++  { value: 'country', label: 'Country' },
++  { value: 'department', label: 'Department' },
++  { value: 'jobTitle', label: 'Job title' },
++  { value: 'level', label: 'Level' },
++  { value: 'gender', label: 'Gender' },
++];
++const STATS = ['min', 'p25', 'median', 'p75', 'max', 'average'] as const;
++const STAT_LABELS = ['Min', 'P25', 'Median', 'P75', 'Max', 'Average'];
++
++const usdTick = (minor: number) => formatMoney({ amountMinor: minor, currency: 'USD' });
++
++function SectionError({ message, retry }: { message: string; retry: () => void }): ReactElement {
++  return (
++    <Alert color="red">
++      <Group justify="space-between">
++        <Text>{message}</Text>
++        <Button variant="light" onClick={retry}>
++          Retry
++        </Button>
++      </Group>
++    </Alert>
++  );
++}
++
++function StatCard({
++  label,
++  value,
++  note,
++  to,
++}: {
++  label: string;
++  value: ReactNode;
++  note?: string;
++  to?: string;
++}): ReactElement {
++  const body = (
++    <>
++      <Text size="sm" c="dimmed">
++        {label}
++      </Text>
++      <Text size="xl" fw={700}>
++        {value}
++      </Text>
++      {note && (
++        <Text size="xs" c="dimmed">
++          {note}
++        </Text>
++      )}
++    </>
++  );
++  return to ? (
++    <Card withBorder component={Link} to={to}>
++      {body}
++    </Card>
++  ) : (
++    <Card withBorder>{body}</Card>
++  );
++}
++
++function Cards({
++  summary,
++  canDrillDown,
++}: {
++  summary: InsightsSummaryResponse;
++  canDrillDown: boolean;
++}) {
++  const { outsideBand, staleSalaries } = summary;
++  return (
++    <Group grow align="stretch">
++      <StatCard label="Active headcount" value={count.format(summary.headcount)} />
++      <StatCard label="Annual payroll (USD)" value={<Money value={summary.payrollUsd} />} />
++      <StatCard
++        label="Paid outside band"
++        value={count.format(outsideBand.total)}
++        note={`${count.format(outsideBand.below)} below, ${count.format(outsideBand.above)} above`}
++        to={canDrillDown ? '/employees?band=outside' : undefined}
++      />
++      <StatCard
++        label={`No salary change since ${formatDate(staleSalaries.since)}`}
++        value={count.format(staleSalaries.count)}
++        to={canDrillDown ? `/employees?salaryUnchangedSince=${staleSalaries.since}` : undefined}
++      />
++    </Group>
++  );
++}
++
++function PayrollByCountry({ summary }: { summary: InsightsSummaryResponse }): ReactElement {
++  const total = summary.payrollUsd.amountMinor;
++  const share = (usd: MoneyValue | null) =>
++    usd === null ? null : total === 0 ? 0 : sharePct(usd.amountMinor, total);
++  const chart = summary.byCountry
++    .filter((row) => row.payrollUsd !== null)
++    .map((row) => ({ country: row.country.name, payroll: row.payrollUsd?.amountMinor ?? 0 }));
++  return (
++    <Stack>
++      <Title order={2} size="h3">
++        Payroll by country
++      </Title>
++      <Table aria-label="Payroll by country" striped>
++        <Table.Thead>
++          <Table.Tr>
++            <Table.Th>Country</Table.Th>
++            <Table.Th>Headcount</Table.Th>
++            <Table.Th>Payroll local</Table.Th>
++            <Table.Th>Payroll USD</Table.Th>
++            <Table.Th>Share of payroll</Table.Th>
++          </Table.Tr>
++        </Table.Thead>
++        <Table.Tbody>
++          {summary.byCountry.map((row) => (
++            <Table.Tr key={row.country.code}>
++              <Table.Td>{row.country.name}</Table.Td>
++              {row.suppressed || row.payrollUsd === null || row.payrollLocal === null ? (
++                <Table.Td colSpan={3}>{HIDDEN}</Table.Td>
++              ) : (
++                <>
++                  <Table.Td>{count.format(row.headcount ?? 0)}</Table.Td>
++                  <Table.Td>
++                    <Money value={row.payrollLocal} />
++                  </Table.Td>
++                  <Table.Td>
++                    <Money value={row.payrollUsd} />
++                  </Table.Td>
++                </>
++              )}
++              <Table.Td>{formatSharePct(share(row.payrollUsd))}</Table.Td>
++            </Table.Tr>
++          ))}
++        </Table.Tbody>
++      </Table>
++      {chart.length > 0 && (
++        <BarChart
++          h={240}
++          data={chart}
++          dataKey="country"
++          series={[{ name: 'payroll', label: 'Payroll USD', color: 'blue.6' }]}
++          valueFormatter={usdTick}
++          yAxisProps={{ tickFormatter: usdTick, width: 90 }}
++        />
++      )}
++      <FxAsOf date={summary.fxAsOf} />
++    </Stack>
++  );
++}
++
++function DistributionRow({
++  group,
++}: {
++  group: PayDistributionResponse['groups'][number];
++}): ReactElement {
++  const { usd, local } = group;
++  return (
++    <Table.Tr>
++      <Table.Td>{group.label}</Table.Td>
++      {group.suppressed || usd === null ? (
++        <Table.Td colSpan={7}>{HIDDEN}</Table.Td>
++      ) : (
++        <>
++          <Table.Td>{count.format(group.headcount ?? 0)}</Table.Td>
++          {STATS.map((stat) => (
++            <Table.Td key={stat}>
++              <Money value={usd[stat]} display="block" />
++              {local && <Money value={local[stat]} display="block" size="xs" c="dimmed" />}
++            </Table.Td>
++          ))}
++        </>
++      )}
++    </Table.Tr>
++  );
++}
++
++function Distribution(): ReactElement {
++  const { query, setFilters } = useInsightsFilters();
++  const reference = useReference().data;
++  const distribution = useDistribution(query);
++  const data = distribution.data;
++  const options = {
++    country: (reference?.countries ?? []).map((c) => ({ value: c.code, label: c.name })),
++    department: (reference?.departments ?? []).map((d) => ({
++      value: String(d.id),
++      label: d.name,
++    })),
++    jobTitle: (reference?.jobTitles ?? []).map((t) => ({ value: String(t.id), label: t.name })),
++    level: (reference?.levels ?? []).map((l) => ({ value: l.code, label: `${l.code} ${l.name}` })),
++  };
++  const filter = (key: keyof typeof options, label: string) => (
++    <MultiSelect
++      label={label}
++      data={options[key]}
++      value={query[key] ?? []}
++      onChange={(values) => setFilters({ [key]: values.length > 0 ? values : undefined })}
++      clearable
++    />
++  );
++  const chart = (data?.groups ?? [])
++    .filter((group) => group.usd !== null)
++    .map((group) => ({ group: group.label, median: group.usd?.median.amountMinor ?? 0 }));
++  return (
++    <Stack>
++      <Title order={2} size="h3">
++        Pay distribution
++      </Title>
++      <SegmentedControl
++        aria-label="Group by"
++        data={GROUP_BY}
++        value={query.groupBy}
++        onChange={(value) => setFilters({ groupBy: value as typeof query.groupBy })}
++      />
++      <Group align="flex-end" gap="sm">
++        {filter('country', 'Country')}
++        {filter('department', 'Department')}
++        {filter('jobTitle', 'Job title')}
++        {filter('level', 'Level')}
++      </Group>
++      {distribution.isError && (
++        <SectionError
++          message={distribution.error.message}
++          retry={() => void distribution.refetch()}
++        />
++      )}
++      {!data && !distribution.isError && <Skeleton height={120} />}
++      {data && data.groups.length === 0 && <Text>No active employees match these filters.</Text>}
++      {data && data.groups.length > 0 && (
++        <>
++          <Table aria-label="Pay distribution" striped>
++            <Table.Thead>
++              <Table.Tr>
++                <Table.Th>Group</Table.Th>
++                <Table.Th>Headcount</Table.Th>
++                {STAT_LABELS.map((label) => (
++                  <Table.Th key={label}>{label}</Table.Th>
++                ))}
++              </Table.Tr>
++            </Table.Thead>
++            <Table.Tbody>
++              {data.groups.map((group) => (
++                <DistributionRow key={group.key} group={group} />
++              ))}
++            </Table.Tbody>
++          </Table>
++          {chart.length > 0 && (
++            <BarChart
++              h={240}
++              data={chart}
++              dataKey="group"
++              series={[{ name: 'median', label: 'Median USD', color: 'teal.6' }]}
++              valueFormatter={usdTick}
++              yAxisProps={{ tickFormatter: usdTick, width: 90 }}
++            />
++          )}
++          <FxAsOf date={data.fxAsOf} />
++        </>
++      )}
++    </Stack>
++  );
++}
++
++/** S-8 Insights (04 section 8.5). */
++export function InsightsPage(): ReactElement {
++  const canDrillDown = useViewer().permissions.includes('employee.read');
++  const summary = useSummary();
++  return (
++    <Stack gap="xl">
++      <Title order={1}>Insights</Title>
++      {summary.isError && (
++        <SectionError message={summary.error.message} retry={() => void summary.refetch()} />
++      )}
++      {!summary.data && !summary.isError && <Skeleton height={160} />}
++      {summary.data && (
++        <>
++          <Cards summary={summary.data} canDrillDown={canDrillDown} />
++          <PayrollByCountry summary={summary.data} />
++        </>
++      )}
++      <Distribution />
++    </Stack>
++  );
++}
+diff --git a/apps/web/src/features/insights/PayEquityPage.test.tsx b/apps/web/src/features/insights/PayEquityPage.test.tsx
+new file mode 100644
+index 0000000..71b002f
+--- /dev/null
++++ b/apps/web/src/features/insights/PayEquityPage.test.tsx
+@@ -0,0 +1,107 @@
++import type { PayEquityResponse, Role } from '@acme/shared';
++import { screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { useLocation } from 'react-router';
++import { describe, expect, it } from 'vitest';
++import { aPayEquityResponse } from '../../../test/fixtures/insights.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const Location = () => {
++  const { pathname, search } = useLocation();
++  return <output aria-label="location">{pathname + search}</output>;
++};
++
++const renderPayEquity = (route = '/insights/pay-equity') =>
++  render(
++    <>
++      <AppRoutes />
++      <Location />
++    </>,
++    { route },
++  );
++
++/** Serves one pay equity body; records each request's query. */
++function servesPayEquity(
++  body: PayEquityResponse = aPayEquityResponse(),
++  requests: URLSearchParams[] = [],
++  role: Role = 'hr_admin',
++) {
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))),
++    http.get('/api/insights/pay-equity', ({ request }) => {
++      requests.push(new URL(request.url).searchParams);
++      return HttpResponse.json(body);
++    }),
++  );
++}
++
++describe('pay equity page (04 section 8.5, S-9)', () => {
++  it('shows "Too few to compare" rows and a "Review" badge with text on flagged rows', async () => {
++    servesPayEquity();
++
++    renderPayEquity('/insights/pay-equity?includeNotComparable=true');
++
++    const table = await screen.findByRole('table', { name: 'Pay equity cohorts' });
++    const flagged = within(table).getByRole('row', { name: /Software Engineer/ });
++    expect(within(flagged).getByText('Review')).toBeInTheDocument();
++    expect(within(flagged).getByText('6.7%')).toBeInTheDocument();
++    expect(within(flagged).getByText('USD 140,000')).toBeInTheDocument();
++    const notComparable = within(table).getByRole('row', { name: /Product Designer/ });
++    expect(within(notComparable).getByText('Too few to compare')).toBeInTheDocument();
++    expect(within(notComparable).queryByText('Review')).not.toBeInTheDocument();
++    expect(
++      screen.getByText('171 of 250 cohorts can be compared; 3 are flagged.'),
++    ).toBeInTheDocument();
++  });
++
++  it('shows a gap that rounds to zero as 0.0%, and a missing org gap as too few to compare', async () => {
++    const body = aPayEquityResponse();
++    servesPayEquity({
++      ...body,
++      org: { ...body.org, meanGapPct: 0, medianGapPct: null },
++      cohorts: [{ ...body.cohorts[0]!, gapPct: 0, flagged: false }],
++    });
++
++    renderPayEquity();
++
++    const mean = (await screen.findByText('Mean gap (unadjusted)')).closest('div')!;
++    expect(within(mean).getByText('0.0%')).toBeInTheDocument();
++    const median = screen.getByText('Median gap (unadjusted)').closest('div')!;
++    expect(within(median).getByText('Too few to compare')).toBeInTheDocument();
++    const row = screen.getByRole('row', { name: /Software Engineer/ });
++    expect(within(row).getByText('0.0%')).toBeInTheDocument();
++    expect(within(row).queryByText('Review')).not.toBeInTheDocument();
++  });
++
++  it('puts the filters in the URL and the request', async () => {
++    const requests: URLSearchParams[] = [];
++    servesPayEquity(aPayEquityResponse(), requests);
++    renderPayEquity('/insights/pay-equity?country=US&flaggedOnly=true');
++    await screen.findByRole('table', { name: 'Pay equity cohorts' });
++    expect(requests.at(-1)?.get('country')).toBe('US');
++    expect(requests.at(-1)?.get('flaggedOnly')).toBe('true');
++    expect(requests.at(-1)?.get('includeNotComparable')).toBe('false');
++
++    await userEvent.click(
++      screen.getByRole('checkbox', { name: 'Show cohorts too small to compare' }),
++    );
++
++    expect(screen.getByLabelText('location')).toHaveTextContent(
++      '/insights/pay-equity?country=US&flaggedOnly=true&includeNotComparable=true',
++    );
++    await screen.findByRole('table', { name: 'Pay equity cohorts' });
++    expect(requests.at(-1)?.get('includeNotComparable')).toBe('true');
++  });
++
++  it('says so when no cohorts match', async () => {
++    servesPayEquity({ ...aPayEquityResponse(), cohorts: [] });
++
++    renderPayEquity();
++
++    expect(await screen.findByText('No cohorts match these filters.')).toBeInTheDocument();
++  });
++});
+diff --git a/apps/web/src/features/insights/PayEquityPage.tsx b/apps/web/src/features/insights/PayEquityPage.tsx
+new file mode 100644
+index 0000000..024b204
+--- /dev/null
++++ b/apps/web/src/features/insights/PayEquityPage.tsx
+@@ -0,0 +1,188 @@
++import { payEquityResponseSchema, type PayEquityQuery, type PayEquityResponse } from '@acme/shared';
++import {
++  Alert,
++  Badge,
++  Button,
++  Card,
++  Checkbox,
++  Group,
++  MultiSelect,
++  Skeleton,
++  Stack,
++  Table,
++  Text,
++  Title,
++} from '@mantine/core';
++import { keepPreviousData, useQuery } from '@tanstack/react-query';
++import type { ReactElement } from 'react';
++import { apiFetch } from '../../api/client.ts';
++import { FxAsOf } from '../../components/FxAsOf.tsx';
++import { Money } from '../../components/Money.tsx';
++import { formatGapPct } from '../../format.ts';
++import { useReference } from '../employees/useReference.ts';
++import { serializePayEquityQuery, usePayEquityFilters } from './usePayEquityFilters.ts';
++
++const TOO_FEW = 'Too few to compare';
++const COLUMNS = [
++  'Country',
++  'Job title',
++  'Level',
++  'Women',
++  'Men',
++  'Mean (women)',
++  'Mean (men)',
++  'Gap',
++  'Status',
++];
++const NUMBER_COLUMNS = 5; // Women, Men, Mean (women), Mean (men), Gap
++
++const usePayEquity = (query: PayEquityQuery) =>
++  useQuery({
++    queryKey: ['insights', 'pay-equity', query],
++    queryFn: () =>
++      apiFetch(`/api/insights/pay-equity?${serializePayEquityQuery(query, { forUrl: false })}`, {
++        schema: payEquityResponseSchema,
++      }),
++    staleTime: 30_000,
++    placeholderData: keepPreviousData,
++  });
++
++function GapCard({ label, value }: { label: string; value: number | null }): ReactElement {
++  return (
++    <Card withBorder>
++      <Text size="sm" c="dimmed">
++        {label}
++      </Text>
++      <Text size="xl" fw={700}>
++        {formatGapPct(value)}
++      </Text>
++    </Card>
++  );
++}
++
++function CohortRow({ cohort }: { cohort: PayEquityResponse['cohorts'][number] }): ReactElement {
++  return (
++    <Table.Tr>
++      <Table.Td>{cohort.country.name}</Table.Td>
++      <Table.Td>{cohort.jobTitle.name}</Table.Td>
++      <Table.Td>{`${cohort.level.code} ${cohort.level.name}`}</Table.Td>
++      {cohort.comparable && cohort.meanWomen && cohort.meanMen ? (
++        <>
++          <Table.Td>{cohort.women}</Table.Td>
++          <Table.Td>{cohort.men}</Table.Td>
++          <Table.Td>
++            <Money value={cohort.meanWomen} />
++          </Table.Td>
++          <Table.Td>
++            <Money value={cohort.meanMen} />
++          </Table.Td>
++          <Table.Td>{formatGapPct(cohort.gapPct)}</Table.Td>
++        </>
++      ) : (
++        <Table.Td colSpan={NUMBER_COLUMNS}>{TOO_FEW}</Table.Td>
++      )}
++      <Table.Td>
++        {cohort.flagged && (
++          <Badge color="orange" variant="light" leftSection={<span aria-hidden>⚠</span>}>
++            Review
++          </Badge>
++        )}
++      </Table.Td>
++    </Table.Tr>
++  );
++}
++
++/** S-9 Pay equity (04 section 8.5). */
++export function PayEquityPage(): ReactElement {
++  const { query, setFilters } = usePayEquityFilters();
++  const reference = useReference().data;
++  const equity = usePayEquity(query);
++  const data = equity.data;
++  return (
++    <Stack>
++      <Title order={1}>Pay equity</Title>
++      <Group align="flex-end" gap="sm">
++        <MultiSelect
++          label="Country"
++          data={(reference?.countries ?? []).map((c) => ({ value: c.code, label: c.name }))}
++          value={query.country ?? []}
++          onChange={(values) => setFilters({ country: values.length > 0 ? values : undefined })}
++          clearable
++        />
++        <MultiSelect
++          label="Department"
++          data={(reference?.departments ?? []).map((d) => ({
++            value: String(d.id),
++            label: d.name,
++          }))}
++          value={query.department ?? []}
++          onChange={(values) => setFilters({ department: values.length > 0 ? values : undefined })}
++          clearable
++        />
++        <Checkbox
++          label="Flagged only"
++          checked={query.flaggedOnly}
++          onChange={(event) => setFilters({ flaggedOnly: event.currentTarget.checked })}
++        />
++        <Checkbox
++          label="Show cohorts too small to compare"
++          checked={query.includeNotComparable}
++          onChange={(event) => setFilters({ includeNotComparable: event.currentTarget.checked })}
++        />
++      </Group>
++      {equity.isError && (
++        <Alert color="red">
++          <Group justify="space-between">
++            <Text>{equity.error.message}</Text>
++            <Button variant="light" onClick={() => void equity.refetch()}>
++              Retry
++            </Button>
++          </Group>
++        </Alert>
++      )}
++      {!data && !equity.isError && <Skeleton height={160} />}
++      {data && (
++        <>
++          <Group grow align="stretch">
++            <GapCard label="Mean gap (unadjusted)" value={data.org.meanGapPct} />
++            <GapCard label="Median gap (unadjusted)" value={data.org.medianGapPct} />
++          </Group>
++          <Text size="sm" c="dimmed">
++            Compares all women with all men, across different roles and levels. Use the cohort table
++            for like-for-like comparisons.
++          </Text>
++          <Text>
++            {`${data.cohortCounts.comparable} of ${data.cohortCounts.withEmployees} cohorts can be compared; ${data.cohortCounts.flagged} are flagged.`}
++          </Text>
++          {data.cohorts.length === 0 ? (
++            <Text>No cohorts match these filters.</Text>
++          ) : (
++            <Table aria-label="Pay equity cohorts" striped>
++              <Table.Thead>
++                <Table.Tr>
++                  {COLUMNS.map((column) => (
++                    <Table.Th key={column}>{column}</Table.Th>
++                  ))}
++                </Table.Tr>
++              </Table.Thead>
++              <Table.Tbody>
++                {data.cohorts.map((cohort) => (
++                  <CohortRow
++                    key={`${cohort.country.code}-${cohort.jobTitle.id}-${cohort.level.code}`}
++                    cohort={cohort}
++                  />
++                ))}
++              </Table.Tbody>
++            </Table>
++          )}
++          <Text size="xs" c="dimmed">
++            Flagged at a gap of 5% or more, the EU Pay Transparency Directive's joint pay assessment
++            trigger. Cohorts need at least 5 women and 5 men. A flag is a signal to review, not a
++            legal finding.
++          </Text>
++          <FxAsOf date={data.fxAsOf} />
++        </>
++      )}
++    </Stack>
++  );
++}
+diff --git a/apps/web/src/features/insights/api.ts b/apps/web/src/features/insights/api.ts
+new file mode 100644
+index 0000000..a3e4bdc
+--- /dev/null
++++ b/apps/web/src/features/insights/api.ts
+@@ -0,0 +1,25 @@
++import { insightsSummaryResponseSchema, payDistributionResponseSchema } from '@acme/shared';
++import type { PayDistributionQuery } from '@acme/shared';
++import { keepPreviousData, useQuery } from '@tanstack/react-query';
++import { apiFetch } from '../../api/client.ts';
++import { serializeInsightsQuery } from './useInsightsFilters.ts';
++
++// Query keys of 04 section 8.3.
++export const useSummary = () =>
++  useQuery({
++    queryKey: ['insights', 'summary'],
++    queryFn: () => apiFetch('/api/insights/summary', { schema: insightsSummaryResponseSchema }),
++    staleTime: 30_000,
++  });
++
++export const useDistribution = (query: PayDistributionQuery) =>
++  useQuery({
++    queryKey: ['insights', 'distribution', query],
++    queryFn: () =>
++      apiFetch(
++        `/api/insights/pay-distribution?${serializeInsightsQuery(query, { forUrl: false })}`,
++        { schema: payDistributionResponseSchema },
++      ),
++    staleTime: 30_000,
++    placeholderData: keepPreviousData,
++  });
+diff --git a/apps/web/src/features/insights/useInsightsFilters.ts b/apps/web/src/features/insights/useInsightsFilters.ts
+new file mode 100644
+index 0000000..299d036
+--- /dev/null
++++ b/apps/web/src/features/insights/useInsightsFilters.ts
+@@ -0,0 +1,46 @@
++import { payDistributionQuerySchema, type PayDistributionQuery } from '@acme/shared';
++import { useNavigate, useSearchParams } from 'react-router';
++
++type FilterChange = Partial<PayDistributionQuery>;
++
++const LIST_KEYS = ['country', 'department', 'jobTitle', 'level', 'gender'] as const;
++const DEFAULT_GROUP = 'country';
++const shape: Record<string, { safeParse(value: unknown): { success: boolean } }> =
++  payDistributionQuerySchema.shape;
++
++const join = (values: string[]) => values.map(encodeURIComponent).join(',');
++
++/** The query string for the API and the URL; `groupBy` is left out of the URL when default. */
++export function serializeInsightsQuery(
++  query: PayDistributionQuery,
++  { forUrl }: { forUrl: boolean },
++): string {
++  const parts: string[] = [];
++  if (!forUrl || query.groupBy !== DEFAULT_GROUP) parts.push(`groupBy=${query.groupBy}`);
++  for (const key of LIST_KEYS) {
++    const values = query[key];
++    if (values !== undefined && values.length > 0) parts.push(`${key}=${join(values)}`);
++  }
++  return parts.join('&');
++}
++
++/** Distribution state kept in the URL (04 section 8.3); anything unrecognised is ignored. */
++export function useInsightsFilters(): {
++  query: PayDistributionQuery;
++  setFilters: (change: FilterChange) => void;
++} {
++  const [params] = useSearchParams();
++  const navigate = useNavigate();
++  const valid: Record<string, string> = {};
++  for (const [key, value] of params) {
++    if (shape[key]?.safeParse(value).success) valid[key] = value;
++  }
++  const query = payDistributionQuerySchema.parse(valid);
++  return {
++    query,
++    setFilters: (change) => {
++      const search = serializeInsightsQuery({ ...query, ...change }, { forUrl: true });
++      void navigate({ search: search ? `?${search}` : '' });
++    },
++  };
++}
+diff --git a/apps/web/src/features/insights/usePayEquityFilters.ts b/apps/web/src/features/insights/usePayEquityFilters.ts
+new file mode 100644
+index 0000000..9d9fae2
+--- /dev/null
++++ b/apps/web/src/features/insights/usePayEquityFilters.ts
+@@ -0,0 +1,42 @@
++import { payEquityQuerySchema, type PayEquityQuery } from '@acme/shared';
++import { useNavigate, useSearchParams } from 'react-router';
++
++const shape: Record<string, { safeParse(value: unknown): { success: boolean } }> =
++  payEquityQuerySchema.shape;
++
++const join = (values: string[]) => values.map(encodeURIComponent).join(',');
++
++/** The query string for the API (every key) or the URL (defaults left out). */
++export function serializePayEquityQuery(
++  query: PayEquityQuery,
++  { forUrl }: { forUrl: boolean },
++): string {
++  const parts: string[] = [];
++  if (query.country?.length) parts.push(`country=${join(query.country)}`);
++  if (query.department?.length) parts.push(`department=${join(query.department)}`);
++  if (!forUrl || query.flaggedOnly) parts.push(`flaggedOnly=${query.flaggedOnly}`);
++  if (!forUrl || query.includeNotComparable)
++    parts.push(`includeNotComparable=${query.includeNotComparable}`);
++  return parts.join('&');
++}
++
++/** Pay equity filters kept in the URL (04 section 8.3); anything unrecognised is ignored. */
++export function usePayEquityFilters(): {
++  query: PayEquityQuery;
++  setFilters: (change: Partial<PayEquityQuery>) => void;
++} {
++  const [params] = useSearchParams();
++  const navigate = useNavigate();
++  const valid: Record<string, string> = {};
++  for (const [key, value] of params) {
++    if (shape[key]?.safeParse(value).success) valid[key] = value;
++  }
++  const query = payEquityQuerySchema.parse(valid);
++  return {
++    query,
++    setFilters: (change) => {
++      const search = serializePayEquityQuery({ ...query, ...change }, { forUrl: true });
++      void navigate({ search: search ? `?${search}` : '' });
++    },
++  };
++}
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 101652d..301af99 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,3 +1,4 @@
+ import '@mantine/core/styles.css';
++import '@mantine/charts/styles.css';
+ import { ColorSchemeScript, MantineProvider } from '@mantine/core';
+ import { QueryClientProvider } from '@tanstack/react-query';
+diff --git a/apps/web/test/fixtures/insights.ts b/apps/web/test/fixtures/insights.ts
+new file mode 100644
+index 0000000..d7bbe04
+--- /dev/null
++++ b/apps/web/test/fixtures/insights.ts
+@@ -0,0 +1,115 @@
++import {
++  insightsSummaryResponseSchema,
++  payDistributionResponseSchema,
++  payEquityResponseSchema,
++  type InsightsSummaryResponse,
++  type PayDistributionResponse,
++  type PayEquityResponse,
++} from '@acme/shared';
++
++// Fixture builders parse with the shared response schema (D-050).
++const usd = (amountMinor: number) => ({ amountMinor, currency: 'USD' });
++
++export const aSummaryResponse = (
++  overrides: Partial<InsightsSummaryResponse> = {},
++): InsightsSummaryResponse =>
++  insightsSummaryResponseSchema.parse({
++    fxAsOf: '2026-09-30',
++    headcount: 1200,
++    payrollUsd: usd(100_000_000),
++    byCountry: [
++      {
++        country: { code: 'US', name: 'United States' },
++        headcount: 1100,
++        suppressed: false,
++        payrollLocal: usd(99_000_000),
++        payrollUsd: usd(99_000_000),
++      },
++      {
++        country: { code: 'DE', name: 'Germany' },
++        headcount: 1,
++        suppressed: false,
++        payrollLocal: { amountMinor: 3_600, currency: 'EUR' },
++        payrollUsd: usd(4_000),
++      },
++      {
++        country: { code: 'IN', name: 'India' },
++        headcount: null,
++        suppressed: true,
++        payrollLocal: null,
++        payrollUsd: null,
++      },
++    ],
++    outsideBand: { below: 281, above: 279, total: 560 },
++    staleSalaries: { since: '2024-10-09', count: 1234 },
++    ...overrides,
++  });
++
++const stats = (median: number) => ({
++  min: usd(median - 20_000),
++  p25: usd(median - 10_000),
++  median: usd(median),
++  p75: usd(median + 10_000),
++  max: usd(median + 20_000),
++  average: usd(median + 500),
++  total: usd(median * 10),
++});
++
++const FILTERS = { countries: [], departmentIds: [], jobTitleIds: [], levelCodes: [], genders: [] };
++
++export const aDistributionResponse = (
++  overrides: Partial<PayDistributionResponse> = {},
++): PayDistributionResponse =>
++  payDistributionResponseSchema.parse({
++    fxAsOf: '2026-09-30',
++    groupBy: 'country',
++    filters: FILTERS,
++    groups: [
++      {
++        key: 'US',
++        label: 'United States',
++        headcount: 1100,
++        suppressed: false,
++        usd: stats(9_000_000),
++        local: stats(9_000_000),
++      },
++      { key: 'IN', label: 'India', headcount: null, suppressed: true, usd: null, local: null },
++    ],
++    ...overrides,
++  });
++
++export const aPayEquityResponse = (overrides: Partial<PayEquityResponse> = {}): PayEquityResponse =>
++  payEquityResponseSchema.parse({
++    fxAsOf: '2026-09-30',
++    thresholdPct: 5,
++    minPerGender: 5,
++    org: { meanGapPct: 8, medianGapPct: 0, women: 400, men: 800, basis: 'usd' },
++    cohortCounts: { withEmployees: 250, comparable: 171, flagged: 3 },
++    cohorts: [
++      {
++        country: { code: 'US', name: 'United States' },
++        jobTitle: { id: 1, name: 'Software Engineer' },
++        level: { code: 'L3', name: 'Senior' },
++        comparable: true,
++        women: 12,
++        men: 30,
++        meanWomen: usd(14_000_000),
++        meanMen: usd(15_000_000),
++        gapPct: 6.7,
++        flagged: true,
++      },
++      {
++        country: { code: 'DE', name: 'Germany' },
++        jobTitle: { id: 3, name: 'Product Designer' },
++        level: { code: 'L2', name: 'Mid' },
++        comparable: false,
++        women: null,
++        men: null,
++        meanWomen: null,
++        meanMen: null,
++        gapPct: null,
++        flagged: false,
++      },
++    ],
++    ...overrides,
++  });
+diff --git a/docs/04-api-and-ui.md b/docs/04-api-and-ui.md
+index cf1e8a7..e8c2e3f 100644
+--- a/docs/04-api-and-ui.md
++++ b/docs/04-api-and-ui.md
+@@ -712,4 +712,5 @@ Steps:
+ 3. Per group: `headcount`; USD per row via `toUsdMinor`; `total` and `average` (half up to the cent) and percentiles (D-024) over USD values; the same in local currency when the group has one currency; `outsideBandCount` split below and above; `genderGap` per 02 section 4 with the 5-and-5 minimum, in local currency when single-currency, else USD.
+ 4. If `headcount < minGroupSize`, return the group with `suppressed: true` and no values.
++   Then, when `minGroupSize > 1` and exactly one group is suppressed, also suppress the smallest visible group, ties by key (D-071), so the hidden group can't be recovered from the total. A group hidden this way can have 5 or more people.
+ 5. Sort groups as in I2.
+ 
+@@ -848,5 +849,5 @@ Sentence: `{metric phrase}{group phrase} for {scope}: {value}{base}.`
+ | Like-for-like | True when the filters pin exactly one country, one job title and one level and `groupBy` is `none` |
+ | Empty | `No active employees match {scope}.` |
+-| Suppressed (Finance) | `Fewer than 5 employees match {scope}, so this figure is hidden.` |
++| Suppressed (Finance) | `Some figures are hidden to protect groups of fewer than 5 employees.` |
+ | Gap not comparable | `Too few women or men in {scope} to compare (at least 5 of each needed).` |
+ | FX | Never in the sentence; the UI shows `FX as of` under the answer |
+@@ -1013,5 +1014,5 @@ Each screen lists its content and its loading, empty and error states. "HR roles
+ - Summary cards: Active headcount; Annual payroll (USD); Paid outside band (`560`, with `281 below, 279 above`); No salary change since `9 Oct 2024`. For HR roles the last two cards link to `/employees?band=outside` and `/employees?salaryUnchangedSince=2024-10-09`; Finance sees the counts without links.
+ - Payroll by country: table (Country, Headcount, Payroll local, Payroll USD, share of total USD) and a horizontal bar chart of payroll USD.
+-- Pay distribution: segmented control "Group by" (Country, Department, Job title, Level, Gender) and filters Country, Department, Job title, Level, all in the URL. Table: Group, Headcount, Min, P25, Median, P75, Max, Average (USD; local shown underneath when the group has one currency). Bar chart of the median per group. Suppressed groups show "Fewer than 5" across the row.
++- Pay distribution: segmented control "Group by" (Country, Department, Job title, Level, Gender) and filters Country, Department, Job title, Level, all in the URL. Table: Group, Headcount, Min, P25, Median, P75, Max, Average (USD; local shown underneath when the group has one currency). Bar chart of the median per group. Suppressed groups show "Hidden to protect small groups" across the row.
+ - FX note at the bottom.
+ - Loading: card and table skeletons. Empty (filters match no one): "No active employees match these filters." Error: alert per section with "Retry".
+diff --git a/docs/05-test-strategy.md b/docs/05-test-strategy.md
+index c474258..8cf7b77 100644
+--- a/docs/05-test-strategy.md
++++ b/docs/05-test-strategy.md
+@@ -284,4 +284,5 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
+ | U | outside-band counts split below and above, and the band limits count as inside |
+ | U | groups under the minimum size are suppressed with no values; the HR minimum suppresses nothing |
++| U | exactly one suppressed group also hides the smallest visible group (ties by key); two suppressed, a single group, or the HR minimum add nothing (D-071) |
+ | U | `groupBy: none` returns one `all` group; empty groups are omitted; levels sort by rank, others by name |
+ | U | gender gap is `(men - women) / men * 100`, positive when women are paid less |
+@@ -299,5 +300,5 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
+ | I | pay equity returns the flagged cohort first, hides not-comparable cohorts unless asked, and honours `flaggedOnly` |
+ | I | Finance and HR get the same pay-equity body (D-047) |
+-| C | a suppressed row shows "Fewer than 5" |
++| C | a suppressed row shows "Hidden to protect small groups" |
+ | C | HR roles see the outside-band and stale cards as links; Finance sees plain counts |
+ | C | pay equity shows "Too few to compare" rows and a "Review" badge with text on flagged rows |
+diff --git a/docs/06-build-plan.md b/docs/06-build-plan.md
+index d4e362e..2cedb82 100644
+--- a/docs/06-build-plan.md
++++ b/docs/06-build-plan.md
+@@ -502,5 +502,5 @@ feat(web): add record salary change modal
+ **Goal.** Anyone can answer "how do we pay people" in one screen, and HR can see where women and men in the same role are paid differently.
+ 
+-**Demo.** As Finance: total payroll by country in USD; median by level for Software Engineers in India; a "Fewer than 5" row. As HR Admin: the pay-equity table with the three flagged cohorts, and the outside-band card linking to the filtered list.
++**Demo.** As Finance: total payroll by country in USD; median by level for Software Engineers in India; a "Hidden to protect small groups" row. As HR Admin: the pay-equity table with the three flagged cohorts, and the outside-band card linking to the filtered list.
+ 
+ **Scope.**
+diff --git a/docs/decisions.md b/docs/decisions.md
+index e3135f3..8432844 100644
+--- a/docs/decisions.md
++++ b/docs/decisions.md
+@@ -89,4 +89,5 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | D-069 | No new dependency unless docs/ names it (an ADR, 03 §5, 05 §3 or 06); exact pins | The ADR-only wording would block tools 05 and 06 already chose | ADR-only rule; free choice | Decided | 7 |
+ | D-070 | Percentages and ratios are computed in one shared module (packages/shared/src/percent.ts) in integer arithmetic, rounded half away from zero (1 decimal; compa-ratio 2), never -0. Display: a value that rounds to zero shows "0.0%" with no sign; salary changes carry "+" when positive, gaps don't; null shows "n/a" ("Too few to compare" for a gap) | "+0.0%" and "-0.0%" read as a real change; Math.round sends ties toward +infinity and float division misrounds ties (1.005 to 1.00); one function stops the history and the form preview disagreeing; Intl signDisplay "exceptZero" with default halfExpand gives the display rule directly | Math.round on floats; formatting only, leaving rounding per call site; showing "-0.0%" | Decided | 7 (dry-run gap) |
++| D-071 | When a grouped result has exactly one suppressed group and a role with a minimum above 1 (Finance), the engine also suppresses the smallest visible group (ties by key). Applies to I1 `byCountry` and every I2 grouping, and to Ask through the same engine | With one group hidden and the total shown, Finance could subtract the visible groups and recover the hidden one, defeating D-012. Hiding a second group leaves two unknowns in one equation. Done in `aggregatePay` so no caller can forget it | Keep as is; hide or round the totals (blanks Finance's headline numbers); partial totals (headline numbers wrong). UI text for any hidden row is "Hidden to protect small groups", since a row hidden this way can have 5 or more people. Not covered: differencing across separate requests with different filters, and I3 cohort counts | Decided | 7 |
+ 
+ ## Open: decide in the named chat
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 24af20c..df6a01b 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -8,2 +8,3 @@ export * from './percent.ts';
+ export * from './schemas/reference.ts';
+ export * from './schemas/salary.ts';
++export * from './schemas/insights.ts';
+diff --git a/packages/shared/src/percent.test.ts b/packages/shared/src/percent.test.ts
+index f6dc727..0ed13d9 100644
+--- a/packages/shared/src/percent.test.ts
++++ b/packages/shared/src/percent.test.ts
+@@ -1,4 +1,4 @@
+ import { describe, expect, it } from 'vitest';
+-import { changePct, compaRatio } from './percent.ts';
++import { changePct, compaRatio, gapPct, sharePct } from './percent.ts';
+ 
+ describe('compaRatio', () => {
+@@ -43,2 +43,35 @@ describe('changePct', () => {
+   });
+ });
++
++describe('gapPct', () => {
++  // 04 section 8.4.1: tenths = (men - women) * 1000 / men, rounded half away from zero.
++  it.each([
++    { case: 'women paid less is positive', men: 100_000, women: 92_000, pct: 8 },
++    { case: 'women paid more is negative', men: 100_000, women: 101_200, pct: -1.2 },
++    { case: 'equal pay is zero', men: 100_000, women: 100_000, pct: 0 },
++    { case: 'a positive tie rounds up', men: 100_000, women: 99_950, pct: 0.1 },
++    { case: 'a negative tie rounds away from zero', men: 100_000, women: 100_050, pct: -0.1 },
++    { case: 'below half rounds down', men: 100_000, women: 99_960, pct: 0 },
++  ])('$case', ({ men, women, pct }) => {
++    expect(gapPct(men, women)).toBe(pct);
++  });
++
++  it('a gap under 0.05% either way is 0, never -0', () => {
++    expect(Object.is(gapPct(100_000, 99_960), 0)).toBe(true);
++    expect(Object.is(gapPct(100_000, 100_040), 0)).toBe(true);
++  });
++});
++
++describe('sharePct', () => {
++  // 04 section 8.4.1: tenths = part * 1000 / total, rounded half away from zero.
++  it.each([
++    { case: 'a plain share', part: 40, total: 100, pct: 40 },
++    { case: 'zero part', part: 0, total: 100, pct: 0 },
++    { case: 'the whole', part: 100, total: 100, pct: 100 },
++    { case: 'a tie rounds up', part: 1, total: 2000, pct: 0.1 },
++    { case: 'below half rounds down', part: 1, total: 2001, pct: 0 },
++    { case: 'one third', part: 1, total: 3, pct: 33.3 },
++  ])('$case', ({ part, total, pct }) => {
++    expect(sharePct(part, total)).toBe(pct);
++  });
++});
+diff --git a/packages/shared/src/percent.ts b/packages/shared/src/percent.ts
+index 78468b0..0ca1dbf 100644
+--- a/packages/shared/src/percent.ts
++++ b/packages/shared/src/percent.ts
+@@ -13,2 +13,14 @@ export function changePct(prevMinor: number, nextMinor: number): number {
+   return nextMinor < prevMinor && tenths !== 0 ? -tenths / 10 : tenths / 10;
+ }
++
++// Gender gap to 1 decimal: tenths = (men - women) * 1000 / men. Positive when women are paid less.
++export function gapPct(menMinor: number, womenMinor: number): number {
++  const numerator = Math.abs(menMinor - womenMinor) * 1000;
++  const tenths = Math.floor((numerator * 2 + menMinor) / (menMinor * 2));
++  return womenMinor > menMinor && tenths !== 0 ? -tenths / 10 : tenths / 10;
++}
++
++// Share to 1 decimal: tenths = part * 1000 / total.
++export function sharePct(part: number, total: number): number {
++  return Math.floor((part * 1000 * 2 + total) / (total * 2)) / 10;
++}
+diff --git a/packages/shared/src/schemas/employee.ts b/packages/shared/src/schemas/employee.ts
+index d543da7..33ca30a 100644
+--- a/packages/shared/src/schemas/employee.ts
++++ b/packages/shared/src/schemas/employee.ts
+@@ -4,5 +4,5 @@ import { isoDateSchema, personNameSchema } from './common.ts';
+ // 04 section 4.6: a list is one comma-separated param; trim, drop empties, de-duplicate.
+ // Shape only: whether a country or level exists is checked against the reference tables.
+-const commaList = z.preprocess(
++export const commaList = z.preprocess(
+   (value) =>
+     typeof value === 'string'
+diff --git a/packages/shared/src/schemas/insights.ts b/packages/shared/src/schemas/insights.ts
+new file mode 100644
+index 0000000..89f2ab7
+--- /dev/null
++++ b/packages/shared/src/schemas/insights.ts
+@@ -0,0 +1,130 @@
++import { z } from 'zod';
++import { isoDateSchema } from './common.ts';
++import { commaList, moneySchema } from './employee.ts';
++
++const countrySchema = z.object({ code: z.string(), name: z.string() });
++
++// I1 (04 section 5.6). A suppressed country (Finance, under 5 people) has null numbers (D-012).
++export const insightsSummaryQuerySchema = z.strictObject({});
++
++export const insightsSummaryResponseSchema = z.object({
++  fxAsOf: isoDateSchema,
++  headcount: z.number().int(),
++  payrollUsd: moneySchema,
++  byCountry: z.array(
++    z.object({
++      country: countrySchema,
++      headcount: z.number().int().nullable(),
++      suppressed: z.boolean(),
++      payrollLocal: moneySchema.nullable(),
++      payrollUsd: moneySchema.nullable(),
++    }),
++  ),
++  outsideBand: z.object({
++    below: z.number().int(),
++    above: z.number().int(),
++    total: z.number().int(),
++  }),
++  staleSalaries: z.object({ since: isoDateSchema, count: z.number().int() }),
++});
++
++export type InsightsSummaryResponse = z.infer<typeof insightsSummaryResponseSchema>;
++
++// I2 (04 section 5.6). Lists are comma-separated as in E1.
++export const PAY_DISTRIBUTION_GROUPS = [
++  'none',
++  'country',
++  'department',
++  'jobTitle',
++  'level',
++  'gender',
++] as const;
++
++export const payDistributionQuerySchema = z.strictObject({
++  groupBy: z.enum(PAY_DISTRIBUTION_GROUPS).default('country'),
++  country: commaList.optional(),
++  department: commaList.optional(),
++  jobTitle: commaList.optional(),
++  level: commaList.optional(),
++  gender: commaList.optional(),
++});
++
++export type PayDistributionQuery = z.infer<typeof payDistributionQuerySchema>;
++
++const payStatsSchema = z.object({
++  min: moneySchema,
++  p25: moneySchema,
++  median: moneySchema,
++  p75: moneySchema,
++  max: moneySchema,
++  average: moneySchema,
++  total: moneySchema,
++});
++
++export const payDistributionResponseSchema = z.object({
++  fxAsOf: isoDateSchema,
++  groupBy: z.enum(PAY_DISTRIBUTION_GROUPS),
++  filters: z.object({
++    countries: z.array(z.string()),
++    departmentIds: z.array(z.number().int()),
++    jobTitleIds: z.array(z.number().int()),
++    levelCodes: z.array(z.string()),
++    genders: z.array(z.string()),
++  }),
++  groups: z.array(
++    z.object({
++      key: z.string(),
++      label: z.string(),
++      headcount: z.number().int().nullable(),
++      suppressed: z.boolean(),
++      usd: payStatsSchema.nullable(),
++      local: payStatsSchema.nullable(),
++    }),
++  ),
++});
++
++export type PayDistributionResponse = z.infer<typeof payDistributionResponseSchema>;
++
++// I3 (04 section 5.6). Booleans arrive as "true" or "false" in the query string.
++export const payEquityQuerySchema = z.strictObject({
++  country: commaList.optional(),
++  department: commaList.optional(),
++  flaggedOnly: z.stringbool().default(false),
++  includeNotComparable: z.stringbool().default(false),
++});
++
++export type PayEquityQuery = z.infer<typeof payEquityQuerySchema>;
++
++export const payEquityResponseSchema = z.object({
++  fxAsOf: isoDateSchema,
++  thresholdPct: z.number(),
++  minPerGender: z.number().int(),
++  org: z.object({
++    meanGapPct: z.number().nullable(),
++    medianGapPct: z.number().nullable(),
++    women: z.number().int(),
++    men: z.number().int(),
++    basis: z.literal('usd'),
++  }),
++  cohortCounts: z.object({
++    withEmployees: z.number().int(),
++    comparable: z.number().int(),
++    flagged: z.number().int(),
++  }),
++  cohorts: z.array(
++    z.object({
++      country: countrySchema,
++      jobTitle: z.object({ id: z.number().int(), name: z.string() }),
++      level: countrySchema,
++      comparable: z.boolean(),
++      women: z.number().int().nullable(),
++      men: z.number().int().nullable(),
++      meanWomen: moneySchema.nullable(),
++      meanMen: moneySchema.nullable(),
++      gapPct: z.number().nullable(),
++      flagged: z.boolean(),
++    }),
++  ),
++});
++
++export type PayEquityResponse = z.infer<typeof payEquityResponseSchema>;

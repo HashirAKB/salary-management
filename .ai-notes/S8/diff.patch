@@ -1,0 +1,3950 @@
+diff --git a/.env.example b/.env.example
+index 585f436..8e6807c 100644
+--- a/.env.example
++++ b/.env.example
+@@ -10,7 +10,11 @@ DATABASE_URL=
+ # required in production (Turso token); never logged
+ DATABASE_AUTH_TOKEN=
+-# optional: absent turns "Ask about pay" off
++# gemini (default) or anthropic
++ASK_PROVIDER=
++# optional: key for ASK_PROVIDER=gemini; absent turns "Ask about pay" off
++GEMINI_API_KEY=
++# optional: key for ASK_PROVIDER=anthropic
+ ANTHROPIC_API_KEY=
+-# default claude-haiku-5-5
++# default gemini-flash-latest (gemini) or claude-haiku-5-5 (anthropic)
+ ASK_MODEL=
+ # default 30 questions per user per UTC day
+diff --git a/apps/api/evals/ask-eval.json b/apps/api/evals/ask-eval.json
+new file mode 100644
+index 0000000..7a2e32a
+--- /dev/null
++++ b/apps/api/evals/ask-eval.json
+@@ -0,0 +1,225 @@
++{
++  "version": 1,
++  "cases": [
++    {
++      "id": "q01",
++      "question": "What is the median pay for a Senior Engineer in India?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "median",
++          "groupBy": "none",
++          "filters": {
++            "countries": ["IN"],
++            "departments": [],
++            "jobTitles": ["Software Engineer"],
++            "levels": ["L3"],
++            "genders": []
++          }
++        }
++      },
++      "tests": "Persona question; \"Senior\" to L3; \"Engineer\" to a title"
++    },
++    {
++      "id": "q02",
++      "question": "How does total payroll split by country?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "total",
++          "groupBy": "country",
++          "filters": {
++            "countries": [],
++            "departments": [],
++            "jobTitles": [],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "\"payroll\" to total; \"split by\" to groupBy"
++    },
++    {
++      "id": "q03",
++      "question": "How many people work in Sales?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "headcount",
++          "groupBy": "none",
++          "filters": {
++            "countries": [],
++            "departments": ["Sales"],
++            "jobTitles": [],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "Department word"
++    },
++    {
++      "id": "q04",
++      "question": "Average salary by level for Product Managers in the US",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "average",
++          "groupBy": "level",
++          "filters": {
++            "countries": ["US"],
++            "departments": [],
++            "jobTitles": ["Product Manager"],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "Group plus two filters"
++    },
++    {
++      "id": "q05",
++      "question": "How many employees are paid outside their band in Germany?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "outsideBandCount",
++          "groupBy": "none",
++          "filters": {
++            "countries": ["DE"],
++            "departments": [],
++            "jobTitles": [],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "Band metric"
++    },
++    {
++      "id": "q06",
++      "question": "What's the gender pay gap for Account Executives by level?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "genderGap",
++          "groupBy": "level",
++          "filters": {
++            "countries": [],
++            "departments": [],
++            "jobTitles": ["Account Executive"],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "Gap metric with groupBy"
++    },
++    {
++      "id": "q07",
++      "question": "Show me the 75th percentile salary for Data Analysts in the UK",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "p75",
++          "groupBy": "none",
++          "filters": {
++            "countries": ["GB"],
++            "departments": [],
++            "jobTitles": ["Data Analyst"],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "\"UK\" to GB; percentile"
++    },
++    {
++      "id": "q08",
++      "question": "Who is the highest paid engineer in Canada?",
++      "expect": { "kind": "cannot_answer", "reason": "individual" },
++      "tests": "\"Who\" singles out a person even without a name"
++    },
++    {
++      "id": "q09",
++      "question": "What is the highest salary for a Lead Software Engineer in Canada?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "max",
++          "groupBy": "none",
++          "filters": {
++            "countries": ["CA"],
++            "departments": [],
++            "jobTitles": ["Software Engineer"],
++            "levels": ["L4"],
++            "genders": []
++          }
++        }
++      },
++      "tests": "Same words as q08, but answerable"
++    },
++    {
++      "id": "q10",
++      "question": "How has median pay in India changed since last year?",
++      "expect": { "kind": "cannot_answer", "reason": "trend" },
++      "tests": "Time question"
++    },
++    {
++      "id": "q11",
++      "question": "Give Priya Nair a 5% raise",
++      "expect": { "kind": "cannot_answer", "reason": "edit" },
++      "tests": "Write request"
++    },
++    {
++      "id": "q12",
++      "question": "What's the min and max salary in Marketing?",
++      "expect": { "kind": "cannot_answer", "reason": "multiple" },
++      "tests": "Two metrics"
++    },
++    {
++      "id": "q13",
++      "question": "What do we spend on bonuses in the US?",
++      "expect": { "kind": "cannot_answer", "reason": "unsupported" },
++      "tests": "Outside base salary"
++    },
++    {
++      "id": "q14",
++      "question": "Headcount by gender in Engineering",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "headcount",
++          "groupBy": "gender",
++          "filters": {
++            "countries": [],
++            "departments": ["Engineering"],
++            "jobTitles": [],
++            "levels": [],
++            "genders": []
++          }
++        }
++      },
++      "tests": "\"Engineering\" is a department, unlike q01"
++    },
++    {
++      "id": "q15",
++      "question": "What is the typical salary of a junior support specialist in India and the UK?",
++      "expect": {
++        "kind": "query",
++        "query": {
++          "metric": "median",
++          "groupBy": "none",
++          "filters": {
++            "countries": ["IN", "GB"],
++            "departments": [],
++            "jobTitles": ["Support Specialist"],
++            "levels": ["L1"],
++            "genders": []
++          }
++        }
++      },
++      "tests": "\"typical\" to median; \"junior\" to L1; two countries"
++    }
++  ]
++}
+diff --git a/apps/api/evals/run.ts b/apps/api/evals/run.ts
+new file mode 100644
+index 0000000..62c932e
+--- /dev/null
++++ b/apps/api/evals/run.ts
+@@ -0,0 +1,147 @@
++import type { CannotAnswerReason, StructuredQuery } from '@acme/shared';
++import { createHash } from 'node:crypto';
++import { mkdir, readFile, writeFile } from 'node:fs/promises';
++import { dirname, resolve } from 'node:path';
++import { askApiKey, loadConfig } from '../src/config.ts';
++import { createDb } from '../src/db/client.ts';
++import { systemClock } from '../src/domain/clock.ts';
++import type { InterpretResult } from '../src/modules/ask/interpreter.ts';
++import { createInterpreter } from '../src/modules/ask/provider.ts';
++import { loadAskReference } from '../src/modules/ask/repo.ts';
++import { buildSystemPrompt } from '../src/modules/ask/system-prompt.ts';
++
++// 05 section 6.4: npm run eval. Manual, needs the Ask provider's key (GEMINI_API_KEY or ANTHROPIC_API_KEY), never in CI.
++
++type Expectation =
++  { kind: 'query'; query: StructuredQuery } | { kind: 'cannot_answer'; reason: CannotAnswerReason };
++
++interface EvalCase {
++  id: string;
++  question: string;
++  expect: Expectation;
++  tests: string;
++}
++
++type Actual = Expectation | { kind: 'error'; message: string };
++
++const GEMINI_PAUSE_MS = 7_000;
++const sleep = (ms: number) => new Promise((done) => setTimeout(done, ms));
++
++const FILTER_KEYS = ['countries', 'departments', 'jobTitles', 'levels', 'genders'] as const;
++
++/** Enum values lower-cased and filter arrays sorted, so only meaning is compared. */
++function normalise(query: StructuredQuery) {
++  return {
++    metric: query.metric.toLowerCase(),
++    groupBy: query.groupBy.toLowerCase(),
++    filters: Object.fromEntries(
++      FILTER_KEYS.map((key) => [key, query.filters[key].map((v) => v.toLowerCase()).sort()]),
++    ),
++  };
++}
++
++export function score(expected: Expectation, actual: Actual): boolean {
++  if (actual.kind === 'error') return false;
++  if (expected.kind === 'cannot_answer') {
++    return actual.kind === 'cannot_answer' && actual.reason === expected.reason;
++  }
++  return (
++    actual.kind === 'query' &&
++    JSON.stringify(normalise(actual.query)) === JSON.stringify(normalise(expected.query))
++  );
++}
++
++const describe = (result: Actual): string => {
++  if (result.kind === 'error') return `error: ${result.message}`;
++  if (result.kind === 'cannot_answer') return `cannot_answer (${result.reason})`;
++  const { metric, groupBy, filters } = normalise(result.query);
++  const used = Object.entries(filters)
++    .filter(([, values]) => values.length > 0)
++    .map(([key, values]) => `${key} ${values.join('+')}`);
++  return [metric, groupBy === 'none' ? 'none' : `groupBy ${groupBy}`, ...used].join(', ');
++};
++
++const toActual = (result: InterpretResult): Actual =>
++  result.kind === 'query'
++    ? { kind: 'query', query: result.query }
++    : { kind: 'cannot_answer', reason: result.reason };
++
++export async function runEval(env: Record<string, string | undefined>): Promise<number> {
++  const config = loadConfig(env);
++  if (!askApiKey(config)) {
++    console.error(
++      `npm run eval needs ${config.askProvider === 'gemini' ? 'GEMINI_API_KEY' : 'ANTHROPIC_API_KEY'}.`,
++    );
++    return 1;
++  }
++  const file = JSON.parse(
++    await readFile(resolve(import.meta.dirname, 'ask-eval.json'), 'utf8'),
++  ) as { cases: EvalCase[] };
++
++  const db = createDb(config.databaseUrl, config.databaseAuthToken);
++  const interpreter = createInterpreter(config, await loadAskReference(db));
++  const today = systemClock.today();
++
++  const rows: { id: string; question: string; expected: string; actual: string; pass: boolean }[] =
++    [];
++  for (const testCase of file.cases) {
++    // The Gemini free tier allows only a few requests a minute.
++    if (rows.length > 0 && config.askProvider === 'gemini') await sleep(GEMINI_PAUSE_MS);
++    let actual: Actual;
++    try {
++      actual = toActual(await interpreter.interpret(testCase.question, { today }));
++    } catch (error) {
++      actual = { kind: 'error', message: error instanceof Error ? error.message : String(error) };
++    }
++    rows.push({
++      id: testCase.id,
++      question: testCase.question,
++      expected: describe(testCase.expect),
++      actual: describe(actual),
++      pass: score(testCase.expect, actual),
++    });
++  }
++
++  const passed = rows.filter((r) => r.pass).length;
++  console.table(
++    rows.map((r) => ({ id: r.id, expected: r.expected, actual: r.actual, pass: r.pass })),
++  );
++  console.log(`${passed}/${rows.length} passed (bar: 13/${rows.length}).`);
++
++  const promptHash = createHash('sha256')
++    .update(buildSystemPrompt('{{today}}'))
++    .digest('hex')
++    .slice(0, 12);
++  const failures = rows.filter((r) => !r.pass);
++  const report = [
++    `# Ask eval ${today}`,
++    '',
++    `- Provider: ${config.askProvider}`,
++    `- Model: ${config.askModel}`,
++    `- Prompt hash: ${promptHash}`,
++    `- Total: ${passed}/${rows.length} (bar: 13/${rows.length})`,
++    '',
++    '| Case | Question | Expected | Actual | Result |',
++    '| --- | --- | --- | --- | --- |',
++    ...rows.map(
++      (r) =>
++        `| ${r.id} | ${r.question} | ${r.expected} | ${r.actual.replaceAll('|', '/')} | ${r.pass ? 'pass' : 'fail'} |`,
++    ),
++    '',
++    '## Failures',
++    '',
++    ...(failures.length === 0
++      ? ['None.']
++      : failures.map((r) => `- ${r.id}: cause (prompt, schema or expectation): TODO`)),
++    '',
++  ].join('\n');
++  const path = resolve(import.meta.dirname, `../../../docs/evals/ask-eval-${today}.md`);
++  await mkdir(dirname(path), { recursive: true });
++  await writeFile(path, report);
++  console.log(`Report written to ${path}`);
++  return 0;
++}
++
++if (import.meta.main) {
++  process.exitCode = await runEval(process.env);
++}
+diff --git a/apps/api/package.json b/apps/api/package.json
+index 7dccaba..df33453 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -9,4 +9,5 @@
+   "dependencies": {
+     "@acme/shared": "0.0.0",
++    "@anthropic-ai/sdk": "0.133.0",
+     "@faker-js/faker": "10.6.0",
+     "@fastify/rate-limit": "11.2.0",
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 0bd5a77..02fdd6b 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -9,4 +9,5 @@ import { registerRouteCatalog } from './http/route-catalog.ts';
+ import { registerStatic } from './http/static.ts';
+ import { registerAuth } from './modules/auth/plugin.ts';
++import { askRoutes } from './modules/ask/routes.ts';
+ import { authRoutes } from './modules/auth/routes.ts';
+ import { employeeRoutes } from './modules/employees/routes.ts';
+@@ -15,4 +16,5 @@ import { healthRoutes } from './modules/health/routes.ts';
+ import { referenceRoutes } from './modules/reference/routes.ts';
+ import { salaryRoutes } from './modules/salary/routes.ts';
++import type { QueryInterpreter } from './modules/ask/interpreter.ts';
+ import type { SalaryWrites } from './modules/salary/service.ts';
+ 
+@@ -27,4 +29,6 @@ export type AppDeps = {
+   /** Replaces the salary change writes; tests inject a failing one to prove the rollback. */
+   salaryWrites?: SalaryWrites;
++  /** Replaces the Anthropic interpreter; tests inject the fake. */
++  interpreter?: QueryInterpreter;
+ };
+ 
+@@ -50,4 +54,10 @@ export function buildApp(deps: AppDeps): FastifyInstance {
+   insightsRoutes(app, { db: deps.db, clock: deps.clock });
+   salaryRoutes(app, { db: deps.db, clock: deps.clock, writes: deps.salaryWrites });
++  askRoutes(app, {
++    db: deps.db,
++    clock: deps.clock,
++    config: deps.config,
++    interpreter: deps.interpreter,
++  });
+   return app;
+ }
+diff --git a/apps/api/src/config.test.ts b/apps/api/src/config.test.ts
+index 7f587a8..d7ed3c8 100644
+--- a/apps/api/src/config.test.ts
++++ b/apps/api/src/config.test.ts
+@@ -1,4 +1,4 @@
+ import { describe, expect, it } from 'vitest';
+-import { ConfigError, loadConfig } from './config.ts';
++import { askApiKey, ConfigError, loadConfig } from './config.ts';
+ import { PRODUCTION_SCRYPT } from './modules/auth/password.ts';
+ 
+@@ -33,6 +33,8 @@ describe('config', () => {
+       databaseUrl: 'file:./data/dev.db',
+       databaseAuthToken: undefined,
++      askProvider: 'gemini',
++      geminiApiKey: undefined,
+       anthropicApiKey: undefined,
+-      askModel: 'claude-haiku-5-5',
++      askModel: 'gemini-flash-latest',
+       askUserDailyLimit: 30,
+       askGlobalDailyLimit: 300,
+@@ -42,4 +44,22 @@ describe('config', () => {
+   });
+ 
++  it('picks the Ask provider, its default model and its key (ADR 0009)', () => {
++    const base = { DATABASE_URL: ':memory:', GEMINI_API_KEY: 'g-key', ANTHROPIC_API_KEY: 'a-key' };
++
++    const gemini = loadConfig(base);
++    expect(askApiKey(gemini)).toBe('g-key');
++    expect(gemini.askModel).toBe('gemini-flash-latest');
++
++    const anthropic = loadConfig({ ...base, ASK_PROVIDER: 'anthropic' });
++    expect(askApiKey(anthropic)).toBe('a-key');
++    expect(anthropic.askModel).toBe('claude-haiku-5-5');
++
++    expect(loadConfig({ ...base, ASK_MODEL: 'custom-model' }).askModel).toBe('custom-model');
++    expect(askApiKey(loadConfig({ DATABASE_URL: ':memory:' }))).toBeUndefined();
++    expect(invalidVariables({ DATABASE_URL: ':memory:', ASK_PROVIDER: 'openai' })).toEqual([
++      'ASK_PROVIDER',
++    ]);
++  });
++
+   it('requires DATABASE_AUTH_TOKEN when NODE_ENV is production', () => {
+     const variables = invalidVariables({
+diff --git a/apps/api/src/config.ts b/apps/api/src/config.ts
+index d60f93e..be75d10 100644
+--- a/apps/api/src/config.ts
++++ b/apps/api/src/config.ts
+@@ -7,4 +7,6 @@ export type Config = {
+   databaseUrl: string;
+   databaseAuthToken: string | undefined;
++  askProvider: 'gemini' | 'anthropic';
++  geminiApiKey: string | undefined;
+   anthropicApiKey: string | undefined;
+   askModel: string;
+@@ -30,4 +32,7 @@ export class ConfigError extends Error {
+ }
+ 
++// ADR 0009: the model each provider uses unless ASK_MODEL says otherwise.
++const DEFAULT_MODELS = { gemini: 'gemini-flash-latest', anthropic: 'claude-haiku-5-5' } as const;
++
+ // An empty value (as copied from .env.example) counts as not set.
+ const optional = <T extends z.ZodType>(schema: T) =>
+@@ -43,6 +48,8 @@ const envSchema = z
+     DATABASE_URL: optional(z.string({ error: 'Required.' })),
+     DATABASE_AUTH_TOKEN: optional(z.string().optional()),
++    ASK_PROVIDER: optional(z.enum(['gemini', 'anthropic']).default('gemini')),
++    GEMINI_API_KEY: optional(z.string().optional()),
+     ANTHROPIC_API_KEY: optional(z.string().optional()),
+-    ASK_MODEL: optional(z.string().default('claude-haiku-5-5')),
++    ASK_MODEL: optional(z.string().optional()),
+     ASK_USER_DAILY_LIMIT: optional(positiveInt.default(30)),
+     ASK_GLOBAL_DAILY_LIMIT: optional(positiveInt.default(300)),
+@@ -77,6 +84,8 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
+     databaseUrl: e.DATABASE_URL,
+     databaseAuthToken: e.DATABASE_AUTH_TOKEN,
++    askProvider: e.ASK_PROVIDER,
++    geminiApiKey: e.GEMINI_API_KEY,
+     anthropicApiKey: e.ANTHROPIC_API_KEY,
+-    askModel: e.ASK_MODEL,
++    askModel: e.ASK_MODEL ?? DEFAULT_MODELS[e.ASK_PROVIDER],
+     askUserDailyLimit: e.ASK_USER_DAILY_LIMIT,
+     askGlobalDailyLimit: e.ASK_GLOBAL_DAILY_LIMIT,
+@@ -85,2 +94,7 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
+   };
+ }
++
++/** The API key for the configured Ask provider; undefined turns Ask off (D-004). */
++export function askApiKey(config: Config): string | undefined {
++  return config.askProvider === 'gemini' ? config.geminiApiKey : config.anthropicApiKey;
++}
+diff --git a/apps/api/src/domain/pay-query.test.ts b/apps/api/src/domain/pay-query.test.ts
+index 7427273..a21d0da 100644
+--- a/apps/api/src/domain/pay-query.test.ts
++++ b/apps/api/src/domain/pay-query.test.ts
+@@ -267,2 +267,73 @@ describe('aggregatePay: grouping and order', () => {
+   });
+ });
++
++describe('aggregatePay: gender gap (04 section 6 step 3)', () => {
++  const people = (gender: string, count: number, override: Parameters<typeof payRow>[0] = {}) =>
++    Array.from({ length: count }, () => payRow({ gender, ...override }));
++
++  it('reports the mean gap with at least 5 women and 5 men', () => {
++    const rows = [
++      ...people('female', 5, { salaryMinor: 920_000 }),
++      ...people('male', 5, { salaryMinor: 1_000_000 }),
++      ...people('non_binary', 2, { salaryMinor: 5_000_000 }),
++    ];
++
++    const [group] = aggregatePay(rows, ['genderGap'], 'none', 1);
++
++    expect(group?.gap).toEqual({ comparable: true, women: 5, men: 5, gapPct: 8 });
++  });
++
++  it('is not comparable under 5 women or under 5 men', () => {
++    const rows = [...people('female', 4), ...people('male', 9)];
++
++    const [group] = aggregatePay(rows, ['genderGap'], 'none', 1);
++
++    expect(group?.gap).toEqual({ comparable: false, women: null, men: null, gapPct: null });
++  });
++
++  it('uses USD when the group mixes currencies', () => {
++    // Women earn 10_000 USD; men earn 1_000_000 INR at 0.012, which is 12_000 USD.
++    const rows = [
++      ...people('female', 5, { salaryMinor: 10_000 }),
++      ...people('male', 5, { currency: 'INR', salaryMinor: 1_000_000, usdPerUnitMicros: 12_000 }),
++    ];
++
++    const [group] = aggregatePay(rows, ['genderGap'], 'none', 1);
++
++    expect(group?.gap?.gapPct).toBe(16.7);
++  });
++
++  it('computes a gap per group', () => {
++    const rows = [
++      ...people('female', 5, { countryCode: 'US', salaryMinor: 900_000 }),
++      ...people('male', 5, { countryCode: 'US', salaryMinor: 1_000_000 }),
++      ...people('male', 2, { countryCode: 'IN' }),
++    ];
++
++    const groups = aggregatePay(rows, ['genderGap'], 'country', 1);
++
++    expect(groups.map((g) => [g.key, g.gap?.comparable, g.gap?.gapPct])).toEqual([
++      ['IN', false, null],
++      ['US', true, 10],
++    ]);
++  });
++
++  it('has no gap unless genderGap is asked for', () => {
++    const [group] = aggregatePay(people('female', 5), ['median'], 'none', 1);
++
++    expect(group?.gap).toBeNull();
++  });
++
++  it('reports the currency of a single-currency group, null when mixed', () => {
++    const inr = aggregatePay([payRow({ currency: 'INR' })], ['median'], 'none', 1)[0];
++    const mixed = aggregatePay(
++      [payRow({ currency: 'INR' }), payRow({ currency: 'USD' })],
++      ['median'],
++      'none',
++      1,
++    )[0];
++
++    expect(inr?.currency).toBe('INR');
++    expect(mixed?.currency).toBeNull();
++  });
++});
+diff --git a/apps/api/src/domain/pay-query.ts b/apps/api/src/domain/pay-query.ts
+index e5f45b4..f4900ee 100644
+--- a/apps/api/src/domain/pay-query.ts
++++ b/apps/api/src/domain/pay-query.ts
+@@ -1,3 +1,3 @@
+-import { toUsdMinor } from '@acme/shared';
++import { gapPct, toUsdMinor } from '@acme/shared';
+ import { GENDERS } from './genders.ts';
+ import { percentile } from './percentiles.ts';
+@@ -19,5 +19,14 @@ export interface PayRow {
+ export type Dimension = 'country' | 'department' | 'jobTitle' | 'level' | 'gender';
+ export type Metric =
+-  'headcount' | 'total' | 'average' | 'median' | 'p25' | 'p75' | 'min' | 'max' | 'outsideBandCount';
++  | 'headcount'
++  | 'total'
++  | 'average'
++  | 'median'
++  | 'p25'
++  | 'p75'
++  | 'min'
++  | 'max'
++  | 'outsideBandCount'
++  | 'genderGap';
+ 
+ export type PayStats = Partial<
+@@ -35,4 +44,15 @@ export interface GroupResult {
+   local: PayStats | null;
+   outsideBand: { below: number; above: number; total: number } | null;
++  // The currency of a single-currency group; null when mixed or suppressed.
++  // Absent on suppressed groups.
++  currency?: string | null;
++  gap?: GenderGap | null;
++}
++
++export interface GenderGap {
++  comparable: boolean;
++  women: number | null;
++  men: number | null;
++  gapPct: number | null;
+ }
+ 
+@@ -55,4 +75,28 @@ function statsOf(values: readonly number[], metrics: readonly Metric[]): PayStat
+ }
+ 
++const MIN_PER_GENDER = 5;
++
++const mean = (values: readonly number[]) =>
++  Math.round(values.reduce((sum, v) => sum + v, 0) / values.length);
++
++// 02 section 4: mean gap with 5 women and 5 men at least; local currency when the group has one.
++function genderGapOf(rows: readonly PayRow[], singleCurrency: boolean): GenderGap {
++  const pay = (gender: string) =>
++    rows
++      .filter((r) => r.gender === gender)
++      .map((r) => (singleCurrency ? r.salaryMinor : toUsdMinor(r.salaryMinor, r.usdPerUnitMicros)));
++  const women = pay('female');
++  const men = pay('male');
++  if (women.length < MIN_PER_GENDER || men.length < MIN_PER_GENDER) {
++    return { comparable: false, women: null, men: null, gapPct: null };
++  }
++  return {
++    comparable: true,
++    women: women.length,
++    men: men.length,
++    gapPct: gapPct(mean(men), mean(women)),
++  };
++}
++
+ function resultFor(
+   key: string,
+@@ -82,4 +126,6 @@ function resultFor(
+       : null,
+     outsideBand,
++    currency: singleCurrency ? (rows[0]?.currency ?? null) : null,
++    gap: metrics.includes('genderGap') ? genderGapOf(rows, singleCurrency) : null,
+   };
+ }
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+index f35ff81..b26d132 100644
+--- a/apps/api/src/http/access-matrix.test.ts
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -27,4 +27,5 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
+   'GET /api/insights/pay-distribution': 'insights.read',
+   'GET /api/insights/pay-equity': 'insights.read',
++  'POST /api/ask': 'ask.use',
+ };
+ 
+diff --git a/apps/api/src/http/error-handler.ts b/apps/api/src/http/error-handler.ts
+index 9b7c2d2..1ee7f8c 100644
+--- a/apps/api/src/http/error-handler.ts
++++ b/apps/api/src/http/error-handler.ts
+@@ -33,4 +33,5 @@ export function registerErrorHandling(
+   app.setErrorHandler((error: FastifyError | AppError, request, reply) => {
+     if (error instanceof AppError) {
++      if (error.headers) reply.headers(error.headers);
+       return sendProblem(reply, {
+         status: error.status,
+diff --git a/apps/api/src/http/problem.ts b/apps/api/src/http/problem.ts
+index 2ff6020..56e314f 100644
+--- a/apps/api/src/http/problem.ts
++++ b/apps/api/src/http/problem.ts
+@@ -21,8 +21,17 @@ export class AppError extends Error {
+   readonly code: string;
+   readonly errors: ProblemFieldError[] | undefined;
+-
+-  constructor(status: number, code: string, detail: string, errors?: ProblemFieldError[]) {
++  /** Extra response headers, such as Retry-After on a 429. */
++  readonly headers: Record<string, string> | undefined;
++
++  constructor(
++    status: number,
++    code: string,
++    detail: string,
++    errors?: ProblemFieldError[],
++    headers?: Record<string, string>,
++  ) {
+     super(detail);
+     this.errors = errors;
++    this.headers = headers;
+     this.name = 'AppError';
+     this.status = status;
+diff --git a/apps/api/src/modules/ask/answer.test.ts b/apps/api/src/modules/ask/answer.test.ts
+new file mode 100644
+index 0000000..e75c3ba
+--- /dev/null
++++ b/apps/api/src/modules/ask/answer.test.ts
+@@ -0,0 +1,241 @@
++import type { AskReference, CannotAnswerReason, StructuredQuery } from '@acme/shared';
++import { describe, expect, it } from 'vitest';
++import type { GroupResult } from '../../domain/pay-query.ts';
++import {
++  buildSentence,
++  genderRuleSuggestion,
++  interpretationList,
++  reasonMessage,
++} from './answer.ts';
++
++const reference: AskReference = {
++  countries: [
++    { code: 'IN', name: 'India' },
++    { code: 'US', name: 'United States' },
++  ],
++  departments: [
++    { id: 1, name: 'Engineering' },
++    { id: 2, name: 'Sales' },
++  ],
++  jobTitles: [
++    { id: 10, name: 'Software Engineer' },
++    { id: 20, name: 'Account Executive' },
++  ],
++  levels: [
++    { code: 'L1', name: 'Associate' },
++    { code: 'L3', name: 'Senior' },
++  ],
++  genders: [
++    { code: 'female', name: 'Female' },
++    { code: 'male', name: 'Male' },
++  ],
++};
++
++const none = { countries: [], departments: [], jobTitles: [], levels: [], genders: [] };
++const pinned = {
++  ...none,
++  countries: ['IN'],
++  jobTitles: ['Software Engineer'],
++  levels: ['L3'],
++};
++
++const query = (override: Partial<StructuredQuery>): StructuredQuery => ({
++  metric: 'median',
++  groupBy: 'none',
++  filters: none,
++  ...override,
++});
++
++const group = (override: Partial<GroupResult> = {}): GroupResult => ({
++  key: 'all',
++  label: 'All active employees',
++  suppressed: false,
++  headcount: 280,
++  usd: { median: 2_355_200 },
++  local: { median: 204_800_000 },
++  outsideBand: null,
++  currency: 'INR',
++  gap: null,
++  ...override,
++});
++
++const gapGroup = (gapPct: number | null, comparable = true) =>
++  group({
++    gap: comparable
++      ? { comparable, women: 76, men: 195, gapPct }
++      : { comparable, women: null, men: null, gapPct: null },
++  });
++
++const cases: { name: string; query: StructuredQuery; groups: GroupResult[]; sentence: string }[] = [
++  {
++    name: 'ungrouped money, local then USD',
++    query: query({ filters: pinned }),
++    groups: [group()],
++    sentence:
++      'Median salary for Software Engineer, L3 Senior, India: INR 20,48,000 (USD 23,552), based on 280 active employees.',
++  },
++  {
++    name: 'mixed currencies, USD only',
++    query: query({}),
++    groups: [group({ currency: null, local: null })],
++    sentence: 'Median salary for all active employees: USD 23,552, based on 280 active employees.',
++  },
++  {
++    name: 'several values in one filter join with "or"',
++    query: query({
++      filters: { ...none, countries: ['IN', 'US'], departments: ['Sales'], genders: ['female'] },
++    }),
++    groups: [group({ currency: null, local: null })],
++    sentence:
++      'Median salary for Sales, Female, India or United States: USD 23,552, based on 280 active employees.',
++  },
++  {
++    name: 'grouped ends with a colon',
++    query: query({ groupBy: 'jobTitle', filters: { ...none, countries: ['IN'] } }),
++    groups: [group(), group({ key: '2' })],
++    sentence: 'Median salary by job title for India:',
++  },
++  {
++    name: 'empty',
++    query: query({ filters: { ...none, countries: ['IN'] } }),
++    groups: [],
++    sentence: 'No active employees match India.',
++  },
++  {
++    name: 'suppressed',
++    query: query({}),
++    groups: [group({ suppressed: true, headcount: null, usd: null, local: null })],
++    sentence: 'Some figures are hidden to protect groups of fewer than 5 employees.',
++  },
++  {
++    name: 'gap, like-for-like',
++    query: query({ metric: 'genderGap', filters: pinned }),
++    groups: [gapGroup(8)],
++    sentence:
++      'Gender pay gap for Software Engineer, L3 Senior, India: women paid 8.0% less than men (like-for-like).',
++  },
++  {
++    name: 'gap, unadjusted when grouped',
++    query: query({ metric: 'genderGap', groupBy: 'level', filters: pinned }),
++    groups: [gapGroup(8)],
++    sentence: 'Gender pay gap by level for Software Engineer, L3 Senior, India:',
++  },
++  {
++    name: 'gap, unadjusted',
++    query: query({ metric: 'genderGap' }),
++    groups: [gapGroup(8)],
++    sentence:
++      'Gender pay gap for all active employees: women paid 8.0% less than men (unadjusted: mixes roles and levels; see Pay equity for like-for-like cohorts).',
++  },
++  {
++    name: 'gap, negative',
++    query: query({ metric: 'genderGap', filters: pinned }),
++    groups: [gapGroup(-3.2)],
++    sentence:
++      'Gender pay gap for Software Engineer, L3 Senior, India: women paid 3.2% more than men (like-for-like).',
++  },
++  {
++    name: 'gap, rounds to zero',
++    query: query({ metric: 'genderGap', filters: pinned }),
++    groups: [gapGroup(0)],
++    sentence:
++      'Gender pay gap for Software Engineer, L3 Senior, India: no measurable gap (0.0%) (like-for-like).',
++  },
++  {
++    name: 'gap, not comparable',
++    query: query({ metric: 'genderGap', filters: { ...none, countries: ['IN'] } }),
++    groups: [gapGroup(null, false)],
++    sentence: 'Too few women or men in India to compare (at least 5 of each needed).',
++  },
++  {
++    name: 'outside band',
++    query: query({ metric: 'outsideBandCount' }),
++    groups: [group({ outsideBand: { below: 12, above: 9, total: 21 } })],
++    sentence:
++      'Employees paid outside their band for all active employees: 21 (12 below, 9 above), based on 280 active employees.',
++  },
++  {
++    name: 'headcount, no base',
++    query: query({ metric: 'headcount', filters: { ...none, countries: ['IN'] } }),
++    groups: [group()],
++    sentence: 'Headcount for India: 280.',
++  },
++];
++
++describe('buildSentence (04 section 7.6)', () => {
++  it.each(cases)('$name', ({ query: q, groups, sentence }) => {
++    expect(buildSentence(q, groups, reference)).toBe(sentence);
++  });
++});
++
++describe('interpretationList', () => {
++  it('lists metric, grouping and one row per non-empty filter in order', () => {
++    const list = interpretationList(
++      query({
++        groupBy: 'jobTitle',
++        filters: { ...pinned, genders: ['female', 'male'], departments: ['Sales'] },
++      }),
++      reference,
++    );
++
++    expect(list).toEqual([
++      { label: 'Metric', value: 'Median salary' },
++      { label: 'Grouped by', value: 'Job title' },
++      { label: 'Country', value: 'India' },
++      { label: 'Department', value: 'Sales' },
++      { label: 'Job title', value: 'Software Engineer' },
++      { label: 'Level', value: 'L3 Senior' },
++      { label: 'Gender', value: 'Female or Male' },
++    ]);
++  });
++
++  it('says Nothing when there is no grouping', () => {
++    expect(interpretationList(query({}), reference)).toEqual([
++      { label: 'Metric', value: 'Median salary' },
++      { label: 'Grouped by', value: 'Nothing' },
++    ]);
++  });
++});
++
++describe('reasonMessage (04 section 7.6)', () => {
++  const messages: [CannotAnswerReason, string][] = [
++    [
++      'individual',
++      'Ask about pay answers questions about groups, not individual people. Use the employee list to look someone up.',
++    ],
++    ['trend', 'Ask about pay only knows current salaries, not changes over time.'],
++    ['edit', "Ask about pay can't change data. Use the employee pages to make changes."],
++    ['multiple', 'Ask about pay answers one figure at a time. Try asking for one.'],
++    [
++      'unsupported',
++      'Ask about pay covers annual base salary only (no bonuses, equity, tax or net pay).',
++    ],
++    ['unclear', "I couldn't turn that into a pay question. Try one of the examples below."],
++    ['offTopic', "I couldn't turn that into a pay question. Try one of the examples below."],
++  ];
++
++  it.each(messages)('maps %s to its message', (reason, message) => {
++    expect(reasonMessage(reason)).toBe(message);
++  });
++
++  it('uses the gender-rule sentence for the gender rule', () => {
++    expect(reasonMessage('unsupported', 'genderGap')).toBe(
++      "The gender gap can't be filtered or grouped by gender.",
++    );
++  });
++});
++
++describe('genderRuleSuggestion', () => {
++  it('drops the gender filter and grouping and keeps the rest as scope', () => {
++    const suggestion = genderRuleSuggestion(
++      query({
++        metric: 'genderGap',
++        groupBy: 'gender',
++        filters: { ...pinned, genders: ['female'] },
++      }),
++      reference,
++    );
++
++    expect(suggestion).toBe('What is the gender pay gap for Software Engineer, L3 Senior, India?');
++  });
++});
+diff --git a/apps/api/src/modules/ask/answer.ts b/apps/api/src/modules/ask/answer.ts
+new file mode 100644
+index 0000000..f60c121
+--- /dev/null
++++ b/apps/api/src/modules/ask/answer.ts
+@@ -0,0 +1,206 @@
++import type {
++  AskGroupBy,
++  AskMetric,
++  AskReference,
++  CannotAnswerReason,
++  StructuredQuery,
++} from '@acme/shared';
++import type { GroupResult, PayStats } from '../../domain/pay-query.ts';
++
++export const ANSWER_EXAMPLES = [
++  'How does total payroll split by country?',
++  'How many people are paid outside their band in the US?',
++  'What is the gender pay gap for Account Executives by level?',
++];
++
++const METRIC_PHRASE: Record<AskMetric, string> = {
++  headcount: 'Headcount',
++  total: 'Total annual payroll',
++  average: 'Average salary',
++  median: 'Median salary',
++  p25: '25th percentile salary',
++  p75: '75th percentile salary',
++  min: 'Lowest salary',
++  max: 'Highest salary',
++  outsideBandCount: 'Employees paid outside their band',
++  genderGap: 'Gender pay gap',
++};
++
++const GROUP_PHRASE: Record<AskGroupBy, string> = {
++  none: '',
++  country: ' by country',
++  department: ' by department',
++  jobTitle: ' by job title',
++  level: ' by level',
++  gender: ' by gender',
++};
++
++const GROUP_LABEL: Record<AskGroupBy, string> = {
++  none: 'Nothing',
++  country: 'Country',
++  department: 'Department',
++  jobTitle: 'Job title',
++  level: 'Level',
++  gender: 'Gender',
++};
++
++const REASON_MESSAGE: Record<CannotAnswerReason, string> = {
++  individual:
++    'Ask about pay answers questions about groups, not individual people. Use the employee list to look someone up.',
++  trend: 'Ask about pay only knows current salaries, not changes over time.',
++  edit: "Ask about pay can't change data. Use the employee pages to make changes.",
++  multiple: 'Ask about pay answers one figure at a time. Try asking for one.',
++  unsupported: 'Ask about pay covers annual base salary only (no bonuses, equity, tax or net pay).',
++  unclear: "I couldn't turn that into a pay question. Try one of the examples below.",
++  offTopic: "I couldn't turn that into a pay question. Try one of the examples below.",
++};
++
++const MONEY_STATS = ['total', 'average', 'median', 'p25', 'p75', 'min', 'max'] as const;
++
++type Filters = StructuredQuery['filters'];
++
++function nameOf<T extends { name: string }>(
++  items: readonly T[],
++  match: (item: T) => boolean,
++  fallback: string,
++) {
++  return items.find(match)?.name ?? fallback;
++}
++
++// Display labels per filter, in the order scope text lists them.
++function filterLabels(filters: Filters, reference: AskReference) {
++  return {
++    country: filters.countries.map((c) => nameOf(reference.countries, (x) => x.code === c, c)),
++    department: filters.departments,
++    jobTitle: filters.jobTitles,
++    level: filters.levels.map((code) => {
++      const name = reference.levels.find((l) => l.code === code)?.name;
++      return name ? `${code} ${name}` : code;
++    }),
++    gender: filters.genders.map((g) => nameOf(reference.genders, (x) => x.code === g, g)),
++  };
++}
++
++export function describeScope(filters: Filters, reference: AskReference): string {
++  const labels = filterLabels(filters, reference);
++  const parts = [labels.jobTitle, labels.level, labels.department, labels.gender, labels.country]
++    .filter((values) => values.length > 0)
++    .map((values) => values.join(' or '));
++  return parts.length > 0 ? parts.join(', ') : 'all active employees';
++}
++
++// 04 section 8.4: code currency format, lakh grouping for INR, no fraction digits.
++function formatMoney(amountMinor: number, currency: string): string {
++  const formatter = new Intl.NumberFormat(currency === 'INR' ? 'en-IN' : 'en-US', {
++    style: 'currency',
++    currency,
++    currencyDisplay: 'code',
++    maximumFractionDigits: 0,
++  });
++  return formatter.format(amountMinor / 100).replace(/\s/g, ' ');
++}
++
++function gapText(group: GroupResult, likeForLike: boolean): string {
++  const pct = group.gap?.gapPct ?? 0;
++  const size = Math.abs(pct).toFixed(1);
++  const core =
++    pct === 0
++      ? 'no measurable gap (0.0%)'
++      : `women paid ${size}% ${pct > 0 ? 'less' : 'more'} than men`;
++  const suffix = likeForLike
++    ? ' (like-for-like)'
++    : ' (unadjusted: mixes roles and levels; see Pay equity for like-for-like cohorts)';
++  return core + suffix;
++}
++
++// 04 section 7.6: exactly one country, one title and one level, ungrouped.
++export function isLikeForLike(query: StructuredQuery): boolean {
++  const { filters } = query;
++  return (
++    query.groupBy === 'none' &&
++    filters.countries.length === 1 &&
++    filters.jobTitles.length === 1 &&
++    filters.levels.length === 1
++  );
++}
++
++function valueText(query: StructuredQuery, group: GroupResult): string {
++  const { metric } = query;
++  if (metric === 'headcount') return String(group.headcount ?? 0);
++  if (metric === 'outsideBandCount') {
++    const band = group.outsideBand ?? { below: 0, above: 0, total: 0 };
++    return `${band.total} (${band.below} below, ${band.above} above)`;
++  }
++  if (metric === 'genderGap') {
++    return gapText(group, isLikeForLike(query));
++  }
++  const key = metric as keyof PayStats;
++  const usd = formatMoney(group.usd?.[key] ?? 0, 'USD');
++  const local = group.local?.[key];
++  if (group.currency && local !== undefined && group.currency !== 'USD') {
++    return `${formatMoney(local, group.currency)} (${usd})`;
++  }
++  return usd;
++}
++
++export function buildSentence(
++  query: StructuredQuery,
++  groups: readonly GroupResult[],
++  reference: AskReference,
++): string {
++  const scope = describeScope(query.filters, reference);
++  const [group] = groups;
++  if (!group) return `No active employees match ${scope}.`;
++
++  const grouped = query.groupBy !== 'none';
++  const header = `${METRIC_PHRASE[query.metric]}${GROUP_PHRASE[query.groupBy]} for ${scope}`;
++  if (grouped) return `${header}:`;
++
++  if (group.suppressed) {
++    return 'Some figures are hidden to protect groups of fewer than 5 employees.';
++  }
++  if (query.metric === 'genderGap' && !group.gap?.comparable) {
++    return `Too few women or men in ${scope} to compare (at least 5 of each needed).`;
++  }
++  const isMoney = (MONEY_STATS as readonly string[]).includes(query.metric);
++  const base =
++    isMoney || query.metric === 'outsideBandCount'
++      ? `, based on ${group.headcount ?? 0} active employees`
++      : '';
++  return `${header}: ${valueText(query, group)}${base}.`;
++}
++
++export function interpretationList(
++  query: StructuredQuery,
++  reference: AskReference,
++): { label: string; value: string }[] {
++  const labels = filterLabels(query.filters, reference);
++  const filterRows = (
++    [
++      ['Country', labels.country],
++      ['Department', labels.department],
++      ['Job title', labels.jobTitle],
++      ['Level', labels.level],
++      ['Gender', labels.gender],
++    ] as const
++  )
++    .filter(([, values]) => values.length > 0)
++    .map(([label, values]) => ({ label, value: values.join(' or ') }));
++  return [
++    { label: 'Metric', value: METRIC_PHRASE[query.metric] },
++    { label: 'Grouped by', value: GROUP_LABEL[query.groupBy] },
++    ...filterRows,
++  ];
++}
++
++export function reasonMessage(reason: CannotAnswerReason, rule?: 'genderGap'): string {
++  if (reason === 'unsupported' && rule === 'genderGap') {
++    return "The gender gap can't be filtered or grouped by gender.";
++  }
++  return REASON_MESSAGE[reason];
++}
++
++export function genderRuleSuggestion(query: StructuredQuery, reference: AskReference): string {
++  const scope = describeScope({ ...query.filters, genders: [] }, reference);
++  return `What is the gender pay gap for ${scope}?`;
++}
+diff --git a/apps/api/src/modules/ask/anthropic-interpreter.test.ts b/apps/api/src/modules/ask/anthropic-interpreter.test.ts
+new file mode 100644
+index 0000000..3c29b8d
+--- /dev/null
++++ b/apps/api/src/modules/ask/anthropic-interpreter.test.ts
+@@ -0,0 +1,140 @@
++import type { AskReference } from '@acme/shared';
++import { describe, expect, it, vi } from 'vitest';
++import { AnthropicInterpreter } from './anthropic-interpreter.ts';
++import { buildToolSchemas } from './tool-schema.ts';
++
++const reference: AskReference = {
++  countries: [
++    { code: 'IN', name: 'India' },
++    { code: 'US', name: 'United States' },
++  ],
++  departments: [{ id: 1, name: 'Engineering' }],
++  jobTitles: [{ id: 10, name: 'Software Engineer' }],
++  levels: [
++    { code: 'L1', name: 'Associate' },
++    { code: 'L3', name: 'Senior' },
++  ],
++  genders: [
++    { code: 'female', name: 'Female' },
++    { code: 'male', name: 'Male' },
++  ],
++};
++
++const noFilters = { countries: [], departments: [], jobTitles: [], levels: [], genders: [] };
++const context = { today: '2026-10-11' };
++
++function reply(overrides: Record<string, unknown> = {}) {
++  return {
++    stop_reason: 'tool_use',
++    usage: { input_tokens: 120, output_tokens: 30 },
++    content: [
++      {
++        type: 'tool_use',
++        id: 't1',
++        name: 'run_pay_query',
++        input: { metric: 'Median', groupBy: 'none', filters: { ...noFilters, levels: ['l3'] } },
++      },
++    ],
++    ...overrides,
++  };
++}
++
++function setup(response: unknown) {
++  const create = vi.fn(async () => response);
++  const interpreter = new AnthropicInterpreter(
++    { messages: { create } },
++    { model: 'claude-test-model', reference },
++  );
++  return { create, interpreter };
++}
++
++describe('AnthropicInterpreter request (04 section 7.1)', () => {
++  it('sends the model, 512 tokens, both strict tools, tool_choice any and only the question', async () => {
++    const { create, interpreter } = setup(reply());
++    await interpreter.interpret('What is the median salary?', context);
++
++    expect(create).toHaveBeenCalledTimes(1);
++    const [body, options] = create.mock.calls[0] as unknown as [
++      Record<string, unknown>,
++      Record<string, unknown>,
++    ];
++    const tools = buildToolSchemas(reference);
++    expect(body.model).toBe('claude-test-model');
++    expect(body.max_tokens).toBe(512);
++    expect(body.tools).toEqual([tools.runPayQuery, tools.cannotAnswer]);
++    expect((body.tools as { strict: boolean }[]).every((t) => t.strict)).toBe(true);
++    expect(body.tool_choice).toEqual({ type: 'any' });
++    expect(body.messages).toEqual([{ role: 'user', content: 'What is the median salary?' }]);
++    expect(body.system).toContain("Today's date is 2026-10-11.");
++    expect(body.system).not.toContain('{{today}}');
++    expect(options).toMatchObject({ timeout: 15_000 });
++  });
++});
++
++describe('AnthropicInterpreter response mapping (04 section 7.4)', () => {
++  it('maps a run_pay_query call to a normalised query with token counts', async () => {
++    const { interpreter } = setup(reply());
++    await expect(interpreter.interpret('q', context)).resolves.toEqual({
++      kind: 'query',
++      query: { metric: 'median', groupBy: 'none', filters: { ...noFilters, levels: ['L3'] } },
++      inputTokens: 120,
++      outputTokens: 30,
++    });
++  });
++
++  it('maps a cannot_answer call to a cannot_answer result', async () => {
++    const { interpreter } = setup(
++      reply({
++        content: [
++          {
++            type: 'tool_use',
++            id: 't2',
++            name: 'cannot_answer',
++            input: { reason: 'trend', suggestion: 'What is the median salary?' },
++          },
++        ],
++      }),
++    );
++    await expect(interpreter.interpret('q', context)).resolves.toMatchObject({
++      kind: 'cannot_answer',
++      reason: 'trend',
++      suggestion: 'What is the median salary?',
++    });
++  });
++
++  it.each([
++    ['a refusal stop reason', { stop_reason: 'refusal' }],
++    ['a max_tokens stop reason', { stop_reason: 'max_tokens' }],
++    ['no tool call', { content: [{ type: 'text', text: 'Sure!' }] }],
++    [
++      'a tool input that fails the schema',
++      {
++        content: [
++          {
++            type: 'tool_use',
++            id: 't3',
++            name: 'run_pay_query',
++            input: { metric: 'mode', groupBy: 'none', filters: noFilters },
++          },
++        ],
++      },
++    ],
++  ])('rejects %s', async (_label, overrides) => {
++    const { interpreter } = setup(reply(overrides));
++    await expect(interpreter.interpret('q', context)).rejects.toThrow();
++  });
++
++  it('rejects when the SDK call fails', async () => {
++    const interpreter = new AnthropicInterpreter(
++      {
++        messages: {
++          create: async () => {
++            throw new Error('timeout');
++          },
++        },
++      },
++      { model: 'm', reference },
++    );
++    await expect(interpreter.interpret('q', context)).rejects.toThrow();
++  });
++});
+diff --git a/apps/api/src/modules/ask/anthropic-interpreter.ts b/apps/api/src/modules/ask/anthropic-interpreter.ts
+new file mode 100644
+index 0000000..e5fb248
+--- /dev/null
++++ b/apps/api/src/modules/ask/anthropic-interpreter.ts
+@@ -0,0 +1,90 @@
++import {
++  buildStructuredQuerySchema,
++  CANNOT_ANSWER_REASONS,
++  type AskReference,
++  type CannotAnswerReason,
++} from '@acme/shared';
++import { z } from 'zod';
++import {
++  InterpreterError,
++  type InterpretContext,
++  type InterpretResult,
++  type QueryInterpreter,
++} from './interpreter.ts';
++import { buildSystemPrompt } from './system-prompt.ts';
++import { buildToolSchemas } from './tool-schema.ts';
++
++// The slice of the SDK client the interpreter uses, so tests can stub it.
++export interface MessagesClient {
++  messages: { create(body: unknown, options?: unknown): Promise<unknown> };
++}
++
++interface ModelReply {
++  stop_reason?: string | null;
++  usage?: { input_tokens?: number; output_tokens?: number };
++  content?: { type: string; name?: string; input?: unknown }[];
++}
++
++const REQUEST_TIMEOUT_MS = 15_000;
++
++// 04 section 7.1: one request, two strict tools, tool_choice any, question only.
++export class AnthropicInterpreter implements QueryInterpreter {
++  private readonly tools: ReturnType<typeof buildToolSchemas>;
++  private readonly querySchema: ReturnType<typeof buildStructuredQuerySchema>;
++  private readonly cannotAnswerSchema = z.strictObject({
++    reason: z.enum(CANNOT_ANSWER_REASONS as readonly [CannotAnswerReason, ...CannotAnswerReason[]]),
++    suggestion: z.string(),
++  });
++
++  private readonly client: MessagesClient;
++  private readonly options: { model: string; reference: AskReference };
++
++  constructor(client: MessagesClient, options: { model: string; reference: AskReference }) {
++    this.client = client;
++    this.options = options;
++    this.tools = buildToolSchemas(options.reference);
++    this.querySchema = buildStructuredQuerySchema(options.reference);
++  }
++
++  async interpret(question: string, context: InterpretContext): Promise<InterpretResult> {
++    let response: ModelReply;
++    try {
++      response = (await this.client.messages.create(
++        {
++          model: this.options.model,
++          max_tokens: 512,
++          system: buildSystemPrompt(context.today),
++          tools: [this.tools.runPayQuery, this.tools.cannotAnswer],
++          tool_choice: { type: 'any' },
++          messages: [{ role: 'user', content: question }],
++        },
++        { timeout: REQUEST_TIMEOUT_MS, maxRetries: 0 },
++      )) as ModelReply;
++    } catch (error) {
++      throw new InterpreterError(error instanceof Error ? error.message : 'request failed');
++    }
++
++    if (response.stop_reason === 'refusal' || response.stop_reason === 'max_tokens') {
++      throw new InterpreterError(`stopped: ${response.stop_reason}`);
++    }
++    const call = response.content?.find((block) => block.type === 'tool_use');
++    if (!call) throw new InterpreterError('no tool call');
++
++    const tokens = {
++      inputTokens: response.usage?.input_tokens ?? 0,
++      outputTokens: response.usage?.output_tokens ?? 0,
++    };
++
++    if (call.name === 'run_pay_query') {
++      const parsed = this.querySchema.safeParse(call.input);
++      if (!parsed.success) throw new InterpreterError('invalid run_pay_query input');
++      return { kind: 'query', query: parsed.data, ...tokens };
++    }
++    if (call.name === 'cannot_answer') {
++      const parsed = this.cannotAnswerSchema.safeParse(call.input);
++      if (!parsed.success) throw new InterpreterError('invalid cannot_answer input');
++      return { kind: 'cannot_answer', ...parsed.data, ...tokens };
++    }
++    throw new InterpreterError(`unknown tool ${call.name}`);
++  }
++}
+diff --git a/apps/api/src/modules/ask/fake-interpreter.ts b/apps/api/src/modules/ask/fake-interpreter.ts
+new file mode 100644
+index 0000000..8857b1d
+--- /dev/null
++++ b/apps/api/src/modules/ask/fake-interpreter.ts
+@@ -0,0 +1,23 @@
++import type { InterpretContext, InterpretResult, QueryInterpreter } from './interpreter.ts';
++
++// 04 section 7.5: answers from a fixed map keyed by the exact question.
++export class FakeInterpreter implements QueryInterpreter {
++  private readonly answers: Map<string, InterpretResult>;
++  private readonly options: { throws?: boolean };
++
++  constructor(answers: Map<string, InterpretResult>, options: { throws?: boolean } = {}) {
++    this.answers = answers;
++    this.options = options;
++  }
++
++  async interpret(question: string, _context: InterpretContext): Promise<InterpretResult> {
++    if (this.options.throws) throw new Error('fake interpreter failure');
++    return (
++      this.answers.get(question) ?? {
++        kind: 'cannot_answer',
++        reason: 'unclear',
++        suggestion: 'How does total payroll split by country?',
++      }
++    );
++  }
++}
+diff --git a/apps/api/src/modules/ask/gemini-interpreter.test.ts b/apps/api/src/modules/ask/gemini-interpreter.test.ts
+new file mode 100644
+index 0000000..c60873b
+--- /dev/null
++++ b/apps/api/src/modules/ask/gemini-interpreter.test.ts
+@@ -0,0 +1,194 @@
++import type { AskReference } from '@acme/shared';
++import { describe, expect, it, vi } from 'vitest';
++import { GeminiInterpreter } from './gemini-interpreter.ts';
++import { buildToolSchemas } from './tool-schema.ts';
++
++const reference: AskReference = {
++  countries: [
++    { code: 'IN', name: 'India' },
++    { code: 'US', name: 'United States' },
++  ],
++  departments: [{ id: 1, name: 'Engineering' }],
++  jobTitles: [{ id: 10, name: 'Software Engineer' }],
++  levels: [
++    { code: 'L1', name: 'Associate' },
++    { code: 'L3', name: 'Senior' },
++  ],
++  genders: [
++    { code: 'female', name: 'Female' },
++    { code: 'male', name: 'Male' },
++  ],
++};
++
++const noFilters = { countries: [], departments: [], jobTitles: [], levels: [], genders: [] };
++const context = { today: '2026-10-11' };
++
++function reply(overrides: Record<string, unknown> = {}) {
++  return {
++    candidates: [
++      {
++        finishReason: 'STOP',
++        content: {
++          parts: [
++            {
++              functionCall: {
++                name: 'run_pay_query',
++                args: {
++                  metric: 'Median',
++                  groupBy: 'none',
++                  filters: { ...noFilters, levels: ['l3'] },
++                },
++              },
++            },
++          ],
++        },
++      },
++    ],
++    usageMetadata: { promptTokenCount: 120, candidatesTokenCount: 30 },
++    ...overrides,
++  };
++}
++
++function setup(body: unknown, { ok = true, status = 200 } = {}) {
++  const fetchFn = vi.fn(async () => ({ ok, status, json: async () => body }));
++  const interpreter = new GeminiInterpreter(fetchFn, {
++    apiKey: 'g-key',
++    model: 'gemini-test',
++    reference,
++  });
++  return { fetchFn, interpreter };
++}
++
++describe('GeminiInterpreter request (ADR 0009)', () => {
++  it('sends the model, 512 tokens, both tools, a forced tool call and only the question', async () => {
++    const { fetchFn, interpreter } = setup(reply());
++    await interpreter.interpret('What is the median salary?', context);
++
++    expect(fetchFn).toHaveBeenCalledTimes(1);
++    const [url, init] = fetchFn.mock.calls[0] as unknown as [string, Record<string, unknown>];
++    expect(url).toBe(
++      'https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent',
++    );
++    expect(init.method).toBe('POST');
++    expect(init.headers).toMatchObject({ 'x-goog-api-key': 'g-key' });
++    expect(init.signal).toBeInstanceOf(AbortSignal);
++
++    const body = JSON.parse(init.body as string) as Record<string, unknown>;
++    const tools = buildToolSchemas(reference);
++    expect(body.tools).toEqual([
++      {
++        functionDeclarations: [tools.runPayQuery, tools.cannotAnswer].map((t) => ({
++          name: t.name,
++          description: t.description,
++          parametersJsonSchema: t.input_schema,
++        })),
++      },
++    ]);
++    expect(body.toolConfig).toEqual({ functionCallingConfig: { mode: 'ANY' } });
++    expect(body.generationConfig).toMatchObject({ maxOutputTokens: 512 });
++    expect(body.contents).toEqual([
++      { role: 'user', parts: [{ text: 'What is the median salary?' }] },
++    ]);
++    const system = (body.systemInstruction as { parts: { text: string }[] }).parts[0]!.text;
++    expect(system).toContain("Today's date is 2026-10-11.");
++    expect(system).not.toContain('{{today}}');
++  });
++});
++
++describe('GeminiInterpreter response mapping (ADR 0009)', () => {
++  it('maps a run_pay_query call to a normalised query with token counts', async () => {
++    const { interpreter } = setup(reply());
++    await expect(interpreter.interpret('q', context)).resolves.toEqual({
++      kind: 'query',
++      query: { metric: 'median', groupBy: 'none', filters: { ...noFilters, levels: ['L3'] } },
++      inputTokens: 120,
++      outputTokens: 30,
++    });
++  });
++
++  it('maps a cannot_answer call to a cannot_answer result', async () => {
++    const { interpreter } = setup(
++      reply({
++        candidates: [
++          {
++            finishReason: 'STOP',
++            content: {
++              parts: [
++                {
++                  functionCall: {
++                    name: 'cannot_answer',
++                    args: { reason: 'trend', suggestion: 'What is the median salary?' },
++                  },
++                },
++              ],
++            },
++          },
++        ],
++      }),
++    );
++    await expect(interpreter.interpret('q', context)).resolves.toMatchObject({
++      kind: 'cannot_answer',
++      reason: 'trend',
++      suggestion: 'What is the median salary?',
++    });
++  });
++
++  it.each([
++    ['a safety finish reason', { candidates: [{ finishReason: 'SAFETY' }] }],
++    [
++      'a MAX_TOKENS finish reason',
++      { candidates: [{ finishReason: 'MAX_TOKENS', content: { parts: [{ text: 'cut' }] } }] },
++    ],
++    ['a blocked prompt', { candidates: undefined, promptFeedback: { blockReason: 'SAFETY' } }],
++    [
++      'no function call',
++      { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: 'Sure!' }] } }] },
++    ],
++    [
++      'arguments that fail the schema',
++      {
++        candidates: [
++          {
++            finishReason: 'STOP',
++            content: {
++              parts: [
++                {
++                  functionCall: {
++                    name: 'run_pay_query',
++                    args: { metric: 'mode', groupBy: 'none', filters: noFilters },
++                  },
++                },
++              ],
++            },
++          },
++        ],
++      },
++    ],
++  ])('rejects %s', async (_label, overrides) => {
++    const { interpreter } = setup(reply(overrides));
++    await expect(interpreter.interpret('q', context)).rejects.toThrow();
++  });
++
++  it("puts Google's error message in the rejection", async () => {
++    const { interpreter } = setup(
++      { error: { message: 'models/x is not found' } },
++      { ok: false, status: 404 },
++    );
++    await expect(interpreter.interpret('q', context)).rejects.toThrow(
++      'HTTP 404: models/x is not found',
++    );
++  });
++
++  it('rejects an HTTP error response and a failed request', async () => {
++    const { interpreter } = setup({ error: { message: 'quota' } }, { ok: false, status: 429 });
++    await expect(interpreter.interpret('q', context)).rejects.toThrow();
++
++    const failing = new GeminiInterpreter(
++      async () => {
++        throw new Error('timeout');
++      },
++      { apiKey: 'k', model: 'm', reference },
++    );
++    await expect(failing.interpret('q', context)).rejects.toThrow();
++  });
++});
+diff --git a/apps/api/src/modules/ask/gemini-interpreter.ts b/apps/api/src/modules/ask/gemini-interpreter.ts
+new file mode 100644
+index 0000000..d96568c
+--- /dev/null
++++ b/apps/api/src/modules/ask/gemini-interpreter.ts
+@@ -0,0 +1,120 @@
++import {
++  buildStructuredQuerySchema,
++  CANNOT_ANSWER_REASONS,
++  type AskReference,
++  type CannotAnswerReason,
++} from '@acme/shared';
++import { z } from 'zod';
++import {
++  InterpreterError,
++  type InterpretContext,
++  type InterpretResult,
++  type QueryInterpreter,
++} from './interpreter.ts';
++import { buildSystemPrompt } from './system-prompt.ts';
++import { buildToolSchemas } from './tool-schema.ts';
++
++// The slice of `fetch` the interpreter uses, so tests can stub it.
++export type FetchFn = (
++  url: string,
++  init: Record<string, unknown>,
++) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
++
++interface GeminiReply {
++  candidates?: {
++    finishReason?: string;
++    content?: { parts?: { text?: string; functionCall?: { name: string; args?: unknown } }[] };
++  }[];
++  promptFeedback?: { blockReason?: string };
++  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
++}
++
++const REQUEST_TIMEOUT_MS = 15_000;
++const ENDPOINT = 'https://generativelanguage.googleapis.com/v1beta/models';
++
++// ADR 0009: Gemini over its REST API. One request, two function declarations, a forced function
++// call, the question only. Same contract as the Anthropic interpreter.
++export class GeminiInterpreter implements QueryInterpreter {
++  private readonly tools: ReturnType<typeof buildToolSchemas>;
++  private readonly querySchema: ReturnType<typeof buildStructuredQuerySchema>;
++  private readonly cannotAnswerSchema = z.strictObject({
++    reason: z.enum(CANNOT_ANSWER_REASONS as readonly [CannotAnswerReason, ...CannotAnswerReason[]]),
++    suggestion: z.string(),
++  });
++
++  private readonly fetchFn: FetchFn;
++  private readonly options: { apiKey: string; model: string; reference: AskReference };
++
++  constructor(
++    fetchFn: FetchFn,
++    options: { apiKey: string; model: string; reference: AskReference },
++  ) {
++    this.fetchFn = fetchFn;
++    this.options = options;
++    this.tools = buildToolSchemas(options.reference);
++    this.querySchema = buildStructuredQuerySchema(options.reference);
++  }
++
++  async interpret(question: string, context: InterpretContext): Promise<InterpretResult> {
++    const declarations = [this.tools.runPayQuery, this.tools.cannotAnswer].map((tool) => ({
++      name: tool.name,
++      description: tool.description,
++      parametersJsonSchema: tool.input_schema,
++    }));
++
++    let reply: GeminiReply;
++    try {
++      const response = await this.fetchFn(`${ENDPOINT}/${this.options.model}:generateContent`, {
++        method: 'POST',
++        headers: { 'content-type': 'application/json', 'x-goog-api-key': this.options.apiKey },
++        body: JSON.stringify({
++          systemInstruction: { parts: [{ text: buildSystemPrompt(context.today) }] },
++          contents: [{ role: 'user', parts: [{ text: question }] }],
++          tools: [{ functionDeclarations: declarations }],
++          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
++          generationConfig: { maxOutputTokens: 512 },
++        }),
++        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
++      });
++      const payload = (await response.json().catch(() => ({}))) as GeminiReply & {
++        error?: { message?: string };
++      };
++      if (!response.ok) {
++        const detail = payload.error?.message;
++        throw new Error(`HTTP ${response.status}${detail ? `: ${detail}` : ''}`);
++      }
++      reply = payload;
++    } catch (error) {
++      throw new InterpreterError(error instanceof Error ? error.message : 'request failed');
++    }
++
++    if (reply.promptFeedback?.blockReason) {
++      throw new InterpreterError(`blocked: ${reply.promptFeedback.blockReason}`);
++    }
++    const candidate = reply.candidates?.[0];
++    if (!candidate) throw new InterpreterError('no candidate');
++    // A function call finishes with STOP; SAFETY, MAX_TOKENS and the rest mean no usable call.
++    if (candidate.finishReason && candidate.finishReason !== 'STOP') {
++      throw new InterpreterError(`stopped: ${candidate.finishReason}`);
++    }
++    const call = candidate.content?.parts?.find((part) => part.functionCall)?.functionCall;
++    if (!call) throw new InterpreterError('no function call');
++
++    const tokens = {
++      inputTokens: reply.usageMetadata?.promptTokenCount ?? 0,
++      outputTokens: reply.usageMetadata?.candidatesTokenCount ?? 0,
++    };
++
++    if (call.name === 'run_pay_query') {
++      const parsed = this.querySchema.safeParse(call.args);
++      if (!parsed.success) throw new InterpreterError('invalid run_pay_query input');
++      return { kind: 'query', query: parsed.data, ...tokens };
++    }
++    if (call.name === 'cannot_answer') {
++      const parsed = this.cannotAnswerSchema.safeParse(call.args);
++      if (!parsed.success) throw new InterpreterError('invalid cannot_answer input');
++      return { kind: 'cannot_answer', ...parsed.data, ...tokens };
++    }
++    throw new InterpreterError(`unknown function ${call.name}`);
++  }
++}
+diff --git a/apps/api/src/modules/ask/interpret.test.ts b/apps/api/src/modules/ask/interpret.test.ts
+new file mode 100644
+index 0000000..9c92eb0
+--- /dev/null
++++ b/apps/api/src/modules/ask/interpret.test.ts
+@@ -0,0 +1,103 @@
++import type { AskReference, StructuredQuery } from '@acme/shared';
++import { describe, expect, it } from 'vitest';
++import { checkQuery } from './interpret.ts';
++
++const reference: AskReference = {
++  countries: [
++    { code: 'IN', name: 'India' },
++    { code: 'US', name: 'United States' },
++  ],
++  departments: [
++    { id: 1, name: 'Engineering' },
++    { id: 2, name: 'Sales' },
++  ],
++  jobTitles: [
++    { id: 10, name: 'Software Engineer' },
++    { id: 20, name: 'Account Executive' },
++  ],
++  levels: [
++    { code: 'L1', name: 'Associate' },
++    { code: 'L3', name: 'Senior' },
++  ],
++  genders: [
++    { code: 'female', name: 'Female' },
++    { code: 'male', name: 'Male' },
++  ],
++};
++
++const noFilters = { countries: [], departments: [], jobTitles: [], levels: [], genders: [] };
++const query = (override: Partial<StructuredQuery>): StructuredQuery => ({
++  metric: 'median',
++  groupBy: 'none',
++  filters: noFilters,
++  ...override,
++});
++
++describe('checkQuery: semantic rules (04 section 7.4 step 2)', () => {
++  it('refuses genderGap with a gender filter as unsupported', () => {
++    const result = checkQuery(
++      query({ metric: 'genderGap', filters: { ...noFilters, genders: ['female'] } }),
++      reference,
++    );
++
++    expect(result).toEqual({ kind: 'cannot_answer', reason: 'unsupported', rule: 'genderGap' });
++  });
++
++  it('refuses genderGap grouped by gender as unsupported', () => {
++    const result = checkQuery(query({ metric: 'genderGap', groupBy: 'gender' }), reference);
++
++    expect(result).toEqual({ kind: 'cannot_answer', reason: 'unsupported', rule: 'genderGap' });
++  });
++
++  it('allows genderGap grouped by another dimension', () => {
++    const result = checkQuery(query({ metric: 'genderGap', groupBy: 'level' }), reference);
++
++    expect(result.kind).toBe('query');
++  });
++
++  it('allows a gender filter on other metrics', () => {
++    const result = checkQuery(
++      query({ metric: 'median', filters: { ...noFilters, genders: ['female'] } }),
++      reference,
++    );
++
++    expect(result.kind).toBe('query');
++  });
++});
++
++describe('checkQuery: names to PayFilters (04 section 7.4 step 3)', () => {
++  it('resolves department and job title names to ids and keeps codes', () => {
++    const result = checkQuery(
++      query({
++        filters: {
++          countries: ['IN'],
++          departments: ['Sales'],
++          jobTitles: ['Software Engineer', 'Account Executive'],
++          levels: ['L3'],
++          genders: ['male'],
++        },
++      }),
++      reference,
++    );
++
++    expect(result).toMatchObject({
++      kind: 'query',
++      filters: {
++        countries: ['IN'],
++        departmentIds: [2],
++        jobTitleIds: [10, 20],
++        levelCodes: ['L3'],
++        genders: ['male'],
++      },
++    });
++  });
++
++  it('turns empty lists into empty filters', () => {
++    const result = checkQuery(query({}), reference);
++
++    expect(result).toMatchObject({
++      kind: 'query',
++      filters: { countries: [], departmentIds: [], jobTitleIds: [], levelCodes: [], genders: [] },
++    });
++  });
++});
+diff --git a/apps/api/src/modules/ask/interpret.ts b/apps/api/src/modules/ask/interpret.ts
+new file mode 100644
+index 0000000..f19ad2c
+--- /dev/null
++++ b/apps/api/src/modules/ask/interpret.ts
+@@ -0,0 +1,30 @@
++import type { AskReference, CannotAnswerReason, StructuredQuery } from '@acme/shared';
++import type { PayFilters } from '../insights/repo.ts';
++
++export type CheckResult =
++  | { kind: 'query'; query: StructuredQuery; filters: PayFilters }
++  // `rule` names the semantic rule that refused the query (04 section 7.4 step 2).
++  | { kind: 'cannot_answer'; reason: CannotAnswerReason; rule: 'genderGap' };
++
++function idsOf<T extends { id: number; name: string }>(items: readonly T[], names: string[]) {
++  return items.filter((item) => names.includes(item.name)).map((item) => item.id);
++}
++
++// 04 section 7.4 steps 2 and 3: semantic rules, then names to ids.
++export function checkQuery(query: StructuredQuery, reference: AskReference): CheckResult {
++  const { filters } = query;
++  if (query.metric === 'genderGap' && (query.groupBy === 'gender' || filters.genders.length > 0)) {
++    return { kind: 'cannot_answer', reason: 'unsupported', rule: 'genderGap' };
++  }
++  return {
++    kind: 'query',
++    query,
++    filters: {
++      countries: filters.countries,
++      departmentIds: idsOf(reference.departments, filters.departments),
++      jobTitleIds: idsOf(reference.jobTitles, filters.jobTitles),
++      levelCodes: filters.levels,
++      genders: filters.genders,
++    },
++  };
++}
+diff --git a/apps/api/src/modules/ask/interpreter.ts b/apps/api/src/modules/ask/interpreter.ts
+new file mode 100644
+index 0000000..cffbf66
+--- /dev/null
++++ b/apps/api/src/modules/ask/interpreter.ts
+@@ -0,0 +1,31 @@
++import type { CannotAnswerReason, StructuredQuery } from '@acme/shared';
++
++export interface TokenCounts {
++  inputTokens: number;
++  outputTokens: number;
++}
++
++export type InterpretResult =
++  | ({ kind: 'query'; query: StructuredQuery } & Partial<TokenCounts>)
++  | ({
++      kind: 'cannot_answer';
++      reason: CannotAnswerReason;
++      suggestion: string;
++    } & Partial<TokenCounts>);
++
++export interface InterpretContext {
++  // ISO date (YYYY-MM-DD) filled into the system prompt.
++  today: string;
++}
++
++export interface QueryInterpreter {
++  interpret(question: string, context: InterpretContext): Promise<InterpretResult>;
++}
++
++// Timeout, API error, refusal, max_tokens, no tool call or a failed parse (04 section 5.8 step 3).
++export class InterpreterError extends Error {
++  constructor(message: string) {
++    super(message);
++    this.name = 'InterpreterError';
++  }
++}
+diff --git a/apps/api/src/modules/ask/provider.test.ts b/apps/api/src/modules/ask/provider.test.ts
+new file mode 100644
+index 0000000..97dfef1
+--- /dev/null
++++ b/apps/api/src/modules/ask/provider.test.ts
+@@ -0,0 +1,39 @@
++import type { AskReference } from '@acme/shared';
++import { describe, expect, it } from 'vitest';
++import { testConfig } from '../../../test/helpers.ts';
++import { AnthropicInterpreter } from './anthropic-interpreter.ts';
++import { GeminiInterpreter } from './gemini-interpreter.ts';
++import { createInterpreter } from './provider.ts';
++
++const reference: AskReference = {
++  countries: [{ code: 'IN', name: 'India' }],
++  departments: [{ id: 1, name: 'Engineering' }],
++  jobTitles: [{ id: 10, name: 'Software Engineer' }],
++  levels: [{ code: 'L3', name: 'Senior' }],
++  genders: [{ code: 'female', name: 'Female' }],
++};
++
++describe('createInterpreter (ADR 0009)', () => {
++  it('builds the interpreter for the configured provider', () => {
++    const gemini = createInterpreter(
++      { ...testConfig, askProvider: 'gemini', geminiApiKey: 'g-key', askModel: 'gemini-x' },
++      reference,
++    );
++    expect(gemini).toBeInstanceOf(GeminiInterpreter);
++
++    const anthropic = createInterpreter(
++      { ...testConfig, askProvider: 'anthropic', anthropicApiKey: 'a-key' },
++      reference,
++    );
++    expect(anthropic).toBeInstanceOf(AnthropicInterpreter);
++  });
++
++  it('refuses to build one without the provider key', () => {
++    expect(() =>
++      createInterpreter(
++        { ...testConfig, askProvider: 'gemini', geminiApiKey: undefined },
++        reference,
++      ),
++    ).toThrow();
++  });
++});
+diff --git a/apps/api/src/modules/ask/provider.ts b/apps/api/src/modules/ask/provider.ts
+new file mode 100644
+index 0000000..002730f
+--- /dev/null
++++ b/apps/api/src/modules/ask/provider.ts
+@@ -0,0 +1,20 @@
++import Anthropic from '@anthropic-ai/sdk';
++import type { AskReference } from '@acme/shared';
++import { askApiKey, type Config } from '../../config.ts';
++import { AnthropicInterpreter } from './anthropic-interpreter.ts';
++import { GeminiInterpreter } from './gemini-interpreter.ts';
++import type { QueryInterpreter } from './interpreter.ts';
++
++/** The interpreter for the configured provider (ADR 0009). Needs the provider's key. */
++export function createInterpreter(config: Config, reference: AskReference): QueryInterpreter {
++  const apiKey = askApiKey(config);
++  if (!apiKey) throw new Error(`No API key for the ${config.askProvider} provider`);
++  const options = { model: config.askModel, reference };
++  if (config.askProvider === 'gemini') {
++    return new GeminiInterpreter(fetch, { ...options, apiKey });
++  }
++  return new AnthropicInterpreter(
++    new Anthropic({ apiKey, maxRetries: 0, timeout: 15_000 }),
++    options,
++  );
++}
+diff --git a/apps/api/src/modules/ask/repo.ts b/apps/api/src/modules/ask/repo.ts
+new file mode 100644
+index 0000000..b449b1e
+--- /dev/null
++++ b/apps/api/src/modules/ask/repo.ts
+@@ -0,0 +1,57 @@
++import type { AskReference } from '@acme/shared';
++import { and, asc, count, eq, gte, inArray, lt } from 'drizzle-orm';
++import type { Db } from '../../db/client.ts';
++import { askLog, countries, departments, jobTitles, levels } from '../../db/schema.ts';
++import { GENDERS } from '../../domain/genders.ts';
++
++export type AskLogEntry = typeof askLog.$inferInsert;
++
++export async function insertAskLog(db: Db, entry: Omit<AskLogEntry, 'id'>): Promise<void> {
++  await db.insert(askLog).values(entry);
++}
++
++// The reference data the interpreter and the answer templates need (04 section 7.2).
++export async function loadAskReference(db: Db): Promise<AskReference> {
++  const [countryRows, departmentRows, jobTitleRows, levelRows] = await Promise.all([
++    db
++      .select({ code: countries.code, name: countries.name })
++      .from(countries)
++      .orderBy(asc(countries.name)),
++    db
++      .select({ id: departments.id, name: departments.name })
++      .from(departments)
++      .orderBy(asc(departments.name)),
++    db
++      .select({ id: jobTitles.id, name: jobTitles.name })
++      .from(jobTitles)
++      .orderBy(asc(jobTitles.name)),
++    db.select({ code: levels.code, name: levels.name }).from(levels).orderBy(asc(levels.rank)),
++  ]);
++  return {
++    countries: countryRows,
++    departments: departmentRows,
++    jobTitles: jobTitleRows,
++    levels: levelRows,
++    genders: GENDERS.map((g) => ({ code: g.code, name: g.name })),
++  };
++}
++
++// Questions that count toward the daily caps: rate_limited rows don't (04 section 5.8 step 2).
++export async function countAsked(
++  db: Db,
++  window: { from: string; to: string },
++  userId?: number,
++): Promise<number> {
++  const [row] = await db
++    .select({ n: count() })
++    .from(askLog)
++    .where(
++      and(
++        inArray(askLog.outcome, ['answered', 'cannot_answer', 'error']),
++        gte(askLog.askedAt, window.from),
++        lt(askLog.askedAt, window.to),
++        userId === undefined ? undefined : eq(askLog.userId, userId),
++      ),
++    );
++  return row?.n ?? 0;
++}
+diff --git a/apps/api/src/modules/ask/routes.test.ts b/apps/api/src/modules/ask/routes.test.ts
+new file mode 100644
+index 0000000..fb4ec0d
+--- /dev/null
++++ b/apps/api/src/modules/ask/routes.test.ts
+@@ -0,0 +1,260 @@
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { fakeInterpreter, questionOf } from '../../../test/ask.ts';
++import { aUser, anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testConfig, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++import { askLog, type Role } from '../../db/schema.ts';
++import type { QueryInterpreter } from './interpreter.ts';
++
++describe('POST /api/ask (K1)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(
++    options: {
++      role?: Role;
++      key?: string;
++      interpreter?: QueryInterpreter;
++      seed?: (db: Db) => Promise<void>;
++    } = {},
++  ) {
++    const db = await testDb();
++    await options.seed?.(db);
++    const { cookie } = await loggedInAs(db, options.role ?? 'hr_admin');
++    app = testApp({
++      db,
++      config: { ...testConfig, anthropicApiKey: 'key' in options ? options.key : 'test-key' },
++      interpreter: options.interpreter ?? fakeInterpreter(),
++    });
++    const ask = (question: string) =>
++      app!.inject({ method: 'POST', url: '/api/ask', headers: { cookie }, payload: { question } });
++    return { db, ask };
++  }
++
++  // Three active women, Software Engineer, L3, India, at the band mid (the builder's default).
++  const threeIndians = async (db: Db) => {
++    for (let i = 0; i < 3; i++) await anEmployee().insert(db);
++  };
++
++  it('without an API key returns 503 ASK_UNAVAILABLE and writes no log row', async () => {
++    const { db, ask } = await setup({ key: undefined });
++
++    const response = await ask(questionOf('q01'));
++
++    expect(response.statusCode).toBe(503);
++    expect(response.json()).toMatchObject({
++      code: 'ASK_UNAVAILABLE',
++      detail: "Ask about pay isn't set up on this server.",
++    });
++    expect(await db.select().from(askLog)).toEqual([]);
++  });
++
++  it('with the gemini provider and only an Anthropic key returns 503 ASK_UNAVAILABLE', async () => {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, 'hr_admin');
++    app = testApp({
++      db,
++      config: {
++        ...testConfig,
++        askProvider: 'gemini',
++        geminiApiKey: undefined,
++        anthropicApiKey: 'a-key',
++      },
++      interpreter: fakeInterpreter(),
++    });
++
++    const response = await app.inject({
++      method: 'POST',
++      url: '/api/ask',
++      headers: { cookie },
++      payload: { question: questionOf('q01') },
++    });
++
++    expect(response.statusCode).toBe(503);
++    expect(response.json()).toMatchObject({ code: 'ASK_UNAVAILABLE' });
++  });
++
++  it('returns the answer, the interpreted query and the interpretation list, and logs answered', async () => {
++    const { db, ask } = await setup({ seed: threeIndians });
++
++    const response = await ask(questionOf('q01'));
++
++    expect(response.statusCode).toBe(200);
++    const body = response.json();
++    expect(body).toMatchObject({
++      kind: 'answer',
++      question: questionOf('q01'),
++      interpretedQuery: {
++        metric: 'median',
++        groupBy: 'none',
++        filters: { countries: ['IN'], jobTitles: ['Software Engineer'], levels: ['L3'] },
++      },
++      interpretation: [
++        { label: 'Metric', value: 'Median salary' },
++        { label: 'Grouped by', value: 'Nothing' },
++        { label: 'Country', value: 'India' },
++        { label: 'Job title', value: 'Software Engineer' },
++        { label: 'Level', value: 'L3 Senior' },
++      ],
++      usage: { usedToday: 1, dailyLimit: 30 },
++    });
++    expect(body.answer).toMatch(
++      /^Median salary for Software Engineer, L3 Senior, India: INR [\d,]+ \(USD [\d,]+\), based on 3 active employees\.$/,
++    );
++    expect(body.result.groupBy).toBe('none');
++    expect(body.result.rows).toHaveLength(1);
++    expect(body.result.rows[0]).toMatchObject({
++      key: 'all',
++      label: 'All matching employees',
++      headcount: 3,
++      suppressed: false,
++      value: { type: 'money', usd: { currency: 'USD' }, local: { currency: 'INR' } },
++    });
++    expect(typeof body.fxAsOf).toBe('string');
++
++    const [row] = await db.select().from(askLog);
++    expect(row).toMatchObject({
++      question: questionOf('q01'),
++      outcome: 'answered',
++      inputTokens: 100,
++      outputTokens: 20,
++    });
++    expect(JSON.parse(row!.interpretedQuery!)).toEqual(body.interpretedQuery);
++  });
++
++  it('returns kind cannot_answer with the template message, logged as cannot_answer', async () => {
++    const { db, ask } = await setup();
++
++    const response = await ask(questionOf('q11'));
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toEqual({
++      kind: 'cannot_answer',
++      question: questionOf('q11'),
++      reason: 'edit',
++      message: "Ask about pay can't change data. Use the employee pages to make changes.",
++      suggestion: 'What is the median salary in India?',
++      examples: [
++        'How does total payroll split by country?',
++        'How many people are paid outside their band in the US?',
++        'What is the gender pay gap for Account Executives by level?',
++      ],
++      usage: { usedToday: 1, dailyLimit: 30 },
++    });
++    const [row] = await db.select().from(askLog);
++    expect(row).toMatchObject({ outcome: 'cannot_answer', interpretedQuery: null });
++  });
++
++  it('an interpreter error returns 503 ASK_UPSTREAM_FAILED and logs error', async () => {
++    const { db, ask } = await setup({ interpreter: fakeInterpreter([], { throws: true }) });
++
++    const response = await ask(questionOf('q01'));
++
++    expect(response.statusCode).toBe(503);
++    expect(response.json()).toMatchObject({
++      code: 'ASK_UPSTREAM_FAILED',
++      detail: "Couldn't read that question right now. Try again, or rephrase it.",
++    });
++    const [row] = await db.select().from(askLog);
++    expect(row).toMatchObject({ outcome: 'error', interpretedQuery: null });
++  });
++
++  it('a 501-character question returns 400', async () => {
++    const { db, ask } = await setup();
++
++    const response = await ask('a'.repeat(501));
++
++    expect(response.statusCode).toBe(400);
++    expect(response.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
++    expect(await db.select().from(askLog)).toEqual([]);
++  });
++
++  // Rows for the cap tests, written straight to the log (05 section 4.2).
++  const logRows = (
++    db: Db,
++    userId: number,
++    count: number,
++    outcome: 'answered' | 'rate_limited',
++    askedAt = '2026-10-09T01:00:00.000Z',
++  ) =>
++    db
++      .insert(askLog)
++      .values(Array.from({ length: count }, () => ({ userId, askedAt, question: 'q', outcome })));
++
++  describe('daily caps (D-037)', () => {
++    it("the 31st question of a user's day returns 429 with Retry-After to UTC midnight and logs rate_limited", async () => {
++      const { db, ask } = await setup();
++      const [user] = await db.all<{ id: number }>('SELECT id FROM users');
++      await logRows(db, user!.id, 30, 'answered');
++
++      const response = await ask(questionOf('q01'));
++
++      expect(response.statusCode).toBe(429);
++      expect(response.json()).toMatchObject({
++        code: 'ASK_LIMIT_REACHED',
++        detail: "You've used your 30 questions for today.",
++      });
++      // The test clock reads 09:00 UTC, so midnight is 15 hours away.
++      expect(response.headers['retry-after']).toBe(String(15 * 60 * 60));
++      const limited = (await db.select().from(askLog)).filter((r) => r.outcome === 'rate_limited');
++      expect(limited).toHaveLength(1);
++      expect(limited[0]).toMatchObject({ question: questionOf('q01'), interpretedQuery: null });
++    });
++
++    it("rate_limited rows and yesterday's rows don't count toward the cap", async () => {
++      const { db, ask } = await setup();
++      const [user] = await db.all<{ id: number }>('SELECT id FROM users');
++      await logRows(db, user!.id, 29, 'answered');
++      await logRows(db, user!.id, 3, 'rate_limited');
++      await logRows(db, user!.id, 10, 'answered', '2026-10-08T23:59:59.000Z');
++
++      const thirtieth = await ask(questionOf('q01'));
++      const thirtyFirst = await ask(questionOf('q01'));
++
++      expect(thirtieth.statusCode).toBe(200);
++      expect(thirtieth.json()).toMatchObject({ usage: { usedToday: 30, dailyLimit: 30 } });
++      expect(thirtyFirst.statusCode).toBe(429);
++    });
++
++    it('the global cap of 300 returns 429 with the demo-wide message', async () => {
++      const { db, ask } = await setup();
++      const other = await aUser('hr_viewer').insert(db);
++      await logRows(db, other.id, 300, 'answered');
++
++      const response = await ask(questionOf('q01'));
++
++      expect(response.statusCode).toBe(429);
++      expect(response.json()).toMatchObject({
++        code: 'ASK_LIMIT_REACHED',
++        detail: "The demo has reached today's question limit.",
++      });
++      expect(response.headers['retry-after']).toBe(String(15 * 60 * 60));
++    });
++  });
++
++  it('Finance asking about a group under 5 gets the "fewer than 5" sentence and no numbers', async () => {
++    const { ask } = await setup({ role: 'finance', seed: threeIndians });
++
++    const response = await ask(questionOf('q01'));
++
++    expect(response.statusCode).toBe(200);
++    const body = response.json();
++    expect(body.answer).toBe(
++      'Some figures are hidden to protect groups of fewer than 5 employees.',
++    );
++    expect(body.result.rows).toEqual([
++      {
++        key: 'all',
++        label: 'All matching employees',
++        headcount: null,
++        suppressed: true,
++        value: null,
++      },
++    ]);
++  });
++});
+diff --git a/apps/api/src/modules/ask/routes.ts b/apps/api/src/modules/ask/routes.ts
+new file mode 100644
+index 0000000..a1dbda5
+--- /dev/null
++++ b/apps/api/src/modules/ask/routes.ts
+@@ -0,0 +1,40 @@
++import { askBodySchema, type AskResponse } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { askApiKey, type Config } from '../../config.ts';
++import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
++import { requires } from '../../http/guard.ts';
++import { AppError } from '../../http/problem.ts';
++import type { QueryInterpreter } from './interpreter.ts';
++import { createInterpreter } from './provider.ts';
++import { loadAskReference } from './repo.ts';
++import { askQuestion } from './service.ts';
++
++export function askRoutes(
++  app: FastifyInstance,
++  deps: { db: Db; clock: Clock; config: Config; interpreter?: QueryInterpreter },
++) {
++  // The injected interpreter wins (tests); otherwise the configured provider (ADR 0009), built once on first use because
++  // its tool schemas come from the reference data.
++  let built: Promise<QueryInterpreter> | undefined;
++  const getInterpreter = (): Promise<QueryInterpreter> => {
++    if (deps.interpreter) return Promise.resolve(deps.interpreter);
++    built ??= loadAskReference(deps.db).then((reference) =>
++      createInterpreter(deps.config, reference),
++    );
++    return built;
++  };
++
++  // K1 (04 section 5.8).
++  app.post(
++    '/api/ask',
++    { onRequest: requires('ask.use'), schema: { body: askBodySchema } },
++    async (request): Promise<AskResponse> => {
++      if (!askApiKey(deps.config)) {
++        throw new AppError(503, 'ASK_UNAVAILABLE', "Ask about pay isn't set up on this server.");
++      }
++      const { question } = request.body as { question: string };
++      return askQuestion({ ...deps, getInterpreter }, request.viewer!, question);
++    },
++  );
++}
+diff --git a/apps/api/src/modules/ask/service.ts b/apps/api/src/modules/ask/service.ts
+new file mode 100644
+index 0000000..4b3b264
+--- /dev/null
++++ b/apps/api/src/modules/ask/service.ts
+@@ -0,0 +1,196 @@
++import type { AskAnswerResponse, AskResponse, AskRowValue, StructuredQuery } from '@acme/shared';
++import type { Config } from '../../config.ts';
++import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
++import { aggregateMinGroupSize } from '../../domain/permissions.ts';
++import {
++  aggregatePay,
++  type GroupResult,
++  type Metric,
++  type PayStats,
++} from '../../domain/pay-query.ts';
++import { AppError } from '../../http/problem.ts';
++import { fxAsOf } from '../auth/sessions.ts';
++import type { Viewer } from '../auth/plugin.ts';
++import { loadActivePayRows, loadGroupLabels } from '../insights/repo.ts';
++import {
++  ANSWER_EXAMPLES,
++  buildSentence,
++  genderRuleSuggestion,
++  interpretationList,
++  isLikeForLike,
++  reasonMessage,
++} from './answer.ts';
++import { checkQuery } from './interpret.ts';
++import type { InterpretResult, QueryInterpreter } from './interpreter.ts';
++import { countAsked, insertAskLog, loadAskReference } from './repo.ts';
++
++const MONEY_METRICS = ['total', 'average', 'median', 'p25', 'p75', 'min', 'max'] as const;
++const MAX_SUGGESTION_LENGTH = 200;
++const UPSTREAM_FAILED = "Couldn't read that question right now. Try again, or rephrase it.";
++
++export interface AskDeps {
++  db: Db;
++  clock: Clock;
++  config: Config;
++  getInterpreter: () => Promise<QueryInterpreter>;
++}
++
++function rowValue(query: StructuredQuery, group: GroupResult): AskRowValue | null {
++  if (group.suppressed) return null;
++  const { metric } = query;
++  if (metric === 'headcount') return { type: 'count', count: group.headcount ?? 0 };
++  if (metric === 'outsideBandCount') {
++    const band = group.outsideBand ?? { below: 0, above: 0, total: 0 };
++    return { type: 'outsideBand', ...band };
++  }
++  if (metric === 'genderGap') {
++    const gap = group.gap;
++    return {
++      type: 'gap',
++      comparable: gap?.comparable ?? false,
++      gapPct: gap?.gapPct ?? null,
++      women: gap?.women ?? null,
++      men: gap?.men ?? null,
++      likeForLike: isLikeForLike(query),
++    };
++  }
++  const key = metric as keyof PayStats;
++  return {
++    type: 'money',
++    usd: { amountMinor: group.usd?.[key] ?? 0, currency: 'USD' },
++    local:
++      group.local && group.currency
++        ? { amountMinor: group.local[key] ?? 0, currency: group.currency }
++        : null,
++  };
++}
++
++// 04 section 5.8: the flow after the key and cap checks.
++export async function askQuestion(
++  deps: AskDeps,
++  viewer: Viewer,
++  question: string,
++): Promise<AskResponse> {
++  const { db, clock, config } = deps;
++  const now = clock.now();
++  const askedAt = now.toISOString();
++  const dayStart = `${clock.today()}T00:00:00.000Z`;
++  const nextMidnight = new Date(`${clock.today()}T00:00:00.000Z`).getTime() + 86_400_000;
++  const window = { from: dayStart, to: new Date(nextMidnight).toISOString() };
++  const [userCount, globalCount] = await Promise.all([
++    countAsked(db, window, viewer.id),
++    countAsked(db, window),
++  ]);
++  const overUser = userCount >= config.askUserDailyLimit;
++  if (overUser || globalCount >= config.askGlobalDailyLimit) {
++    await insertAskLog(db, {
++      userId: viewer.id,
++      askedAt,
++      question,
++      outcome: 'rate_limited',
++      interpretedQuery: null,
++      inputTokens: null,
++      outputTokens: null,
++    });
++    throw new AppError(
++      429,
++      'ASK_LIMIT_REACHED',
++      overUser
++        ? `You've used your ${config.askUserDailyLimit} questions for today.`
++        : "The demo has reached today's question limit.",
++      undefined,
++      { 'retry-after': String(Math.ceil((nextMidnight - now.getTime()) / 1000)) },
++    );
++  }
++  // The current question counts as one used (first of the day is 1).
++  const usage = { usedToday: userCount + 1, dailyLimit: config.askUserDailyLimit };
++  const log = (outcome: 'answered' | 'cannot_answer' | 'error', result?: InterpretResult) =>
++    insertAskLog(db, {
++      userId: viewer.id,
++      askedAt,
++      question,
++      outcome,
++      interpretedQuery:
++        outcome === 'answered' && result?.kind === 'query' ? JSON.stringify(result.query) : null,
++      inputTokens: result?.inputTokens ?? null,
++      outputTokens: result?.outputTokens ?? null,
++    });
++
++  let result: InterpretResult;
++  try {
++    const interpreter = await deps.getInterpreter();
++    result = await interpreter.interpret(question, { today: clock.today() });
++  } catch {
++    await log('error');
++    throw new AppError(503, 'ASK_UPSTREAM_FAILED', UPSTREAM_FAILED);
++  }
++
++  const reference = await loadAskReference(db);
++  const cannotAnswer = async (
++    reason: Extract<InterpretResult, { kind: 'cannot_answer' }>['reason'],
++    suggestion: string,
++    rule?: 'genderGap',
++  ): Promise<AskResponse> => {
++    await log('cannot_answer', result);
++    return {
++      kind: 'cannot_answer',
++      question,
++      reason,
++      message: reasonMessage(reason, rule),
++      suggestion: suggestion.slice(0, MAX_SUGGESTION_LENGTH),
++      examples: ANSWER_EXAMPLES,
++      usage,
++    };
++  };
++
++  if (result.kind === 'cannot_answer') return cannotAnswer(result.reason, result.suggestion);
++
++  const checked = checkQuery(result.query, reference);
++  if (checked.kind === 'cannot_answer') {
++    return cannotAnswer(
++      checked.reason,
++      genderRuleSuggestion(result.query, reference),
++      checked.rule,
++    );
++  }
++
++  const { query, filters } = checked;
++  const metrics: Metric[] = (MONEY_METRICS as readonly string[]).includes(query.metric)
++    ? [query.metric, 'headcount']
++    : [query.metric];
++  const [rows, labels, asOf] = await Promise.all([
++    loadActivePayRows(db, filters),
++    query.groupBy === 'none' ? Promise.resolve({}) : loadGroupLabels(db, query.groupBy),
++    fxAsOf(db),
++  ]);
++  const groups = aggregatePay(
++    rows,
++    metrics,
++    query.groupBy,
++    aggregateMinGroupSize(viewer.role),
++    labels,
++  );
++  await log('answered', result);
++
++  const response: AskAnswerResponse = {
++    kind: 'answer',
++    question,
++    answer: buildSentence(query, groups, reference),
++    interpretedQuery: query,
++    interpretation: interpretationList(query, reference),
++    result: {
++      groupBy: query.groupBy,
++      rows: groups.map((group) => ({
++        key: group.key,
++        label: query.groupBy === 'none' ? 'All matching employees' : group.label,
++        headcount: group.headcount,
++        suppressed: group.suppressed,
++        value: rowValue(query, group),
++      })),
++    },
++    fxAsOf: asOf,
++    usage,
++  };
++  return response;
++}
+diff --git a/apps/api/src/modules/ask/system-prompt.ts b/apps/api/src/modules/ask/system-prompt.ts
+new file mode 100644
+index 0000000..e04608b
+--- /dev/null
++++ b/apps/api/src/modules/ask/system-prompt.ts
+@@ -0,0 +1,28 @@
++// 04 section 7.3, verbatim. Changes only through the eval loop (05 section 6.4).
++const TEMPLATE = `You translate HR questions about ACME's pay into exactly one tool call.
++Today's date is {{today}}. All data is the current snapshot of active employees; there is no history.
++
++Call run_pay_query when one statistic over a group of employees answers the question. Otherwise call cannot_answer.
++
++Mapping rules:
++- "pay", "salary", "compensation" mean annual gross base salary.
++- "typical", "middle", "median" -> median. "average", "mean" -> average. "payroll", "total cost", "spend" -> total. "how many", "headcount" -> headcount. "lowest" -> min. "highest" -> max. "bottom quartile" -> p25. "top quartile" -> p75.
++- "outside band", "below band", "above band", "underpaid against band" -> outsideBandCount (it reports below and above separately).
++- "gender gap", "pay gap", "women vs men" -> genderGap. Never combine genderGap with a gender filter or groupBy gender.
++- "by X", "per X", "split by X", "compare X" -> groupBy X. At most one groupBy.
++- Levels: Associate, junior or entry = L1. Intermediate or mid = L2. Senior = L3. Lead = L4. Principal = L5.
++- A role word (engineer, developer, accountant, designer, AE) is a job title: "engineer" or "developer" = Software Engineer; "AE" or "sales rep" = Account Executive. A team or function word (engineering, sales, finance team) is a department.
++- Countries: India = IN, United States or US or America = US, United Kingdom or UK or Britain = GB, Germany = DE, Canada = CA.
++- Only add a filter the question states. Leave every other filter list empty.
++
++Use cannot_answer with:
++- individual: the question names or singles out a person.
++- trend: it asks about change over time, the past, or the future.
++- edit: it asks to change, add or delete data.
++- multiple: it asks for more than one statistic; suggest the most useful single one.
++- unsupported: bonuses, equity, tax, net pay, or anything outside base salary.
++- unclear or offTopic: anything else.`;
++
++export function buildSystemPrompt(today: string): string {
++  return TEMPLATE.replace('{{today}}', today);
++}
+diff --git a/apps/api/src/modules/ask/tool-schema.test.ts b/apps/api/src/modules/ask/tool-schema.test.ts
+new file mode 100644
+index 0000000..77dd24b
+--- /dev/null
++++ b/apps/api/src/modules/ask/tool-schema.test.ts
+@@ -0,0 +1,137 @@
++import { buildStructuredQuerySchema, type AskReference } from '@acme/shared';
++import { describe, expect, it } from 'vitest';
++import { buildToolSchemas } from './tool-schema.ts';
++
++const reference: AskReference = {
++  countries: [
++    { code: 'IN', name: 'India' },
++    { code: 'US', name: 'United States' },
++  ],
++  departments: [
++    { id: 1, name: 'Engineering' },
++    { id: 2, name: 'Sales' },
++  ],
++  jobTitles: [
++    { id: 1, name: 'Software Engineer' },
++    { id: 2, name: 'Account Executive' },
++  ],
++  levels: [
++    { code: 'L1', name: 'Associate' },
++    { code: 'L3', name: 'Senior' },
++  ],
++  genders: [
++    { code: 'female', name: 'Female' },
++    { code: 'male', name: 'Male' },
++  ],
++};
++
++type Json = Record<string, unknown>;
++
++// A small validator for the JSON Schema keywords the tool schemas use.
++function accepts(schema: Json, value: unknown): boolean {
++  if (Array.isArray(schema.enum)) return schema.enum.includes(value);
++  if (schema.type === 'string') return typeof value === 'string';
++  if (schema.type === 'array') {
++    return Array.isArray(value) && value.every((item) => accepts(schema.items as Json, item));
++  }
++  if (schema.type === 'object') {
++    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
++    const record = value as Json;
++    const properties = schema.properties as Record<string, Json>;
++    const required = schema.required as string[];
++    if (!required.every((key) => key in record)) return false;
++    if (schema.additionalProperties === false) {
++      if (!Object.keys(record).every((key) => key in properties)) return false;
++    }
++    return Object.entries(properties).every(
++      ([key, sub]) => !(key in record) || accepts(sub, record[key]),
++    );
++  }
++  return false;
++}
++
++const filters = { countries: [], departments: [], jobTitles: [], levels: [], genders: [] };
++const base = { metric: 'median', groupBy: 'none', filters };
++
++const fixtures: { name: string; value: unknown }[] = [
++  { name: 'empty filters', value: base },
++  {
++    name: 'every filter filled',
++    value: {
++      metric: 'genderGap',
++      groupBy: 'level',
++      filters: {
++        countries: ['IN'],
++        departments: ['Engineering'],
++        jobTitles: ['Software Engineer'],
++        levels: ['L3'],
++        genders: [],
++      },
++    },
++  },
++  { name: 'unknown metric', value: { ...base, metric: 'mode' } },
++  { name: 'unknown groupBy', value: { ...base, groupBy: 'city' } },
++  { name: 'unknown country', value: { ...base, filters: { ...filters, countries: ['FR'] } } },
++  { name: 'unknown job title', value: { ...base, filters: { ...filters, jobTitles: ['Wizard'] } } },
++  { name: 'filter is not an array', value: { ...base, filters: { ...filters, levels: 'L3' } } },
++  { name: 'missing filters key', value: { metric: 'median', groupBy: 'none' } },
++  { name: 'missing one filter list', value: { ...base, filters: { countries: [] } } },
++  { name: 'extra top-level key', value: { ...base, extra: 1 } },
++  { name: 'extra filter key', value: { ...base, filters: { ...filters, region: [] } } },
++  { name: 'missing metric', value: { groupBy: 'none', filters } },
++];
++
++describe('run_pay_query tool schema', () => {
++  const { runPayQuery } = buildToolSchemas(reference);
++  const zodSchema = buildStructuredQuerySchema(reference);
++
++  it.each(fixtures)('agrees with the zod schema on: $name', ({ value }) => {
++    expect(accepts(runPayQuery.input_schema, value)).toBe(zodSchema.safeParse(value).success);
++  });
++
++  it('accepts the canonical fixtures and rejects the broken ones', () => {
++    const verdicts = fixtures.map((f) => accepts(runPayQuery.input_schema, f.value));
++
++    expect(verdicts).toEqual([true, true, ...Array<boolean>(fixtures.length - 2).fill(false)]);
++  });
++
++  it('lists the reference values as enums', () => {
++    const properties = (runPayQuery.input_schema.properties as Record<string, Json>).filters
++      ?.properties as Record<string, Json>;
++
++    expect((properties.countries?.items as Json).enum).toEqual(['IN', 'US']);
++    expect((properties.levels?.items as Json).enum).toEqual(['L1', 'L3']);
++  });
++});
++
++function hasForbiddenKeyword(schema: unknown): boolean {
++  if (Array.isArray(schema)) return schema.some(hasForbiddenKeyword);
++  if (typeof schema !== 'object' || schema === null) return false;
++  const node = schema as Json;
++  if (Array.isArray(node.type)) return true;
++  if ('anyOf' in node || 'oneOf' in node || 'allOf' in node) return true;
++  if (node.type === 'object') {
++    const keys = Object.keys(node.properties as Json).sort();
++    const required = [...(node.required as string[])].sort();
++    if (JSON.stringify(keys) !== JSON.stringify(required)) return true;
++    if (node.additionalProperties !== false) return true;
++  }
++  return Object.values(node).some(hasForbiddenKeyword);
++}
++
++describe('strict tool limits (04 section 7.2)', () => {
++  const tools = buildToolSchemas(reference);
++
++  it.each([
++    ['run_pay_query', tools.runPayQuery],
++    ['cannot_answer', tools.cannotAnswer],
++  ])('%s has no optional or union parameters', (name, tool) => {
++    expect(tool.name).toBe(name);
++    expect(tool.strict).toBe(true);
++    expect(hasForbiddenKeyword(tool.input_schema)).toBe(false);
++  });
++
++  it('sets no maxItems on arrays', () => {
++    expect(JSON.stringify(tools.runPayQuery.input_schema)).not.toContain('maxItems');
++  });
++});
+diff --git a/apps/api/src/modules/ask/tool-schema.ts b/apps/api/src/modules/ask/tool-schema.ts
+new file mode 100644
+index 0000000..1400f8a
+--- /dev/null
++++ b/apps/api/src/modules/ask/tool-schema.ts
+@@ -0,0 +1,75 @@
++import { ASK_GROUP_BY, ASK_METRICS, CANNOT_ANSWER_REASONS, type AskReference } from '@acme/shared';
++
++export interface ToolDefinition {
++  name: string;
++  description: string;
++  strict: true;
++  input_schema: Record<string, unknown>;
++}
++
++function listOf(values: readonly string[]) {
++  return { type: 'array', items: { type: 'string', enum: [...values] } };
++}
++
++// 04 section 7.2: built once at startup from the reference data.
++export function buildToolSchemas(reference: AskReference): {
++  runPayQuery: ToolDefinition;
++  cannotAnswer: ToolDefinition;
++} {
++  const runPayQuery: ToolDefinition = {
++    name: 'run_pay_query',
++    description:
++      "Run one aggregate pay query over ACME's active employees. Use for any question about headcount, salary statistics, payroll, people paid outside their pay band, or the gender pay gap, for the whole company or a subset.",
++    strict: true,
++    input_schema: {
++      type: 'object',
++      properties: {
++        metric: {
++          type: 'string',
++          enum: [...ASK_METRICS],
++          description: 'Exactly one statistic. Salaries are annual gross base pay.',
++        },
++        groupBy: {
++          type: 'string',
++          enum: [...ASK_GROUP_BY],
++          description: 'Split the result by one dimension, or none for a single figure.',
++        },
++        filters: {
++          type: 'object',
++          properties: {
++            countries: listOf(reference.countries.map((c) => c.code)),
++            departments: listOf(reference.departments.map((d) => d.name)),
++            jobTitles: listOf(reference.jobTitles.map((j) => j.name)),
++            levels: listOf(reference.levels.map((l) => l.code)),
++            genders: listOf(reference.genders.map((g) => g.code)),
++          },
++          required: ['countries', 'departments', 'jobTitles', 'levels', 'genders'],
++          additionalProperties: false,
++        },
++      },
++      required: ['metric', 'groupBy', 'filters'],
++      additionalProperties: false,
++    },
++  };
++
++  const cannotAnswer: ToolDefinition = {
++    name: 'cannot_answer',
++    description:
++      "Use when the question can't be answered with one aggregate pay query: it asks about a named person, a trend over time, a change to data, several statistics at once, pay outside base salary, or something unrelated or unclear.",
++    strict: true,
++    input_schema: {
++      type: 'object',
++      properties: {
++        reason: { type: 'string', enum: [...CANNOT_ANSWER_REASONS] },
++        suggestion: {
++          type: 'string',
++          description: 'One answerable question close to what the user asked, in plain English.',
++        },
++      },
++      required: ['reason', 'suggestion'],
++      additionalProperties: false,
++    },
++  };
++
++  return { runPayQuery, cannotAnswer };
++}
+diff --git a/apps/api/src/modules/auth/service.ts b/apps/api/src/modules/auth/service.ts
+index df4dfaa..fd6f072 100644
+--- a/apps/api/src/modules/auth/service.ts
++++ b/apps/api/src/modules/auth/service.ts
+@@ -1,5 +1,5 @@
+ import type { MeResponse } from '@acme/shared';
+ import { createHash, randomBytes } from 'node:crypto';
+-import type { Config } from '../../config.ts';
++import { askApiKey, type Config } from '../../config.ts';
+ import type { Db } from '../../db/client.ts';
+ import type { Clock } from '../../domain/clock.ts';
+@@ -34,5 +34,5 @@ export async function meFor(
+     user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
+     permissions: permissionsFor(user.role),
+-    askEnabled: Boolean(config.anthropicApiKey) && can(user.role, 'ask.use'),
++    askEnabled: Boolean(askApiKey(config)) && can(user.role, 'ask.use'),
+     today: clock.today(),
+     fxAsOf: await fxAsOf(db),
+diff --git a/apps/api/test/ask.ts b/apps/api/test/ask.ts
+new file mode 100644
+index 0000000..fd2d4a5
+--- /dev/null
++++ b/apps/api/test/ask.ts
+@@ -0,0 +1,41 @@
++import { readFileSync } from 'node:fs';
++import type { CannotAnswerReason, StructuredQuery } from '@acme/shared';
++import { FakeInterpreter } from '../src/modules/ask/fake-interpreter.ts';
++import type { InterpretResult } from '../src/modules/ask/interpreter.ts';
++
++type EvalCase = {
++  id: string;
++  question: string;
++  expect:
++    | { kind: 'query'; query: StructuredQuery }
++    | { kind: 'cannot_answer'; reason: CannotAnswerReason };
++};
++
++const TOKENS = { inputTokens: 100, outputTokens: 20 };
++
++export const evalCases: EvalCase[] = (
++  JSON.parse(readFileSync(new URL('../evals/ask-eval.json', import.meta.url), 'utf8')) as {
++    cases: EvalCase[];
++  }
++).cases;
++
++export const questionOf = (id: string): string => evalCases.find((c) => c.id === id)!.question;
++
++// 05 section 6.1: the fake's map comes from the eval file, plus any extra entries a test adds.
++export function fakeInterpreter(
++  extra: [string, InterpretResult][] = [],
++  options: { throws?: boolean } = {},
++) {
++  const entries: [string, InterpretResult][] = evalCases.map((c) => [
++    c.question,
++    c.expect.kind === 'query'
++      ? { kind: 'query', query: c.expect.query, ...TOKENS }
++      : {
++          kind: 'cannot_answer',
++          reason: c.expect.reason,
++          suggestion: 'What is the median salary in India?',
++          ...TOKENS,
++        },
++  ]);
++  return new FakeInterpreter(new Map([...entries, ...extra]), options);
++}
+diff --git a/apps/api/test/helpers.ts b/apps/api/test/helpers.ts
+index a4657c2..c1774f2 100644
+--- a/apps/api/test/helpers.ts
++++ b/apps/api/test/helpers.ts
+@@ -11,4 +11,6 @@ export const testConfig: Config = {
+   databaseUrl: ':memory:',
+   databaseAuthToken: undefined,
++  askProvider: 'anthropic',
++  geminiApiKey: undefined,
+   anthropicApiKey: undefined,
+   askModel: 'claude-haiku-5-5',
+diff --git a/apps/api/tsconfig.json b/apps/api/tsconfig.json
+index f0361f6..f5a96e6 100644
+--- a/apps/api/tsconfig.json
++++ b/apps/api/tsconfig.json
+@@ -6,4 +6,4 @@
+     "noEmit": true
+   },
+-  "include": ["src", "test"]
++  "include": ["src", "test", "evals"]
+ }
+diff --git a/apps/web/src/AppRoutes.tsx b/apps/web/src/AppRoutes.tsx
+index 7753ae9..33a900e 100644
+--- a/apps/web/src/AppRoutes.tsx
++++ b/apps/web/src/AppRoutes.tsx
+@@ -5,4 +5,5 @@ import { PlaceholderPage } from './components/PlaceholderPage.tsx';
+ import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
+ import { Shell, useViewer } from './components/Shell.tsx';
++import { AskPage } from './features/ask/AskPage.tsx';
+ import { EmployeeDetailPage } from './features/employees/EmployeeDetailPage.tsx';
+ import { NewEmployeePage } from './features/employees/NewEmployeePage.tsx';
+@@ -21,4 +22,5 @@ const SCREENS: Record<string, ComponentType> = {
+   '/insights': InsightsPage,
+   '/insights/pay-equity': PayEquityPage,
++  '/ask': AskPage,
+ };
+ 
+diff --git a/apps/web/src/components/Shell.test.tsx b/apps/web/src/components/Shell.test.tsx
+index 862ddc1..efe1c1a 100644
+--- a/apps/web/src/components/Shell.test.tsx
++++ b/apps/web/src/components/Shell.test.tsx
+@@ -1,3 +1,3 @@
+-import { screen } from '@testing-library/react';
++import { screen, within } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { http, HttpResponse } from 'msw';
+@@ -9,4 +9,24 @@ import { AppRoutes } from '../AppRoutes.tsx';
+ import { COLOR_SCHEME_KEY } from '../theme.ts';
+ 
++describe('Ask about pay nav entry (05 section 5.2 C row 6)', () => {
++  it('shows "Ask about pay" only when askEnabled is true', async () => {
++    server.use(
++      http.get('/api/auth/me', () =>
++        HttpResponse.json(aMeResponse('hr_admin', { askEnabled: true })),
++      ),
++    );
++    const { unmount } = render(<AppRoutes />, { route: '/employees' });
++    const nav = await screen.findByRole('navigation', { name: 'Main' });
++    expect(within(nav).getByRole('link', { name: 'Ask about pay' })).toBeInTheDocument();
++    unmount();
++
++    server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))));
++    render(<AppRoutes />, { route: '/employees' });
++    const hidden = await screen.findByRole('navigation', { name: 'Main' });
++    expect(within(hidden).getByRole('link', { name: 'Employees' })).toBeInTheDocument();
++    expect(within(hidden).queryByRole('link', { name: 'Ask about pay' })).not.toBeInTheDocument();
++  });
++});
++
+ describe('dark mode toggle (06 S3)', () => {
+   beforeEach(() => {
+diff --git a/apps/web/src/components/Shell.tsx b/apps/web/src/components/Shell.tsx
+index 7409e7b..d7c4a79 100644
+--- a/apps/web/src/components/Shell.tsx
++++ b/apps/web/src/components/Shell.tsx
+@@ -31,4 +31,5 @@ const NAV: { to: string; label: string; action: Action }[] = [
+   { to: '/insights', label: 'Insights', action: 'insights.read' },
+   { to: '/insights/pay-equity', label: 'Pay equity', action: 'insights.read' },
++  { to: '/ask', label: 'Ask about pay', action: 'ask.use' },
+ ];
+ 
+@@ -141,5 +142,9 @@ export function Shell(): ReactElement {
+             </Title>
+             <Group component="nav" gap="sm" aria-label="Main">
+-              {NAV.filter((item) => me.data.permissions.includes(item.action)).map((item) => (
++              {NAV.filter(
++                (item) =>
++                  me.data.permissions.includes(item.action) &&
++                  (item.to !== '/ask' || me.data.askEnabled),
++              ).map((item) => (
+                 <NavLink key={item.to} to={item.to} end>
+                   {item.label}
+diff --git a/apps/web/src/features/ask/AskPage.test.tsx b/apps/web/src/features/ask/AskPage.test.tsx
+new file mode 100644
+index 0000000..501ca2d
+--- /dev/null
++++ b/apps/web/src/features/ask/AskPage.test.tsx
+@@ -0,0 +1,123 @@
++import type { AskResponse } from '@acme/shared';
++import { screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { aCannotAnswerResponse, anAnswerResponse } from '../../../test/fixtures/ask.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++function servesAsk(
++  askEnabled: boolean,
++  reply: () => Response = () => HttpResponse.json(anAnswerResponse()),
++  requests: unknown[] = [],
++) {
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin', { askEnabled }))),
++    http.post('/api/ask', async ({ request }) => {
++      requests.push(await request.json());
++      return reply();
++    }),
++  );
++}
++
++const problem = (
++  status: number,
++  code: 'ASK_LIMIT_REACHED' | 'ASK_UPSTREAM_FAILED',
++  detail: string,
++) => aProblem({ status, code, detail });
++
++async function ask(question: string) {
++  const user = userEvent.setup();
++  await user.type(await screen.findByRole('textbox', { name: 'Your question' }), question);
++  await user.click(screen.getByRole('button', { name: 'Ask' }));
++  return user;
++}
++
++afterEach(() => vi.useRealTimers());
++
++describe('ask page (04 section 8.5, S-10)', () => {
++  it('shows the answer, the "How I read your question" list and the FX note', async () => {
++    const requests: unknown[] = [];
++    servesAsk(true, undefined, requests);
++    render(<AppRoutes />, { route: '/ask' });
++
++    await ask('What is the median salary for senior software engineers in India?');
++
++    expect(
++      await screen.findByText(/^Median salary for L3 Senior Software Engineer in India/),
++    ).toBeInTheDocument();
++    expect(requests).toEqual([
++      { question: 'What is the median salary for senior software engineers in India?' },
++    ]);
++    const how = screen.getByRole('list', { name: 'How I read your question' });
++    expect(within(how).getByText('Metric')).toBeInTheDocument();
++    expect(within(how).getByText('Median salary')).toBeInTheDocument();
++    expect(within(how).getByText('L3 Senior')).toBeInTheDocument();
++    expect(screen.getByText('FX as of 30 Sep 2026')).toBeInTheDocument();
++    expect(screen.getByText('3 of 30 questions used today.')).toBeInTheDocument();
++  });
++
++  it('the cannot-answer suggestion fills the question box when clicked', async () => {
++    servesAsk(true, () => HttpResponse.json(aCannotAnswerResponse() satisfies AskResponse));
++    render(<AppRoutes />, { route: '/ask' });
++
++    const user = await ask('How much does Priya earn?');
++
++    expect(await screen.findByText(/not individual people/)).toBeInTheDocument();
++    expect(screen.getByText('How does total payroll split by country?')).toBeInTheDocument();
++    await user.click(
++      screen.getByRole('button', { name: 'What is the average salary for Software Engineers?' }),
++    );
++    expect(screen.getByRole('textbox', { name: 'Your question' })).toHaveValue(
++      'What is the average salary for Software Engineers?',
++    );
++  });
++
++  it('a 429 shows the reset time; a 503 upstream failure shows "Try again"', async () => {
++    vi.useFakeTimers({ toFake: ['Date'] });
++    vi.setSystemTime(new Date('2026-10-11T10:00:00Z'));
++    servesAsk(true, () =>
++      HttpResponse.json(
++        problem(429, 'ASK_LIMIT_REACHED', "You've used your 30 questions for today."),
++        { status: 429, headers: { 'Retry-After': String(14 * 3600) } },
++      ),
++    );
++    render(<AppRoutes />, { route: '/ask' });
++
++    await ask('How many people work here?');
++
++    expect(await screen.findByText("You've used your 30 questions for today.")).toBeInTheDocument();
++    expect(screen.getByText('Resets at 00:00 your time')).toBeInTheDocument();
++
++    servesAsk(true, () =>
++      HttpResponse.json(
++        problem(
++          503,
++          'ASK_UPSTREAM_FAILED',
++          "Couldn't read that question right now. Try again, or rephrase it.",
++        ),
++        { status: 503 },
++      ),
++    );
++    await userEvent.setup().click(screen.getByRole('button', { name: 'Ask' }));
++
++    expect(await screen.findByText(/Couldn't read that question right now/)).toBeInTheDocument();
++    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
++  });
++
++  it('a direct visit with askEnabled false shows the not-set-up message', async () => {
++    servesAsk(false);
++    render(<AppRoutes />, { route: '/ask' });
++
++    expect(
++      await screen.findByText(
++        "Ask about pay isn't set up on this server. Everything else works without it.",
++      ),
++    ).toBeInTheDocument();
++    expect(screen.queryByRole('textbox', { name: 'Your question' })).not.toBeInTheDocument();
++  });
++});
+diff --git a/apps/web/src/features/ask/AskPage.tsx b/apps/web/src/features/ask/AskPage.tsx
+new file mode 100644
+index 0000000..da7e41d
+--- /dev/null
++++ b/apps/web/src/features/ask/AskPage.tsx
+@@ -0,0 +1,230 @@
++import type { AskAnswerResponse, AskCannotAnswerResponse, AskResponse } from '@acme/shared';
++import { Alert, Button, Card, Group, Stack, Table, Text, Textarea, Title } from '@mantine/core';
++import { useState, type ReactElement } from 'react';
++import { ApiError } from '../../api/client.ts';
++import { FxAsOf } from '../../components/FxAsOf.tsx';
++import { Money } from '../../components/Money.tsx';
++import { useViewer } from '../../components/Shell.tsx';
++import { formatGapPct } from '../../format.ts';
++import { useAsk } from './api.ts';
++
++const MAX_LENGTH = 500;
++const EXAMPLE_CHIPS = [
++  'How does total payroll split by country?',
++  'How many people are paid outside their band in the US?',
++  'What is the gender pay gap for Account Executives by level?',
++];
++const NOT_SET_UP = "Ask about pay isn't set up on this server. Everything else works without it.";
++
++type Row = AskAnswerResponse['result']['rows'][number];
++
++const resetFormatter = new Intl.DateTimeFormat('en-GB', {
++  hour: '2-digit',
++  minute: '2-digit',
++  hourCycle: 'h23',
++});
++
++function ValueCell({ row }: { row: Row }): ReactElement {
++  const { value } = row;
++  if (row.suppressed || value === null) return <Text span>Hidden (fewer than 5)</Text>;
++  switch (value.type) {
++    case 'count':
++      return <Text span>{value.count}</Text>;
++    case 'money':
++      return (
++        <>
++          <Money value={value.local ?? value.usd} />
++          {value.local ? (
++            <>
++              {' '}
++              (<Money value={value.usd} />)
++            </>
++          ) : null}
++        </>
++      );
++    case 'outsideBand':
++      return <Text span>{`${value.total} (${value.below} below, ${value.above} above)`}</Text>;
++    case 'gap':
++      return <Text span>{formatGapPct(value.gapPct)}</Text>;
++  }
++}
++
++function AnswerCard({ response }: { response: AskAnswerResponse }): ReactElement {
++  return (
++    <Card withBorder>
++      <Stack gap="sm">
++        <Text>{response.answer}</Text>
++        {response.result.groupBy !== 'none' ? (
++          <Table aria-label="Answer by group">
++            <Table.Thead>
++              <Table.Tr>
++                <Table.Th>Group</Table.Th>
++                <Table.Th>Headcount</Table.Th>
++                <Table.Th>Value</Table.Th>
++              </Table.Tr>
++            </Table.Thead>
++            <Table.Tbody>
++              {response.result.rows.map((row) => (
++                <Table.Tr key={row.key}>
++                  <Table.Td>{row.label}</Table.Td>
++                  <Table.Td>{row.headcount ?? ''}</Table.Td>
++                  <Table.Td>
++                    <ValueCell row={row} />
++                  </Table.Td>
++                </Table.Tr>
++              ))}
++            </Table.Tbody>
++          </Table>
++        ) : null}
++        <Text fw={600} size="sm">
++          How I read your question
++        </Text>
++        <ul aria-label="How I read your question">
++          {response.interpretation.map(({ label, value }) => (
++            <li key={label}>
++              <Text span fw={500}>
++                {label}
++              </Text>{' '}
++              <Text span>{value}</Text>
++            </li>
++          ))}
++        </ul>
++        <FxAsOf date={response.fxAsOf} />
++      </Stack>
++    </Card>
++  );
++}
++
++function CannotAnswerCard({
++  response,
++  onSuggest,
++}: {
++  response: AskCannotAnswerResponse;
++  onSuggest: (text: string) => void;
++}): ReactElement {
++  return (
++    <Card withBorder>
++      <Stack gap="sm">
++        <Text>{response.message}</Text>
++        {response.suggestion ? (
++          <Group gap="xs">
++            <Text size="sm">Try:</Text>
++            <Button
++              variant="light"
++              size="compact-sm"
++              onClick={() => onSuggest(response.suggestion)}
++            >
++              {response.suggestion}
++            </Button>
++          </Group>
++        ) : null}
++        <Text size="sm">Examples:</Text>
++        <ul>
++          {response.examples.map((example) => (
++            <li key={example}>{example}</li>
++          ))}
++        </ul>
++      </Stack>
++    </Card>
++  );
++}
++
++function usageOf(response: AskResponse | undefined): string | null {
++  return response
++    ? `${response.usage.usedToday} of ${response.usage.dailyLimit} questions used today.`
++    : null;
++}
++
++export function AskPage(): ReactElement {
++  const me = useViewer();
++  const ask = useAsk();
++  const [question, setQuestion] = useState('');
++  const [history, setHistory] = useState<AskResponse[]>([]);
++
++  if (!me.askEnabled) {
++    return (
++      <>
++        <Title order={1}>Ask about pay</Title>
++        <Text mt="md">{NOT_SET_UP}</Text>
++      </>
++    );
++  }
++
++  const submit = () => {
++    ask.mutate(question.trim(), {
++      onSuccess: (response) => setHistory((earlier) => [response, ...earlier]),
++    });
++  };
++
++  const [latest, ...earlier] = history;
++  const trimmed = question.trim();
++  const error = ask.error instanceof ApiError ? ask.error : null;
++  const resetAt =
++    error?.retryAfter === undefined ? null : new Date(ask.submittedAt + error.retryAfter * 1000);
++
++  return (
++    <Stack>
++      <Title order={1}>Ask about pay</Title>
++      <Textarea
++        label="Your question"
++        value={question}
++        onChange={(event) => setQuestion(event.currentTarget.value)}
++        maxLength={MAX_LENGTH}
++        minRows={2}
++        description={`${question.length}/${MAX_LENGTH}`}
++      />
++      {history.length === 0 ? (
++        <Group gap="xs">
++          {EXAMPLE_CHIPS.map((example) => (
++            <Button
++              key={example}
++              variant="light"
++              size="compact-sm"
++              onClick={() => setQuestion(example)}
++            >
++              {example}
++            </Button>
++          ))}
++        </Group>
++      ) : null}
++      <Group>
++        <Button onClick={submit} disabled={ask.isPending || trimmed.length === 0}>
++          {ask.isPending ? 'Reading your question...' : 'Ask'}
++        </Button>
++        {usageOf(latest) ? <Text size="sm">{usageOf(latest)}</Text> : null}
++      </Group>
++      {error ? (
++        <Alert color="red" role="alert">
++          <Text>{error.code === 'ASK_UNAVAILABLE' ? NOT_SET_UP : error.message}</Text>
++          {error.code === 'ASK_LIMIT_REACHED' && resetAt ? (
++            <Text size="sm">{`Resets at ${resetFormatter.format(resetAt)} your time`}</Text>
++          ) : null}
++          {error.code === 'ASK_UPSTREAM_FAILED' ? (
++            <Button mt="xs" size="compact-sm" onClick={submit}>
++              Try again
++            </Button>
++          ) : null}
++        </Alert>
++      ) : null}
++      {latest?.kind === 'answer' ? <AnswerCard response={latest} /> : null}
++      {latest?.kind === 'cannot_answer' ? (
++        <CannotAnswerCard response={latest} onSuggest={setQuestion} />
++      ) : null}
++      {earlier.length > 0 ? (
++        <Stack gap="xs">
++          <Title order={2} size="h4">
++            Earlier questions
++          </Title>
++          {earlier.map((response, index) => (
++            <Card key={`${earlier.length - index}`} withBorder>
++              <Text fw={500}>{response.question}</Text>
++              <Text size="sm">
++                {response.kind === 'answer' ? response.answer : response.message}
++              </Text>
++            </Card>
++          ))}
++        </Stack>
++      ) : null}
++    </Stack>
++  );
++}
+diff --git a/apps/web/src/features/ask/api.ts b/apps/web/src/features/ask/api.ts
+new file mode 100644
+index 0000000..fd26c2c
+--- /dev/null
++++ b/apps/web/src/features/ask/api.ts
+@@ -0,0 +1,13 @@
++import type { AskResponse } from '@acme/shared';
++import { useMutation } from '@tanstack/react-query';
++import { apiFetch } from '../../api/client.ts';
++
++// The response is a discriminated union the API builds itself (04 section 5.8); trust its shape.
++const askResponseSchema = { parse: (value: unknown) => value as AskResponse };
++
++/** K1: asks one question. Not cached; the page keeps the visit's answers in memory. */
++export const useAsk = () =>
++  useMutation({
++    mutationFn: (question: string) =>
++      apiFetch('/api/ask', { method: 'POST', body: { question }, schema: askResponseSchema }),
++  });
+diff --git a/apps/web/src/features/employees/EmployeeExport.test.tsx b/apps/web/src/features/employees/EmployeeExport.test.tsx
+index 528e96b..54b91fe 100644
+--- a/apps/web/src/features/employees/EmployeeExport.test.tsx
++++ b/apps/web/src/features/employees/EmployeeExport.test.tsx
+@@ -67,5 +67,8 @@ describe('export CSV button (04 sections 5.7 and 8.5)', () => {
+     release();
+     await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+-    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
++    // fetch's Blob comes from Node, not jsdom, so `expect.any(Blob)` can't match it.
++    const blob = (createObjectURL.mock.calls as unknown as Blob[][])[0]![0]!;
++    expect(blob.type).toBe('text/csv;charset=utf-8');
++    expect(blob.size).toBeGreaterThan(0);
+     expect(requests).toHaveLength(1);
+     expect(Object.fromEntries(requests[0] ?? [])).toEqual({
+diff --git a/apps/web/src/routes.ts b/apps/web/src/routes.ts
+index 86f21bb..106eeef 100644
+--- a/apps/web/src/routes.ts
++++ b/apps/web/src/routes.ts
+@@ -9,4 +9,5 @@ export const ROUTES: { path: string; action: Action; title: string }[] = [
+   { path: '/insights', action: 'insights.read', title: 'Insights' },
+   { path: '/insights/pay-equity', action: 'insights.read', title: 'Pay equity' },
++  { path: '/ask', action: 'ask.use', title: 'Ask about pay' },
+ ];
+ 
+diff --git a/apps/web/test/fixtures/ask.ts b/apps/web/test/fixtures/ask.ts
+new file mode 100644
+index 0000000..dddc30a
+--- /dev/null
++++ b/apps/web/test/fixtures/ask.ts
+@@ -0,0 +1,67 @@
++import type { AskAnswerResponse, AskCannotAnswerResponse } from '@acme/shared';
++
++export const EXAMPLES = [
++  'How does total payroll split by country?',
++  'How many people are paid outside their band in the US?',
++  'What is the gender pay gap for Account Executives by level?',
++];
++
++export const anAnswerResponse = (
++  overrides: Partial<AskAnswerResponse> = {},
++): AskAnswerResponse => ({
++  kind: 'answer',
++  question: 'What is the median salary for senior software engineers in India?',
++  answer:
++    'Median salary for L3 Senior Software Engineer in India: INR 20,48,000 (USD 23,552), based on 14 active employees.',
++  interpretedQuery: {
++    metric: 'median',
++    groupBy: 'none',
++    filters: {
++      countries: ['IN'],
++      departments: [],
++      jobTitles: ['Software Engineer'],
++      levels: ['L3'],
++      genders: [],
++    },
++  },
++  interpretation: [
++    { label: 'Metric', value: 'Median salary' },
++    { label: 'Grouped by', value: 'Nothing' },
++    { label: 'Country', value: 'India' },
++    { label: 'Job title', value: 'Software Engineer' },
++    { label: 'Level', value: 'L3 Senior' },
++  ],
++  result: {
++    groupBy: 'none',
++    rows: [
++      {
++        key: 'all',
++        label: 'All matching employees',
++        headcount: 14,
++        suppressed: false,
++        value: {
++          type: 'money',
++          usd: { amountMinor: 2355200, currency: 'USD' },
++          local: { amountMinor: 204800000, currency: 'INR' },
++        },
++      },
++    ],
++  },
++  fxAsOf: '2026-09-30',
++  usage: { usedToday: 3, dailyLimit: 30 },
++  ...overrides,
++});
++
++export const aCannotAnswerResponse = (
++  overrides: Partial<AskCannotAnswerResponse> = {},
++): AskCannotAnswerResponse => ({
++  kind: 'cannot_answer',
++  question: 'How much does Priya earn?',
++  reason: 'individual',
++  message:
++    'Ask about pay answers questions about groups, not individual people. Use the employee list to look someone up.',
++  suggestion: 'What is the average salary for Software Engineers?',
++  examples: EXAMPLES,
++  usage: { usedToday: 1, dailyLimit: 30 },
++  ...overrides,
++});
+diff --git a/docs/03-architecture.md b/docs/03-architecture.md
+index e773094..9bad099 100644
+--- a/docs/03-architecture.md
++++ b/docs/03-architecture.md
+@@ -187,6 +187,8 @@ All env vars are read once, in `config.ts`, and validated with zod. The process
+ | `DATABASE_URL` | yes | | `file:./data/dev.db` locally; `libsql://<db>.turso.io` in production; tests use `:memory:` directly |
+ | `DATABASE_AUTH_TOKEN` | in production | | Turso token; never logged |
+-| `ANTHROPIC_API_KEY` | no | | Absent: "Ask about pay" is off (D-004). The key belongs to a dedicated Console workspace (ADR 0008) |
+-| `ASK_MODEL` | no | `claude-haiku-5-5` | |
++| `ASK_PROVIDER` | no | `gemini` | `gemini` or `anthropic` (ADR 0009) |
++| `GEMINI_API_KEY` | no | | Key for `ASK_PROVIDER=gemini`. Absent: "Ask about pay" is off (D-004) |
++| `ANTHROPIC_API_KEY` | no | | Key for `ASK_PROVIDER=anthropic`; absent: Ask is off. Belongs to a dedicated Console workspace (ADR 0008) |
++| `ASK_MODEL` | no | `gemini-flash-latest` (Gemini), `claude-haiku-5-5` (Anthropic) | |
+ | `ASK_USER_DAILY_LIMIT` | no | `30` | Questions per user per UTC day |
+ | `ASK_GLOBAL_DAILY_LIMIT` | no | `300` | Questions per UTC day across all users |
+diff --git a/docs/04-api-and-ui.md b/docs/04-api-and-ui.md
+index e8c2e3f..0df2e8c 100644
+--- a/docs/04-api-and-ui.md
++++ b/docs/04-api-and-ui.md
+@@ -136,5 +136,5 @@ Error code catalogue (complete; a new code needs a line here first):
+ | 429 | `RATE_LIMITED` | More than 10 login attempts per minute from one IP |
+ | 429 | `ASK_LIMIT_REACHED` | Per-user or global daily Ask cap reached |
+-| 503 | `ASK_UNAVAILABLE` | No `ANTHROPIC_API_KEY` configured |
++| 503 | `ASK_UNAVAILABLE` | No API key for the configured `ASK_PROVIDER` (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) |
+ | 503 | `ASK_UPSTREAM_FAILED` | Model call failed, timed out, refused, hit `max_tokens`, or returned input our schema rejects |
+ | 503 | `DB_UNAVAILABLE` | Health check could not run `SELECT 1` |
+@@ -241,5 +241,5 @@ No body required (an empty JSON body `{}` is accepted). Deletes the session row
+ ```
+ 
+-`askEnabled` is true only when `ANTHROPIC_API_KEY` is set and the role has `ask.use`. `today` is the clock's UTC date. 401 `UNAUTHENTICATED` without a session.
++`askEnabled` is true only when the configured provider's key is set (`GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, ADR 0009) and the role has `ask.use`. `today` is the clock's UTC date. 401 `UNAUTHENTICATED` without a session.
+ 
+ ### 5.3 Reference data
+@@ -720,5 +720,7 @@ Expected load is at most 10,000 rows per request; Chat 8 measures it against Tur
+ ## 7. Ask about pay: interpreter contract
+ 
+-### 7.1 Request to the model (ADR 0008)
++### 7.1 Request to the model (ADR 0008, ADR 0009)
++
++> ADR 0009 adds `GeminiInterpreter` (the default provider). It sends one `generateContent` request: `systemInstruction` (7.3), one user message with the question, both tools as `functionDeclarations` (`parametersJsonSchema` from 7.2, no `strict`), `toolConfig.functionCallingConfig.mode: ANY`, `maxOutputTokens: 512`, 15-second timeout, no retries. A `finishReason` other than `STOP`, a blocked prompt, an HTTP error or no function call is an interpreter error (503 `ASK_UPSTREAM_FAILED`); function arguments are re-parsed as in 7.4. The rest of this section describes the Anthropic request.
+ 
+ `AnthropicInterpreter.interpret(question, context)` sends one Messages API request:
+diff --git a/docs/05-test-strategy.md b/docs/05-test-strategy.md
+index 8cf7b77..98a8487 100644
+--- a/docs/05-test-strategy.md
++++ b/docs/05-test-strategy.md
+@@ -79,5 +79,5 @@ export default defineConfig({
+ | `npm run test:coverage` | All projects with coverage and the D-052 floor | CI runs this one |
+ | `npm run e2e` | Builds, seeds an e2e database, runs Playwright | Under 2 minutes in CI |
+-| `npm run eval` | The Ask eval set against the real model (needs `ANTHROPIC_API_KEY`) | Manual only |
++| `npm run eval` | The Ask eval set against the real model (needs the configured provider's key: `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`) | Manual only |
+ 
+ Every script sets `TZ=UTC`. A single test file over 2 seconds is a smell to fix, not to accept.
+@@ -128,5 +128,5 @@ Web fixtures (`apps/web/test/fixtures/`): `anEmployeeListItem()`, `anEmployeeDet
+ - Styling, layout and colours. Snapshot tests: none.
+ - Getters and pass-through functions with no logic.
+-- The real Anthropic API inside the suite (only in the eval run).
++- The real Gemini or Anthropic API inside the suite (only in the eval run).
+ - Performance (Chat 8 measures it with a script and records numbers in `docs/performance.md`).
+ 
+@@ -329,4 +329,6 @@ Unit fixture: a hand-built list of `PayRow`s with numbers checked in Excel (`PER
+ | U | `AnthropicInterpreter` sends the model, `max_tokens: 512`, both tools as strict, `tool_choice: any` and only the question (stub SDK client, no network) |
+ | U | `AnthropicInterpreter` maps a `run_pay_query` call to a query, and a `refusal` stop reason, a `max_tokens` stop reason or no tool call to an error |
++| U | `GeminiInterpreter` sends the model, `maxOutputTokens: 512`, both functions, a forced function call and only the question (stub `fetch`); maps a function call to a query or refusal, and a non-`STOP` finish reason, a blocked prompt, an HTTP error, no function call or invalid arguments to an error (ADR 0009) |
++| U | `createInterpreter` builds the interpreter for `ASK_PROVIDER` and refuses without that provider's key (ADR 0009) |
+ | I | without an API key, `POST /api/ask` returns 503 `ASK_UNAVAILABLE` and writes no log row |
+ | I | an answerable question returns the answer, the interpreted query and the interpretation list, and logs `answered` with the query JSON |
+diff --git a/docs/06-build-plan.md b/docs/06-build-plan.md
+index 2cedb82..61927b8 100644
+--- a/docs/06-build-plan.md
++++ b/docs/06-build-plan.md
+@@ -553,5 +553,5 @@ refactor(insights): load the active projection once per request
+ 
+ **Scope.**
+-- `QueryInterpreter`, `FakeInterpreter`, `AnthropicInterpreter` (SDK client injected), tool schema builder from reference data, system prompt, semantic rule, answer templates, caps over `ask_log`, K1, `askEnabled` in `me`.
++- `QueryInterpreter`, `FakeInterpreter`, `AnthropicInterpreter` (SDK client injected), `GeminiInterpreter` (`fetch` injected, default provider, ADR 0009), provider switch `ASK_PROVIDER`, tool schema builder from reference data, system prompt, semantic rule, answer templates, caps over `ask_log`, K1, `askEnabled` in `me`.
+ - Shared `structured-query.ts`, `ask.ts`.
+ - `apps/api/evals/ask-eval.json` (05 section 6.3), the `npm run eval` script, and the first committed eval report.
+diff --git a/docs/adr/0008-ask-about-pay-llm.md b/docs/adr/0008-ask-about-pay-llm.md
+index 8f17be6..e413d3d 100644
+--- a/docs/adr/0008-ask-about-pay-llm.md
++++ b/docs/adr/0008-ask-about-pay-llm.md
+@@ -1,5 +1,5 @@
+ # ADR 0008: "Ask about pay" with Claude Haiku, strict tool use, and layered spend caps
+ 
+-- Status: Accepted (settles "LLM provider, key handling and spend cap"; implements D-003, D-004, D-015)
++- Status: Accepted; the provider part is amended by [ADR 0009](0009-ask-gemini-provider.md) (settles "LLM provider, key handling and spend cap"; implements D-003, D-004, D-015)
+ - Date: 2026-10-09
+ 
+diff --git a/docs/adr/0009-ask-gemini-provider.md b/docs/adr/0009-ask-gemini-provider.md
+new file mode 100644
+index 0000000..dbdbca9
+--- /dev/null
++++ b/docs/adr/0009-ask-gemini-provider.md
+@@ -0,0 +1,39 @@
++# ADR 0009: "Ask about pay" can use Google Gemini (free tier), alongside Anthropic
++
++- Status: Accepted (amends the provider part of ADR 0008; D-036 and D-037 amended by A-009 and A-010)
++- Date: 2026-10-11
++
++## Context
++
++ADR 0008 chose Anthropic's Claude Haiku through `@anthropic-ai/sdk`. The project owner has no Anthropic API key, and a Claude Pro subscription does not include API access. Subscription logins and Claude Code tokens may not be used by other applications. The demo and the eval need a provider that costs nothing.
++
++## Decision
++
++**Providers.** `ASK_PROVIDER` is `gemini` (default) or `anthropic`. Both implement `QueryInterpreter` and follow the same rules as ADR 0008: the model sees only the question, today's date and the allowed filter values; our code writes the answer; the tool input is re-parsed with the shared zod schema.
++
++**Gemini.**
++- Called over its REST API with `fetch`; no new dependency. The key is sent in the `x-goog-api-key` header.
++- `GEMINI_API_KEY` is the key. `ASK_MODEL` defaults to `gemini-flash-latest` for Gemini and `claude-haiku-5-5` for Anthropic.
++- One request: `systemInstruction` (the 04 section 7.3 prompt), one user message with the question, both tools as `functionDeclarations` using `parametersJsonSchema`, `toolConfig.functionCallingConfig.mode: ANY`, `maxOutputTokens: 512`, 15-second timeout, no retries.
++- `strict: true` has no Gemini equivalent. The enum-only, all-required schema is still sent, and the zod re-parse rejects anything invalid as `ASK_UPSTREAM_FAILED`. A `finishReason` other than `STOP`, a blocked prompt, an HTTP error or no function call also map to `ASK_UPSTREAM_FAILED`.
++- Token counts come from `usageMetadata`.
++
++**Key handling.** `askEnabled` and the 503 `ASK_UNAVAILABLE` check use the key of the configured provider. Without it, Ask stays off (D-004).
++
++**Spend and limits.** The free tier has no spend, but it has low request-rate limits. The app caps (30 per user, 300 per day), `max_tokens` and the timeout are unchanged. `npm run eval` waits 7 seconds between Gemini calls. A quota error returns 503 `ASK_UPSTREAM_FAILED`. The $5 workspace limit applies only to Anthropic.
++
++**Eval.** `npm run eval` uses the configured provider and records it in the report. The 13 of 15 bar is unchanged; a different model may need prompt changes through the eval loop (05 section 6.4).
++
++## Alternatives considered
++
++- **Claude Pro or Claude Code token in the API client.** Outside Anthropic's terms for subscriptions and likely to be blocked.
++- **Driving the Claude Code CLI as a subprocess.** Legitimate for local use, but slow, not deployable and without a schema guarantee.
++- **Groq, OpenRouter free models, a local model.** Possible behind `QueryInterpreter`; Gemini's free tier was chosen for tool-calling support and simple key setup.
++- **Replacing Anthropic.** Rejected: its interpreter and tests stay valid, and a paid Anthropic key remains a configuration change.
++
++## Consequences
++
++- No cost for the demo, but free-tier rate limits and a possible model change by the provider. On the free tier Google may use prompts to improve its products; the data is synthetic and the model never sees salaries.
++- Gemini's schema support is looser than Anthropic strict mode, so more malformed replies are possible. The zod parse is the guarantee.
++- The default is the rolling alias `gemini-flash-latest`: nothing to update when Google retires a model (the pinned `gemini-2.5-flash` returned 404 on the first eval run), but results can drift when the alias moves. The eval report records the model name; set `ASK_MODEL` to pin one.
++- An HTTP error from Google includes its message in the interpreter error, so failures in the eval report say why.
+diff --git a/docs/decisions.md b/docs/decisions.md
+index e85ec6f..a4b136e 100644
+--- a/docs/decisions.md
++++ b/docs/decisions.md
+@@ -109,2 +109,4 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | A-007 | D-038 (old: as amended by A-005) | Supporting packages added at S0: `typescript-eslint` (ESLint parser and rules for TypeScript), `@types/node`, `@types/react`, `@types/react-dom` (types for strict `tsc`), `@mantine/hooks` (required peer of `@mantine/core`). `@fastify/swagger` and `openapi-types` arrive transitively as required peers of `fastify-type-provider-zod`. TypeScript pinned to 6.0.x because `typescript-eslint` supports `typescript <6.1.0` | ESLint can't parse TypeScript, and `tsc` can't type Node or React, without them; Mantine core doesn't install without its hooks package |
+ | A-008 | D-038 (old: as amended by A-007) | `@faker-js/faker` 10.6.0 added at S1 for seed names (02 section 7.2, D-026), pinned exactly in `apps/api` dependencies so the seed CLI runs wherever the API is installed | D-026 and 02 section 7.2 chose Faker, but no ADR, 03 section 5, 05 section 3 or 06 named it as a package |
++| A-009 | D-036 (old: "Ask about pay uses claude-haiku-5-5 with two strict tools ...") | Provider is chosen by `ASK_PROVIDER`: `gemini` (default, `gemini-flash-latest`, function calling, no strict mode) or `anthropic` (claude-haiku-5-5, strict tools); ADR 0009 | No Anthropic API key available; Claude Pro includes no API access; Gemini has a free tier |
++| A-010 | D-037 (old: "dedicated Console workspace with a $5 monthly limit ...") | The $5 workspace limit applies only when the provider is Anthropic; Gemini runs on the free tier. App caps, `max_tokens`, timeout and the 503 without a key are unchanged, the key is the configured provider's (ADR 0009) | Free tier has no spend but has rate limits |
+diff --git a/docs/evals/ask-eval-2026-10-11.md b/docs/evals/ask-eval-2026-10-11.md
+new file mode 100644
+index 0000000..dc5063f
+--- /dev/null
++++ b/docs/evals/ask-eval-2026-10-11.md
+@@ -0,0 +1,29 @@
++# Ask eval 2026-10-11
++
++- Provider: gemini
++- Model: gemini-flash-latest
++- Prompt hash: cb9ec777e4b0
++- Total: 13/15 (bar: 13/15)
++
++| Case | Question | Expected | Actual | Result |
++| --- | --- | --- | --- | --- |
++| q01 | What is the median pay for a Senior Engineer in India? | median, none, countries in, jobTitles software engineer, levels l3 | median, none, countries in, jobTitles software engineer, levels l3 | pass |
++| q02 | How does total payroll split by country? | total, groupBy country | total, groupBy country | pass |
++| q03 | How many people work in Sales? | headcount, none, departments sales | headcount, none, departments sales | pass |
++| q04 | Average salary by level for Product Managers in the US | average, groupBy level, countries us, jobTitles product manager | average, groupBy level, countries us, jobTitles product manager | pass |
++| q05 | How many employees are paid outside their band in Germany? | outsidebandcount, none, countries de | outsidebandcount, none, countries de | pass |
++| q06 | What's the gender pay gap for Account Executives by level? | gendergap, groupBy level, jobTitles account executive | gendergap, groupBy level, jobTitles account executive | pass |
++| q07 | Show me the 75th percentile salary for Data Analysts in the UK | p75, none, countries gb, jobTitles data analyst | p75, none, countries gb, jobTitles data analyst | pass |
++| q08 | Who is the highest paid engineer in Canada? | cannot_answer (individual) | cannot_answer (individual) | pass |
++| q09 | What is the highest salary for a Lead Software Engineer in Canada? | max, none, countries ca, jobTitles software engineer, levels l4 | max, none, countries ca, jobTitles software engineer, levels l4 | pass |
++| q10 | How has median pay in India changed since last year? | cannot_answer (trend) | cannot_answer (trend) | pass |
++| q11 | Give Priya Nair a 5% raise | cannot_answer (edit) | error: stopped: MALFORMED_FUNCTION_CALL | fail |
++| q12 | What's the min and max salary in Marketing? | cannot_answer (multiple) | cannot_answer (multiple) | pass |
++| q13 | What do we spend on bonuses in the US? | cannot_answer (unsupported) | cannot_answer (unsupported) | pass |
++| q14 | Headcount by gender in Engineering | headcount, groupBy gender, departments engineering | headcount, groupBy gender, departments engineering | pass |
++| q15 | What is the typical salary of a junior support specialist in India and the UK? | median, none, countries gb+in, jobTitles support specialist, levels l1 | error: stopped: MALFORMED_FUNCTION_CALL | fail |
++
++## Failures
++
++- q11: schema or model, not the expectation: Gemini returned MALFORMED_FUNCTION_CALL (same on the previous run), so it never produced a cannot_answer call for a write request. No prompt change tried yet.
++- q15: schema or model, not the expectation: Gemini returned MALFORMED_FUNCTION_CALL (the previous run timed out), likely on the two-country filter with a junior-level mapping. No prompt change tried yet.
+diff --git a/package.json b/package.json
+index beef66d..b31c7a3 100644
+--- a/package.json
++++ b/package.json
+@@ -20,4 +20,5 @@
+     "lint": "eslint .",
+     "seed": "node --conditions=source --env-file-if-exists=.env apps/api/src/seed/cli.ts",
++    "eval": "node --conditions=source --env-file-if-exists=.env apps/api/evals/run.ts",
+     "prepare": "husky"
+   },
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index df6a01b..80bef8d 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -9,2 +9,3 @@ export * from './schemas/reference.ts';
+ export * from './schemas/salary.ts';
+ export * from './schemas/insights.ts';
++export * from './schemas/ask.ts';
+diff --git a/packages/shared/src/schemas/ask.test.ts b/packages/shared/src/schemas/ask.test.ts
+new file mode 100644
+index 0000000..ae177ce
+--- /dev/null
++++ b/packages/shared/src/schemas/ask.test.ts
+@@ -0,0 +1,81 @@
++import { describe, expect, it } from 'vitest';
++import { buildStructuredQuerySchema, type AskReference } from './ask.ts';
++
++const reference: AskReference = {
++  countries: [
++    { code: 'IN', name: 'India' },
++    { code: 'US', name: 'United States' },
++  ],
++  departments: [
++    { id: 1, name: 'Engineering' },
++    { id: 2, name: 'Sales' },
++  ],
++  jobTitles: [
++    { id: 1, name: 'Software Engineer' },
++    { id: 2, name: 'Account Executive' },
++  ],
++  levels: [
++    { code: 'L1', name: 'Associate' },
++    { code: 'L3', name: 'Senior' },
++  ],
++  genders: [
++    { code: 'female', name: 'Female' },
++    { code: 'male', name: 'Male' },
++  ],
++};
++
++const schema = buildStructuredQuerySchema(reference);
++
++describe('StructuredQuery: enum matching (04 section 7.4)', () => {
++  it('matches enum values case-insensitively and normalises them', () => {
++    const parsed = schema.parse({
++      metric: 'MEDIAN',
++      groupBy: 'JOBTITLE',
++      filters: {
++        countries: ['in'],
++        departments: ['engineering'],
++        jobTitles: ['software engineer'],
++        levels: ['l3'],
++        genders: ['FEMALE'],
++      },
++    });
++
++    expect(parsed).toEqual({
++      metric: 'median',
++      groupBy: 'jobTitle',
++      filters: {
++        countries: ['IN'],
++        departments: ['Engineering'],
++        jobTitles: ['Software Engineer'],
++        levels: ['L3'],
++        genders: ['female'],
++      },
++    });
++  });
++
++  it('rejects a value that is not in the reference list', () => {
++    const result = schema.safeParse({
++      metric: 'median',
++      groupBy: 'none',
++      filters: { countries: ['FR'], departments: [], jobTitles: [], levels: [], genders: [] },
++    });
++
++    expect(result.success).toBe(false);
++  });
++
++  it('caps each array at the size of its reference list', () => {
++    const result = schema.safeParse({
++      metric: 'median',
++      groupBy: 'none',
++      filters: {
++        countries: ['IN', 'US', 'IN'],
++        departments: [],
++        jobTitles: [],
++        levels: [],
++        genders: [],
++      },
++    });
++
++    expect(result.success).toBe(false);
++  });
++});
+diff --git a/packages/shared/src/schemas/ask.ts b/packages/shared/src/schemas/ask.ts
+new file mode 100644
+index 0000000..d20d863
+--- /dev/null
++++ b/packages/shared/src/schemas/ask.ts
+@@ -0,0 +1,144 @@
++import { z } from 'zod';
++import type { Money } from './employee.ts';
++
++// 04 section 7.2: the run_pay_query input, mirrored as a zod schema.
++export const ASK_METRICS = [
++  'headcount',
++  'total',
++  'average',
++  'median',
++  'p25',
++  'p75',
++  'min',
++  'max',
++  'outsideBandCount',
++  'genderGap',
++] as const;
++
++export const ASK_GROUP_BY = [
++  'none',
++  'country',
++  'department',
++  'jobTitle',
++  'level',
++  'gender',
++] as const;
++
++export const CANNOT_ANSWER_REASONS = [
++  'individual',
++  'trend',
++  'edit',
++  'multiple',
++  'unsupported',
++  'unclear',
++  'offTopic',
++] as const;
++
++export type AskMetric = (typeof ASK_METRICS)[number];
++export type AskGroupBy = (typeof ASK_GROUP_BY)[number];
++export type CannotAnswerReason = (typeof CANNOT_ANSWER_REASONS)[number];
++
++// The slice of the reference data (R1) the interpreter needs.
++export interface AskReference {
++  countries: { code: string; name: string }[];
++  departments: { id: number; name: string }[];
++  jobTitles: { id: number; name: string }[];
++  levels: { code: string; name: string }[];
++  genders: { code: string; name: string }[];
++}
++
++export interface StructuredQuery {
++  metric: AskMetric;
++  groupBy: AskGroupBy;
++  filters: {
++    countries: string[];
++    departments: string[];
++    jobTitles: string[];
++    levels: string[];
++    genders: string[];
++  };
++}
++
++// The API doesn't guarantee the capitalisation of enum values, so match case-insensitively
++// and hand back the canonical spelling.
++function caseInsensitiveEnum<T extends string>(values: readonly T[]) {
++  return z.preprocess(
++    (input) =>
++      typeof input === 'string'
++        ? (values.find((v) => v.toLowerCase() === input.toLowerCase()) ?? input)
++        : input,
++    z.enum(values as [T, ...T[]]),
++  );
++}
++
++function filterList(values: readonly string[]) {
++  return z.array(caseInsensitiveEnum(values)).max(values.length);
++}
++
++export function buildStructuredQuerySchema(reference: AskReference): z.ZodType<StructuredQuery> {
++  return z.strictObject({
++    metric: caseInsensitiveEnum(ASK_METRICS),
++    groupBy: caseInsensitiveEnum(ASK_GROUP_BY),
++    filters: z.strictObject({
++      countries: filterList(reference.countries.map((c) => c.code)),
++      departments: filterList(reference.departments.map((d) => d.name)),
++      jobTitles: filterList(reference.jobTitles.map((j) => j.name)),
++      levels: filterList(reference.levels.map((l) => l.code)),
++      genders: filterList(reference.genders.map((g) => g.code)),
++    }),
++  });
++}
++
++// K1 request body (04 section 5.8).
++export const askBodySchema = z.strictObject({ question: z.string().trim().min(1).max(500) });
++export type AskBody = z.infer<typeof askBodySchema>;
++
++export type AskRowValue =
++  | { type: 'count'; count: number }
++  | { type: 'money'; usd: Money; local: Money | null }
++  | { type: 'outsideBand'; below: number; above: number; total: number }
++  | {
++      type: 'gap';
++      comparable: boolean;
++      gapPct: number | null;
++      women: number | null;
++      men: number | null;
++      likeForLike: boolean;
++    };
++
++export interface AskUsage {
++  usedToday: number;
++  dailyLimit: number;
++}
++
++export interface AskAnswerResponse {
++  kind: 'answer';
++  question: string;
++  answer: string;
++  interpretedQuery: StructuredQuery;
++  interpretation: { label: string; value: string }[];
++  result: {
++    groupBy: AskGroupBy;
++    rows: {
++      key: string;
++      label: string;
++      headcount: number | null;
++      suppressed: boolean;
++      value: AskRowValue | null;
++    }[];
++  };
++  fxAsOf: string;
++  usage: AskUsage;
++}
++
++export interface AskCannotAnswerResponse {
++  kind: 'cannot_answer';
++  question: string;
++  reason: CannotAnswerReason;
++  message: string;
++  suggestion: string;
++  examples: string[];
++  usage: AskUsage;
++}
++
++export type AskResponse = AskAnswerResponse | AskCannotAnswerResponse;

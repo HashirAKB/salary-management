@@ -1,0 +1,3 @@
+- Commit header limit is 71 chars (commitlint); the plan's G subject was too long, shortened to 'test(salary): record a change and update the current salary'.
+- Correction: S5 test asserting no salary-change button for HR Admin replaced (S6 supersedes); Mantine selects need getByRole('combobox') not getByLabelText (listbox shares the label). User approved.
+- Correction: preview amounts test matched text across Money spans; switched to toHaveTextContent (my test defect).

@@ -1,0 +1,42 @@
+ad6383b docs: add a-008 naming faker as a pinned seed dependency
+8d1f9ed build(seed): add @faker-js/faker 10.6.0
+bfc0ec4 test(db): apply migrations once and skip them on a second run
+37daa5b feat(db): add sql migrator and initial schema
+2eee814 test(db): keep drizzle tables in step with the sql schema
+71f1a33 feat(db): add drizzle schema mirroring the migration
+65e89ee test(shared): round usd conversion half up to the cent
+9c59146 feat(shared): add toUsdMinor
+b229ac8 test(db): agree with toUsdMinor in the sql conversion form
+c71cba4 feat(db): add usd conversion sql expression
+3e893a5 test(seed): allocate counts with largest remainder and seeded normals
+6ebeff9 feat(seed): add seeded random utilities
+cbaacbe test(seed): generate 250 bands with min below mid below max
+34489fe feat(seed): generate reference data and pay bands
+d67e212 test(db): reject a foreign key violation and keep data across a tx
+54d6d60 test(seed): allocate 10000 active employees across cohorts and genders
+2124b50 feat(seed): allocate employees to cohorts
+d0e9527 test(seed): land the four target gender gaps and outlier shares
+3d23948 feat(seed): shape current salaries, gaps and outliers
+f4d1735 refactor(seed): extract cohort targets into a config table
+d9b465c test(seed): build histories that end on the current salary and position
+61c184d feat(seed): build salary histories backwards from current pay
+3288bc0 test(seed): generate 250 terminated employees
+327bd9b feat(seed): generate terminated employees
+0508bf8 test(auth): hash and verify passwords with configurable scrypt cost
+02c20ac feat(auth): add scrypt password hashing
+d054315 test(seed): write the dataset in one transaction and reset on rerun
+0872dbb feat(seed): write the dataset with reset and user upsert
+c22dd81 test(seed): summarise counts, cohort gaps and usd gaps in the report
+f38577f feat(seed): add the seed report
+c02030a test(seed): refuse to run without demo passwords
+3ea7a69 feat(seed): add seed cli with reset, users and report
+0d173c0 chore(seed): add npm run seed script
+6a2938e build(api): run migrations on startup and ship sql in the build
+9d22f63 test(seed): pin the dataset hash for the fixed seed
+971842f refactor(seed): reuse addDays for termination dates
+15b0b2a chore: limit coverage to typescript sources
+fba4a1b test(seed): spread termination dates over the whole 02 window
+afa1356 fix(seed): terminate across the full window to 2026-09-15
+feca494 test(seed): re-record the dataset hash for month-end hire dates
+8e675d2 fix(seed): clamp month arithmetic to the last day of the month
+efaa07c test(seed): give the full-seed integration tests 30 seconds

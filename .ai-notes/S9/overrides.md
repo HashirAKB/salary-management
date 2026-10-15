@@ -1,0 +1,2 @@
+- Cycle B: GET retry lives in apiFetch (option 1). The cycle A it.each test must not await the failed GET (it waits for the wake-up); edited to fire and forget. User approved.
+- Cut 3 taken by user: cycle D and all e2e work (Playwright config, smoke test, e2e CI job, branch protection) skipped. Waking work (A-C) stays.

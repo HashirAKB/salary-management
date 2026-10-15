@@ -1,0 +1,2072 @@
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 6531c33..39733a1 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -13,4 +13,6 @@ import { employeeRoutes } from './modules/employees/routes.ts';
+ import { healthRoutes } from './modules/health/routes.ts';
+ import { referenceRoutes } from './modules/reference/routes.ts';
++import { salaryRoutes } from './modules/salary/routes.ts';
++import type { SalaryWrites } from './modules/salary/service.ts';
+ 
+ export type AppDeps = {
+@@ -22,4 +24,6 @@ export type AppDeps = {
+   /** Where log lines go; stdout when absent. Tests capture it (05 section 5.0). */
+   logStream?: { write(line: string): void };
++  /** Replaces the salary change writes; tests inject a failing one to prove the rollback. */
++  salaryWrites?: SalaryWrites;
+ };
+ 
+@@ -43,4 +47,5 @@ export function buildApp(deps: AppDeps): FastifyInstance {
+   referenceRoutes(app, { db: deps.db });
+   employeeRoutes(app, { db: deps.db, clock: deps.clock });
++  salaryRoutes(app, { db: deps.db, clock: deps.clock, writes: deps.salaryWrites });
+   return app;
+ }
+diff --git a/apps/api/src/domain/salary-rules.test.ts b/apps/api/src/domain/salary-rules.test.ts
+new file mode 100644
+index 0000000..8eedda1
+--- /dev/null
++++ b/apps/api/src/domain/salary-rules.test.ts
+@@ -0,0 +1,219 @@
++import { describe, expect, it } from 'vitest';
++import { checkSalaryChange, type SalaryChangeContext } from './salary-rules.ts';
++
++// A valid merit raise for an active employee; each test overrides what it exercises.
++function context(
++  override: {
++    today?: string;
++    employee?: Partial<SalaryChangeContext['employee']>;
++    change?: Partial<SalaryChangeContext['change']>;
++    hasPayBand?: boolean;
++  } = {},
++): SalaryChangeContext {
++  return {
++    today: override.today ?? '2026-10-09',
++    employee: {
++      status: 'active',
++      salary: { amountMinor: 200_000_000, currency: 'INR' },
++      salaryEffectiveDate: '2026-04-01',
++      jobTitleId: 1,
++      levelRank: 2,
++      ...override.employee,
++    },
++    change: {
++      reason: 'merit',
++      effectiveDate: '2026-10-09',
++      amount: { amountMinor: 206_000_000, currency: 'INR' },
++      jobTitleId: 1,
++      levelRank: 2,
++      ...override.change,
++    },
++    hasPayBand: override.hasPayBand ?? true,
++  };
++}
++
++describe('checkSalaryChange: dates (D-022)', () => {
++  it('accepts an effective date equal to the current salary date', () => {
++    expect(checkSalaryChange(context({ change: { effectiveDate: '2026-04-01' } }))).toBeNull();
++  });
++
++  it('accepts an effective date equal to today', () => {
++    expect(checkSalaryChange(context({ change: { effectiveDate: '2026-10-09' } }))).toBeNull();
++  });
++
++  it('rejects a date after today', () => {
++    expect(checkSalaryChange(context({ change: { effectiveDate: '2026-10-10' } }))).toBe(
++      'DATE_IN_FUTURE',
++    );
++  });
++
++  it('rejects a date before the current salary date', () => {
++    expect(checkSalaryChange(context({ change: { effectiveDate: '2026-03-31' } }))).toBe(
++      'SALARY_DATE_BEFORE_CURRENT',
++    );
++  });
++});
++
++describe.each(['merit', 'market_adjustment'] as const)(
++  'checkSalaryChange: %s (D-022)',
++  (reason) => {
++    it('accepts a higher amount with the same title and level', () => {
++      expect(checkSalaryChange(context({ change: { reason } }))).toBeNull();
++    });
++
++    it.each([
++      { case: 'an equal amount', amountMinor: 200_000_000 },
++      { case: 'a lower amount', amountMinor: 190_000_000 },
++    ])('requires a raise: $case', ({ amountMinor }) => {
++      const change = { reason, amount: { amountMinor, currency: 'INR' } };
++      expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
++    });
++
++    it.each([
++      { case: 'a new title', change: { jobTitleId: 2 } },
++      { case: 'a new level', change: { levelRank: 3 } },
++    ])('keeps the position: $case', ({ change }) => {
++      expect(checkSalaryChange(context({ change: { reason, ...change } }))).toBe(
++        'POSITION_MUST_NOT_CHANGE',
++      );
++    });
++
++    it('reports the raise before the position', () => {
++      const change = {
++        reason,
++        amount: { amountMinor: 200_000_000, currency: 'INR' },
++        jobTitleId: 2,
++      };
++      expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
++    });
++  },
++);
++
++describe('checkSalaryChange: promotion (D-022)', () => {
++  const promotion = { reason: 'promotion' as const, levelRank: 3 };
++
++  it('accepts a higher amount and a higher level', () => {
++    expect(checkSalaryChange(context({ change: promotion }))).toBeNull();
++  });
++
++  it('allows a new job title', () => {
++    expect(checkSalaryChange(context({ change: { ...promotion, jobTitleId: 2 } }))).toBeNull();
++  });
++
++  it.each([
++    { case: 'an equal amount', amountMinor: 200_000_000 },
++    { case: 'a lower amount', amountMinor: 190_000_000 },
++  ])('requires a raise: $case', ({ amountMinor }) => {
++    const change = { ...promotion, amount: { amountMinor, currency: 'INR' } };
++    expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
++  });
++
++  it.each([
++    { case: 'the same level', levelRank: 2 },
++    { case: 'a lower level', levelRank: 1 },
++  ])('requires a higher level: $case', ({ levelRank }) => {
++    const change = { ...promotion, levelRank, jobTitleId: 2 };
++    expect(checkSalaryChange(context({ change }))).toBe('PROMOTION_LEVEL_NOT_HIGHER');
++  });
++
++  it('reports the raise before the level', () => {
++    const change = {
++      ...promotion,
++      levelRank: 2,
++      amount: { amountMinor: 200_000_000, currency: 'INR' },
++    };
++    expect(checkSalaryChange(context({ change }))).toBe('RAISE_REQUIRED');
++  });
++});
++
++describe('checkSalaryChange: correction (D-022)', () => {
++  const correction = { reason: 'correction' as const };
++
++  it('allows a lower amount', () => {
++    const change = { ...correction, amount: { amountMinor: 190_000_000, currency: 'INR' } };
++    expect(checkSalaryChange(context({ change }))).toBeNull();
++  });
++
++  it('allows a higher amount with a new title or level', () => {
++    expect(checkSalaryChange(context({ change: { ...correction, jobTitleId: 2 } }))).toBeNull();
++    expect(checkSalaryChange(context({ change: { ...correction, levelRank: 1 } }))).toBeNull();
++  });
++
++  it('allows the same amount with a new title or level', () => {
++    const amount = { amountMinor: 200_000_000, currency: 'INR' };
++    expect(
++      checkSalaryChange(context({ change: { ...correction, amount, jobTitleId: 2 } })),
++    ).toBeNull();
++    expect(
++      checkSalaryChange(context({ change: { ...correction, amount, levelRank: 3 } })),
++    ).toBeNull();
++  });
++
++  it('rejects a change that changes nothing', () => {
++    const amount = { amountMinor: 200_000_000, currency: 'INR' };
++    expect(checkSalaryChange(context({ change: { ...correction, amount } }))).toBe(
++      'CORRECTION_NO_CHANGE',
++    );
++  });
++});
++
++describe('checkSalaryChange: order of the rules (04 section 5.5)', () => {
++  // Every reason with an amount equal to the current pay and the same position breaks its own rule.
++  const reasons = [
++    { reason: 'merit', own: 'RAISE_REQUIRED' },
++    { reason: 'market_adjustment', own: 'RAISE_REQUIRED' },
++    { reason: 'promotion', own: 'RAISE_REQUIRED' },
++    { reason: 'correction', own: 'CORRECTION_NO_CHANGE' },
++  ] as const;
++  const unchanged = { amount: { amountMinor: 200_000_000, currency: 'INR' } };
++  const wrongCurrency = { amount: { amountMinor: 200_000_000, currency: 'USD' } };
++
++  describe.each(reasons)('$reason', ({ reason, own }) => {
++    it('returns its own rule when nothing earlier is broken', () => {
++      expect(checkSalaryChange(context({ change: { reason, ...unchanged } }))).toBe(own);
++    });
++
++    it('terminated comes before a future date', () => {
++      const input = context({
++        employee: { status: 'terminated' },
++        change: { reason, ...wrongCurrency, effectiveDate: '2026-10-10' },
++        hasPayBand: false,
++      });
++      expect(checkSalaryChange(input)).toBe('EMPLOYEE_TERMINATED');
++    });
++
++    it('a future date comes before a currency mismatch', () => {
++      const input = context({
++        change: { reason, ...wrongCurrency, effectiveDate: '2026-10-10' },
++        hasPayBand: false,
++      });
++      expect(checkSalaryChange(input)).toBe('DATE_IN_FUTURE');
++    });
++
++    it('a date before the current one comes before a currency mismatch', () => {
++      const input = context({
++        change: { reason, ...wrongCurrency, effectiveDate: '2026-03-31' },
++        hasPayBand: false,
++      });
++      expect(checkSalaryChange(input)).toBe('SALARY_DATE_BEFORE_CURRENT');
++    });
++
++    it('a currency mismatch comes before the reason rule', () => {
++      const input = context({ change: { reason, ...wrongCurrency }, hasPayBand: false });
++      expect(checkSalaryChange(input)).toBe('SALARY_CURRENCY_MISMATCH');
++    });
++
++    it('the reason rule comes before a missing pay band', () => {
++      const input = context({ change: { reason, ...unchanged }, hasPayBand: false });
++      expect(checkSalaryChange(input)).toBe(own);
++    });
++  });
++
++  it.each(['merit', 'market_adjustment', 'promotion', 'correction'] as const)(
++    'returns NO_PAY_BAND for %s when every other rule passes',
++    (reason) => {
++      const change = reason === 'promotion' ? { reason, levelRank: 3 } : { reason, levelRank: 2 };
++      expect(checkSalaryChange(context({ change, hasPayBand: false }))).toBe('NO_PAY_BAND');
++    },
++  );
++});
+diff --git a/apps/api/src/domain/salary-rules.ts b/apps/api/src/domain/salary-rules.ts
+new file mode 100644
+index 0000000..e7a4f0e
+--- /dev/null
++++ b/apps/api/src/domain/salary-rules.ts
+@@ -0,0 +1,77 @@
++import type { Money, SalaryChangeReason } from '@acme/shared';
++
++// 04 section 5.5 S2: the 422 codes, checked in this order; the first violation wins.
++export type SalaryRuleCode =
++  | 'EMPLOYEE_TERMINATED'
++  | 'DATE_IN_FUTURE'
++  | 'SALARY_DATE_BEFORE_CURRENT'
++  | 'SALARY_CURRENCY_MISMATCH'
++  | 'RAISE_REQUIRED'
++  | 'POSITION_MUST_NOT_CHANGE'
++  | 'PROMOTION_LEVEL_NOT_HIGHER'
++  | 'CORRECTION_NO_CHANGE'
++  | 'NO_PAY_BAND';
++
++export interface SalaryChangeContext {
++  /** Today's date from the clock, YYYY-MM-DD. */
++  today: string;
++  employee: {
++    status: 'active' | 'terminated';
++    salary: Money;
++    salaryEffectiveDate: string;
++    jobTitleId: number;
++    levelRank: number;
++  };
++  change: {
++    reason: SalaryChangeReason;
++    effectiveDate: string;
++    amount: Money;
++    jobTitleId: number;
++    levelRank: number;
++  };
++  /** Whether the new position has a pay band in the employee's country. */
++  hasPayBand: boolean;
++}
++
++type ReasonRule = (context: SalaryChangeContext) => SalaryRuleCode | null;
++
++const requireRaise: ReasonRule = ({ employee, change }) =>
++  change.amount.amountMinor > employee.salary.amountMinor ? null : 'RAISE_REQUIRED';
++
++const keepPosition: ReasonRule = ({ employee, change }) =>
++  change.jobTitleId === employee.jobTitleId && change.levelRank === employee.levelRank
++    ? null
++    : 'POSITION_MUST_NOT_CHANGE';
++
++const requireHigherLevel: ReasonRule = ({ employee, change }) =>
++  change.levelRank > employee.levelRank ? null : 'PROMOTION_LEVEL_NOT_HIGHER';
++
++const requireSomeChange: ReasonRule = ({ employee, change }) =>
++  change.amount.amountMinor !== employee.salary.amountMinor ||
++  change.jobTitleId !== employee.jobTitleId ||
++  change.levelRank !== employee.levelRank
++    ? null
++    : 'CORRECTION_NO_CHANGE';
++
++// D-022: the rules of each reason, in the order they are reported.
++const REASON_RULES: Record<SalaryChangeReason, readonly ReasonRule[]> = {
++  merit: [requireRaise, keepPosition],
++  market_adjustment: [requireRaise, keepPosition],
++  promotion: [requireRaise, requireHigherLevel],
++  correction: [requireSomeChange],
++};
++
++/** The first rule the change breaks, or null when it is allowed. */
++export function checkSalaryChange(context: SalaryChangeContext): SalaryRuleCode | null {
++  const { today, employee, change } = context;
++  if (employee.status === 'terminated') return 'EMPLOYEE_TERMINATED';
++  if (change.effectiveDate > today) return 'DATE_IN_FUTURE';
++  if (change.effectiveDate < employee.salaryEffectiveDate) return 'SALARY_DATE_BEFORE_CURRENT';
++  if (change.amount.currency !== employee.salary.currency) return 'SALARY_CURRENCY_MISMATCH';
++  for (const rule of REASON_RULES[change.reason]) {
++    const code = rule(context);
++    if (code) return code;
++  }
++  if (!context.hasPayBand) return 'NO_PAY_BAND';
++  return null;
++}
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+index 86277d8..b6ac368 100644
+--- a/apps/api/src/http/access-matrix.test.ts
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -21,4 +21,6 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
+   'PATCH /api/employees/:id': 'employee.write',
+   'POST /api/employees/:id/termination': 'employee.write',
++  'GET /api/employees/:id/salary-changes': 'salary.read',
++  'POST /api/employees/:id/salary-changes': 'salary.write',
+   'GET /api/exports/employees.csv': 'export.employees',
+ };
+diff --git a/apps/api/src/modules/salary/history.test.ts b/apps/api/src/modules/salary/history.test.ts
+new file mode 100644
+index 0000000..c500ae3
+--- /dev/null
++++ b/apps/api/src/modules/salary/history.test.ts
+@@ -0,0 +1,130 @@
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs, merit, promotion } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import { SOFTWARE_ENGINEER } from '../../seed/reference.ts';
++
++describe('GET /api/employees/:id/salary-changes (S1)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  // Hired 2022-01-10 at L3, merit +10% on 2023-04-01, promoted to L4 with +20% on 2024-04-01.
++  async function setup() {
++    const db = await testDb();
++    const { id } = await anEmployee()
++      .withSalary(200_000_000)
++      .withHistory([merit('2023-04-01', 10), promotion('2024-04-01', 'L4', 20)])
++      .insert(db);
++    const { cookie, user } = await loggedInAs(db, 'hr_admin');
++    app = testApp({ db });
++    const history = (employeeId = id) =>
++      app!.inject({
++        method: 'GET',
++        url: `/api/employees/${employeeId}/salary-changes`,
++        headers: { cookie },
++      });
++    return { db, id, cookie, user, history };
++  }
++
++  it('lists newest first with previous amount, change % and the position before and after', async () => {
++    const { history } = await setup();
++
++    const response = await history();
++
++    expect(response.statusCode).toBe(200);
++    const { items } = response.json();
++    expect(items.map((item: { reason: string }) => item.reason)).toEqual([
++      'promotion',
++      'merit',
++      'hire',
++    ]);
++    expect(items[0]).toMatchObject({
++      effectiveDate: '2024-04-01',
++      amount: { amountMinor: 264_000_000, currency: 'INR' },
++      previousAmount: { amountMinor: 220_000_000, currency: 'INR' },
++      changePct: 20,
++      jobTitle: { id: SOFTWARE_ENGINEER },
++      level: { code: 'L4' },
++      previousJobTitle: { id: SOFTWARE_ENGINEER },
++      previousLevel: { code: 'L3' },
++    });
++    expect(items[1]).toMatchObject({
++      previousAmount: { amountMinor: 200_000_000, currency: 'INR' },
++      changePct: 10,
++      level: { code: 'L3' },
++      previousLevel: { code: 'L3' },
++    });
++    expect(items[2]).toMatchObject({
++      effectiveDate: '2022-01-10',
++      previousAmount: null,
++      changePct: null,
++      previousJobTitle: null,
++      previousLevel: null,
++    });
++  });
++
++  it('shows changedBy null for seeded rows and the recorder display name for rows made in the app', async () => {
++    const { id, cookie, user, history } = await setup();
++    await app!.inject({
++      method: 'POST',
++      url: `/api/employees/${id}/salary-changes`,
++      headers: { cookie },
++      payload: {
++        effectiveDate: '2026-10-09',
++        reason: 'merit',
++        amount: { amountMinor: 270_000_000, currency: 'INR' },
++        jobTitleId: SOFTWARE_ENGINEER,
++        levelCode: 'L4',
++      },
++    });
++
++    const { items } = (await history()).json();
++
++    expect(items[0].changedBy).toEqual({ displayName: user.displayName });
++    expect(items.slice(1).map((item: { changedBy: unknown }) => item.changedBy)).toEqual([
++      null,
++      null,
++      null,
++    ]);
++  });
++
++  it('orders two changes on the same date by id, the later one first, each against the one before', async () => {
++    const { id, cookie, history } = await setup();
++    const record = async (amountMinor: number) =>
++      (
++        await app!.inject({
++          method: 'POST',
++          url: `/api/employees/${id}/salary-changes`,
++          headers: { cookie },
++          payload: {
++            effectiveDate: '2026-10-09',
++            reason: 'merit',
++            amount: { amountMinor, currency: 'INR' },
++            jobTitleId: SOFTWARE_ENGINEER,
++            levelCode: 'L4',
++          },
++        })
++      ).json().change.id as number;
++    const first = await record(270_000_000);
++    const second = await record(280_000_000);
++
++    const { items } = (await history()).json();
++
++    expect(items.slice(0, 2).map((item: { id: number }) => item.id)).toEqual([second, first]);
++    expect(items[0].previousAmount.amountMinor).toBe(270_000_000);
++    expect(items[1].previousAmount.amountMinor).toBe(264_000_000);
++  });
++
++  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown employee', async () => {
++    const { history } = await setup();
++
++    const response = await history(9999);
++
++    expect(response.statusCode).toBe(404);
++    expect(response.json()).toMatchObject({ code: 'EMPLOYEE_NOT_FOUND', status: 404 });
++  });
++});
+diff --git a/apps/api/src/modules/salary/routes.test.ts b/apps/api/src/modules/salary/routes.test.ts
+new file mode 100644
+index 0000000..9e12232
+--- /dev/null
++++ b/apps/api/src/modules/salary/routes.test.ts
+@@ -0,0 +1,259 @@
++import { changePct } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { aReferenceSet, anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { currentSalaryMismatches } from '../../../test/invariants.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++import { SOFTWARE_ENGINEER } from '../../seed/reference.ts';
++import { drizzleSalaryWrites, type SalaryWrites } from './service.ts';
++
++const NOW = '2026-10-09T09:00:00.000Z';
++
++describe('POST /api/employees/:id/salary-changes (S2)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  // An active L3 Software Engineer in India, hired 2022-01-10, signed in as HR Admin.
++  async function setup(
++    options: { reference?: ReturnType<typeof aReferenceSet>; terminated?: boolean } = {},
++  ) {
++    const db = await testDb(options.reference);
++    const { id } = await (
++      options.terminated ? anEmployee().terminatedOn('2026-09-30') : anEmployee()
++    ).insert(db);
++    const { cookie, user } = await loggedInAs(db, 'hr_admin');
++    app = testApp({ db });
++    const employee = async () =>
++      (
++        await app!.inject({ method: 'GET', url: `/api/employees/${id}`, headers: { cookie } })
++      ).json();
++    const record = (body: object) =>
++      app!.inject({
++        method: 'POST',
++        url: `/api/employees/${id}/salary-changes`,
++        headers: { cookie },
++        payload: body,
++      });
++    return { db, id, user, cookie, employee, record };
++  }
++
++  const rows = async (db: Db, id: number) =>
++    (
++      await db.$client.execute({
++        sql: 'SELECT * FROM salary_changes WHERE employee_id = ? ORDER BY id',
++        args: [id],
++      })
++    ).rows;
++
++  it('records a merit raise: 201, one new history row, current-salary columns updated', async () => {
++    const { db, id, user, employee, record } = await setup();
++    const before = await employee();
++    const raised = Math.round(before.salary.amountMinor * 1.03);
++
++    const response = await record({
++      effectiveDate: '2026-10-09',
++      reason: 'merit',
++      amount: { amountMinor: raised, currency: 'INR' },
++      jobTitleId: SOFTWARE_ENGINEER,
++      levelCode: 'L3',
++    });
++
++    expect(response.statusCode).toBe(201);
++    expect(response.headers.location).toBe(`/api/employees/${id}`);
++    const body = response.json();
++    expect(body.employee).toMatchObject({
++      id,
++      salary: { amountMinor: raised, currency: 'INR' },
++      salaryEffectiveDate: '2026-10-09',
++      level: { code: 'L3' },
++      updatedAt: NOW,
++    });
++    expect(body.change).toMatchObject({
++      effectiveDate: '2026-10-09',
++      reason: 'merit',
++      amount: { amountMinor: raised, currency: 'INR' },
++      previousAmount: before.salary,
++      changePct: changePct(before.salary.amountMinor, raised),
++      jobTitle: { id: SOFTWARE_ENGINEER },
++      level: { code: 'L3' },
++      previousJobTitle: { id: SOFTWARE_ENGINEER },
++      previousLevel: { code: 'L3' },
++      changedBy: { displayName: user.displayName },
++      createdAt: NOW,
++    });
++    const history = await rows(db, id);
++    expect(history).toHaveLength(2);
++    expect(history[1]).toMatchObject({
++      id: body.change.id,
++      reason: 'merit',
++      amount_minor: raised,
++      changed_by_user_id: user.id,
++      created_at: NOW,
++    });
++    expect(await currentSalaryMismatches(db)).toEqual([]);
++  });
++
++  it('records a promotion: the level changes, and the change shows the level before and after', async () => {
++    const { db, id, employee, record } = await setup();
++    const before = await employee();
++    const raised = Math.round(before.salary.amountMinor * 1.2);
++
++    const response = await record({
++      effectiveDate: '2026-10-09',
++      reason: 'promotion',
++      amount: { amountMinor: raised, currency: 'INR' },
++      jobTitleId: SOFTWARE_ENGINEER,
++      levelCode: 'L4',
++    });
++
++    expect(response.statusCode).toBe(201);
++    const body = response.json();
++    expect(body.employee.level.code).toBe('L4');
++    expect(body.change).toMatchObject({
++      reason: 'promotion',
++      level: { code: 'L4' },
++      previousLevel: { code: 'L3' },
++      previousJobTitle: { id: SOFTWARE_ENGINEER },
++    });
++    expect((await employee()).level.code).toBe('L4');
++    expect(await rows(db, id)).toHaveLength(2);
++    expect(await currentSalaryMismatches(db)).toEqual([]);
++  });
++
++  describe('rule violations', () => {
++    // A merit raise of 3% for the employee in `setup`; each case overrides what it breaks.
++    const merit = (salary: number, override: object = {}) => ({
++      effectiveDate: '2026-10-09',
++      reason: 'merit',
++      amount: { amountMinor: Math.round(salary * 1.03), currency: 'INR' },
++      jobTitleId: SOFTWARE_ENGINEER,
++      levelCode: 'L3',
++      ...override,
++    });
++
++    it.each([
++      { code: 'DATE_IN_FUTURE', override: () => ({ effectiveDate: '2026-10-10' }) },
++      { code: 'SALARY_DATE_BEFORE_CURRENT', override: () => ({ effectiveDate: '2022-01-09' }) },
++      {
++        code: 'SALARY_CURRENCY_MISMATCH',
++        override: (salary: number) => ({ amount: { amountMinor: salary * 2, currency: 'USD' } }),
++      },
++      {
++        code: 'RAISE_REQUIRED',
++        override: (salary: number) => ({ amount: { amountMinor: salary, currency: 'INR' } }),
++      },
++      { code: 'POSITION_MUST_NOT_CHANGE', override: () => ({ levelCode: 'L4' }) },
++      {
++        code: 'PROMOTION_LEVEL_NOT_HIGHER',
++        override: () => ({ reason: 'promotion', levelCode: 'L3' }),
++      },
++      {
++        code: 'CORRECTION_NO_CHANGE',
++        override: (salary: number) => ({
++          reason: 'correction',
++          amount: { amountMinor: salary, currency: 'INR' },
++        }),
++      },
++    ])('returns 422 $code and keeps the data as it was', async ({ code, override }) => {
++      const { db, id, employee, record } = await setup();
++      const before = await employee();
++
++      const response = await record(
++        merit(before.salary.amountMinor, override(before.salary.amountMinor)),
++      );
++
++      expect(response.statusCode).toBe(422);
++      expect(response.json()).toMatchObject({ code, status: 422 });
++      expect(await employee()).toEqual(before);
++      expect(await rows(db, id)).toHaveLength(1);
++    });
++
++    it('returns 422 NO_PAY_BAND when the new position has no band in the employee country', async () => {
++      const reference = aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L4');
++      const { db, id, employee, record } = await setup({ reference });
++      const before = await employee();
++
++      const response = await record(
++        merit(before.salary.amountMinor, { reason: 'promotion', levelCode: 'L4' }),
++      );
++
++      expect(response.statusCode).toBe(422);
++      expect(response.json()).toMatchObject({
++        code: 'NO_PAY_BAND',
++        detail: "There's no pay band for this country, job title and level.",
++      });
++      expect(await employee()).toEqual(before);
++      expect(await rows(db, id)).toHaveLength(1);
++    });
++
++    it('returns 422 EMPLOYEE_TERMINATED for a terminated employee', async () => {
++      const { db, id, employee, record } = await setup({ terminated: true });
++      const before = await employee();
++
++      const response = await record(merit(before.salary.amountMinor));
++
++      expect(response.statusCode).toBe(422);
++      expect(response.json()).toMatchObject({ code: 'EMPLOYEE_TERMINATED', status: 422 });
++      expect(await rows(db, id)).toHaveLength(1);
++    });
++
++    it('returns 404 EMPLOYEE_NOT_FOUND for an unknown employee', async () => {
++      const { cookie } = await setup();
++
++      const response = await app!.inject({
++        method: 'POST',
++        url: '/api/employees/9999/salary-changes',
++        headers: { cookie },
++        payload: merit(200_000_000),
++      });
++
++      expect(response.statusCode).toBe(404);
++      expect(response.json()).toMatchObject({ code: 'EMPLOYEE_NOT_FOUND', status: 404 });
++    });
++  });
++
++  describe('atomicity', () => {
++    // Injected failing repository: the history insert is real, the employee update throws.
++    const failingSecondWrite: SalaryWrites = {
++      insertChange: drizzleSalaryWrites.insertChange,
++      updateEmployee: async () => {
++        throw new Error('injected failure on the second write');
++      },
++    };
++
++    it('keeps neither the history row nor the employee update when the second write fails', async () => {
++      const db = await testDb();
++      const { id } = await anEmployee().insert(db);
++      const { cookie } = await loggedInAs(db, 'hr_admin');
++      app = testApp({ db, salaryWrites: failingSecondWrite });
++      const get = async () =>
++        (
++          await app!.inject({ method: 'GET', url: `/api/employees/${id}`, headers: { cookie } })
++        ).json();
++      const before = await get();
++
++      const response = await app.inject({
++        method: 'POST',
++        url: `/api/employees/${id}/salary-changes`,
++        headers: { cookie },
++        payload: {
++          effectiveDate: '2026-10-09',
++          reason: 'merit',
++          amount: { amountMinor: Math.round(before.salary.amountMinor * 1.03), currency: 'INR' },
++          jobTitleId: SOFTWARE_ENGINEER,
++          levelCode: 'L3',
++        },
++      });
++
++      expect(response.statusCode).toBe(500);
++      expect(await rows(db, id)).toHaveLength(1);
++      expect(await get()).toEqual(before);
++      expect(await currentSalaryMismatches(db)).toEqual([]);
++    });
++  });
++});
+diff --git a/apps/api/src/modules/salary/routes.ts b/apps/api/src/modules/salary/routes.ts
+new file mode 100644
+index 0000000..606c1ed
+--- /dev/null
++++ b/apps/api/src/modules/salary/routes.ts
+@@ -0,0 +1,50 @@
++import {
++  employeeIdParamsSchema,
++  salaryChangeBodySchema,
++  type EmployeeDetail,
++  type SalaryChangeBody,
++  type SalaryChangeItem,
++  type SalaryHistoryResponse,
++} from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
++import { requires } from '../../http/guard.ts';
++import { listSalaryHistory, recordSalaryChange, type SalaryWrites } from './service.ts';
++
++export function salaryRoutes(
++  app: FastifyInstance,
++  deps: { db: Db; clock: Clock; writes?: SalaryWrites },
++) {
++  // S1 (04 section 5.5).
++  app.get(
++    '/api/employees/:id/salary-changes',
++    { onRequest: requires('salary.read'), schema: { params: employeeIdParamsSchema } },
++    async (request): Promise<SalaryHistoryResponse> =>
++      listSalaryHistory(deps.db, (request.params as { id: number }).id),
++  );
++
++  // S2 (04 section 5.5).
++  app.post(
++    '/api/employees/:id/salary-changes',
++    {
++      onRequest: requires('salary.write'),
++      schema: { params: employeeIdParamsSchema, body: salaryChangeBodySchema },
++    },
++    async (request, reply): Promise<{ employee: EmployeeDetail; change: SalaryChangeItem }> => {
++      const { id } = request.params as { id: number };
++      const result = await recordSalaryChange(
++        deps.db,
++        id,
++        request.body as SalaryChangeBody,
++        {
++          today: deps.clock.today(),
++          now: deps.clock.now().toISOString(),
++          userId: request.viewer!.id,
++        },
++        deps.writes,
++      );
++      return reply.code(201).header('Location', `/api/employees/${id}`).send(result);
++    },
++  );
++}
+diff --git a/apps/api/src/modules/salary/service.ts b/apps/api/src/modules/salary/service.ts
+new file mode 100644
+index 0000000..5bc38d8
+--- /dev/null
++++ b/apps/api/src/modules/salary/service.ts
+@@ -0,0 +1,200 @@
++import {
++  changePct,
++  type EmployeeDetail,
++  type SalaryChangeBody,
++  type SalaryChangeItem,
++  type SalaryHistoryResponse,
++} from '@acme/shared';
++import { and, asc, eq, inArray } from 'drizzle-orm';
++import type { Db } from '../../db/client.ts';
++import { employees, jobTitles, levels, payBands, salaryChanges, users } from '../../db/schema.ts';
++import { checkSalaryChange, type SalaryRuleCode } from '../../domain/salary-rules.ts';
++import { AppError } from '../../http/problem.ts';
++import { getEmployee } from '../employees/service.ts';
++
++type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
++
++// The two writes of a salary change. The service runs them in one transaction (D-021); a test
++// injects a failing implementation to prove neither is kept when the second one throws.
++export interface SalaryWrites {
++  insertChange(tx: Tx, row: typeof salaryChanges.$inferInsert): Promise<number>;
++  updateEmployee(tx: Tx, id: number, values: Partial<typeof employees.$inferInsert>): Promise<void>;
++}
++
++export const drizzleSalaryWrites: SalaryWrites = {
++  async insertChange(tx, row) {
++    const [inserted] = await tx
++      .insert(salaryChanges)
++      .values(row)
++      .returning({ id: salaryChanges.id });
++    return inserted!.id;
++  },
++  async updateEmployee(tx, id, values) {
++    await tx.update(employees).set(values).where(eq(employees.id, id));
++  },
++};
++
++const RULE_MESSAGES: Record<SalaryRuleCode, string> = {
++  EMPLOYEE_TERMINATED: 'This employee is terminated, so their salary can no longer change.',
++  DATE_IN_FUTURE: "Effective date can't be in the future.",
++  SALARY_DATE_BEFORE_CURRENT: "Effective date can't be before the current salary's date.",
++  SALARY_CURRENCY_MISMATCH: "Salary must be in the employee's currency.",
++  RAISE_REQUIRED: 'The new salary must be higher than the current salary.',
++  POSITION_MUST_NOT_CHANGE: "Job title and level can't change with this reason.",
++  PROMOTION_LEVEL_NOT_HIGHER: 'A promotion needs a higher level.',
++  CORRECTION_NO_CHANGE: 'A correction must change the salary, job title or level.',
++  NO_PAY_BAND: "There's no pay band for this country, job title and level.",
++};
++
++// S2 (04 section 5.5): checks the rules, then writes the history row and the employee together.
++export async function recordSalaryChange(
++  db: Db,
++  employeeId: number,
++  body: SalaryChangeBody,
++  context: { today: string; now: string; userId: number },
++  writes: SalaryWrites = drizzleSalaryWrites,
++): Promise<{ employee: EmployeeDetail; change: SalaryChangeItem }> {
++  const [current] = await db.select().from(employees).where(eq(employees.id, employeeId));
++  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
++  const levelRows = await db.select().from(levels);
++  const rank = (code: string) => levelRows.find((level) => level.code === code)?.rank ?? 0;
++  const [band] = await db
++    .select({ countryCode: payBands.countryCode })
++    .from(payBands)
++    .where(
++      and(
++        eq(payBands.countryCode, current.countryCode),
++        eq(payBands.jobTitleId, body.jobTitleId),
++        eq(payBands.levelCode, body.levelCode),
++      ),
++    );
++
++  const code = checkSalaryChange({
++    today: context.today,
++    employee: {
++      status: current.status,
++      salary: { amountMinor: current.salaryMinor, currency: current.salaryCurrency },
++      salaryEffectiveDate: current.salaryEffectiveDate,
++      jobTitleId: current.jobTitleId,
++      levelRank: rank(current.levelCode),
++    },
++    change: {
++      reason: body.reason,
++      effectiveDate: body.effectiveDate,
++      amount: body.amount,
++      jobTitleId: body.jobTitleId,
++      levelRank: rank(body.levelCode),
++    },
++    hasPayBand: band !== undefined,
++  });
++  if (code) throw new AppError(422, code, RULE_MESSAGES[code]);
++
++  const changeId = await db.transaction(async (tx) => {
++    const id = await writes.insertChange(tx, {
++      employeeId,
++      effectiveDate: body.effectiveDate,
++      amountMinor: body.amount.amountMinor,
++      currencyCode: body.amount.currency,
++      jobTitleId: body.jobTitleId,
++      levelCode: body.levelCode,
++      reason: body.reason,
++      changedByUserId: context.userId,
++      createdAt: context.now,
++    });
++    await writes.updateEmployee(tx, employeeId, {
++      salaryMinor: body.amount.amountMinor,
++      salaryEffectiveDate: body.effectiveDate,
++      jobTitleId: body.jobTitleId,
++      levelCode: body.levelCode,
++      updatedAt: context.now,
++    });
++    return id;
++  });
++
++  const [titleRows, [recorder]] = await Promise.all([
++    db
++      .select()
++      .from(jobTitles)
++      .where(inArray(jobTitles.id, [current.jobTitleId, body.jobTitleId])),
++    db.select({ displayName: users.displayName }).from(users).where(eq(users.id, context.userId)),
++  ]);
++  const title = (id: number) => {
++    const row = titleRows.find((t) => t.id === id)!;
++    return { id: row.id, name: row.name };
++  };
++  const level = (code: string) => {
++    const row = levelRows.find((l) => l.code === code)!;
++    return { code: row.code, name: row.name };
++  };
++  const previousAmount = { amountMinor: current.salaryMinor, currency: current.salaryCurrency };
++  const change: SalaryChangeItem = {
++    id: changeId,
++    effectiveDate: body.effectiveDate,
++    reason: body.reason,
++    amount: body.amount,
++    previousAmount,
++    changePct: changePct(previousAmount.amountMinor, body.amount.amountMinor),
++    jobTitle: title(body.jobTitleId),
++    level: level(body.levelCode),
++    previousJobTitle: title(current.jobTitleId),
++    previousLevel: level(current.levelCode),
++    changedBy: recorder ? { displayName: recorder.displayName } : null,
++    createdAt: context.now,
++  };
++  return { employee: await getEmployee(db, employeeId), change };
++}
++
++// S1 (04 section 5.5): the employee's history, newest first. Previous values come from the
++// next-older row, computed here (D-025); rows of one date follow `id`.
++export async function listSalaryHistory(
++  db: Db,
++  employeeId: number,
++): Promise<SalaryHistoryResponse> {
++  const [employee] = await db
++    .select({ id: employees.id })
++    .from(employees)
++    .where(eq(employees.id, employeeId));
++  if (!employee) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
++
++  const [rows, titleRows, levelRows, userRows] = await Promise.all([
++    db
++      .select()
++      .from(salaryChanges)
++      .where(eq(salaryChanges.employeeId, employeeId))
++      .orderBy(asc(salaryChanges.effectiveDate), asc(salaryChanges.id)),
++    db.select().from(jobTitles),
++    db.select().from(levels),
++    db.select({ id: users.id, displayName: users.displayName }).from(users),
++  ]);
++  const title = (id: number) => {
++    const row = titleRows.find((t) => t.id === id)!;
++    return { id: row.id, name: row.name };
++  };
++  const level = (code: string) => {
++    const row = levelRows.find((l) => l.code === code)!;
++    return { code: row.code, name: row.name };
++  };
++
++  const items = rows.map((row, index): SalaryChangeItem => {
++    const older = rows[index - 1];
++    const amount = { amountMinor: row.amountMinor, currency: row.currencyCode };
++    const recorder = userRows.find((u) => u.id === row.changedByUserId);
++    return {
++      id: row.id,
++      effectiveDate: row.effectiveDate,
++      reason: row.reason,
++      amount,
++      previousAmount: older
++        ? { amountMinor: older.amountMinor, currency: older.currencyCode }
++        : null,
++      changePct: older ? changePct(older.amountMinor, row.amountMinor) : null,
++      jobTitle: title(row.jobTitleId),
++      level: level(row.levelCode),
++      previousJobTitle: older ? title(older.jobTitleId) : null,
++      previousLevel: older ? level(older.levelCode) : null,
++      changedBy: recorder ? { displayName: recorder.displayName } : null,
++      createdAt: row.createdAt,
++    };
++  });
++  return { items: items.reverse() };
++}
+diff --git a/apps/api/test/invariants.ts b/apps/api/test/invariants.ts
+new file mode 100644
+index 0000000..b1fbff8
+--- /dev/null
++++ b/apps/api/test/invariants.ts
+@@ -0,0 +1,19 @@
++import type { Db } from '../src/db/client.ts';
++
++/**
++ * Employees whose current-salary columns differ from their latest history row (D-021). Latest is by
++ * effective date, then id. An empty list means the invariant holds.
++ */
++export async function currentSalaryMismatches(db: Db): Promise<string[]> {
++  const result = await db.$client.execute(`
++    SELECT e.employee_code
++    FROM employees e
++    JOIN salary_changes s ON s.id = (
++      SELECT id FROM salary_changes WHERE employee_id = e.id ORDER BY effective_date DESC, id DESC LIMIT 1
++    )
++    WHERE s.amount_minor <> e.salary_minor OR s.currency_code <> e.salary_currency
++       OR s.effective_date <> e.salary_effective_date OR s.job_title_id <> e.job_title_id
++       OR s.level_code <> e.level_code
++    ORDER BY e.employee_code`);
++  return result.rows.map((row) => String(row.employee_code));
++}
+diff --git a/apps/web/src/features/employees/EmployeeDetailPage.test.tsx b/apps/web/src/features/employees/EmployeeDetailPage.test.tsx
+index 21e5b01..d217130 100644
+--- a/apps/web/src/features/employees/EmployeeDetailPage.test.tsx
++++ b/apps/web/src/features/employees/EmployeeDetailPage.test.tsx
+@@ -71,5 +71,5 @@ describe('employee detail page (04 section 8.5 S-3)', () => {
+     expect(await screen.findByRole('button', { name: 'Edit details' })).toBeVisible();
+     expect(screen.getByRole('button', { name: 'Terminate' })).toBeVisible();
+-    expect(screen.queryByRole('button', { name: /salary change/i })).toBeNull();
++    expect(screen.getByRole('button', { name: 'Record salary change' })).toBeVisible();
+     admin.unmount();
+ 
+@@ -79,4 +79,5 @@ describe('employee detail page (04 section 8.5 S-3)', () => {
+     expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
+     expect(screen.queryByRole('button', { name: 'Terminate' })).toBeNull();
++    expect(screen.queryByRole('button', { name: 'Record salary change' })).toBeNull();
+   });
+ 
+diff --git a/apps/web/src/features/employees/EmployeeDetailPage.tsx b/apps/web/src/features/employees/EmployeeDetailPage.tsx
+index 2161616..8b7f672 100644
+--- a/apps/web/src/features/employees/EmployeeDetailPage.tsx
++++ b/apps/web/src/features/employees/EmployeeDetailPage.tsx
+@@ -1,3 +1,7 @@
+-import { employeeDetailSchema, type EmployeeDetail } from '@acme/shared';
++import {
++  employeeDetailSchema,
++  salaryHistoryResponseSchema,
++  type EmployeeDetail,
++} from '@acme/shared';
+ import { Alert, Badge, Button, Group, Paper, Skeleton, Stack, Text, Title } from '@mantine/core';
+ import { useQuery } from '@tanstack/react-query';
+@@ -9,4 +13,6 @@ import { useViewer } from '../../components/Shell.tsx';
+ import { formatCompaRatio, formatDate } from '../../format.ts';
+ import { EditEmployeeModal } from './EditEmployeeModal.tsx';
++import { SalaryChangeModal } from './SalaryChangeModal.tsx';
++import { SalaryHistoryTable } from './SalaryHistoryTable.tsx';
+ import { TerminateModal } from './TerminateModal.tsx';
+ 
+@@ -20,5 +26,5 @@ const GENDERS = {
+ 
+ function Card({ title, children }: { title: string; children: ReactElement | ReactElement[] }) {
+-  const id = `card-${title.toLowerCase()}`;
++  const id = `card-${title.toLowerCase().replace(/\s+/g, '-')}`;
+   return (
+     <Paper component="section" aria-labelledby={id} withBorder p="md">
+@@ -91,5 +97,5 @@ export function EmployeeDetailPage(): ReactElement {
+   const me = useViewer();
+   const { id } = useParams();
+-  const [modal, setModal] = useState<'edit' | 'terminate'>();
++  const [modal, setModal] = useState<'edit' | 'terminate' | 'salary'>();
+   const employee = useQuery({
+     queryKey: ['employee', id],
+@@ -97,4 +103,12 @@ export function EmployeeDetailPage(): ReactElement {
+   });
+ 
++  const canReadSalary = me.permissions.includes('salary.read');
++  const history = useQuery({
++    queryKey: ['employee', id, 'salary-changes'],
++    queryFn: () =>
++      apiFetch(`/api/employees/${id}/salary-changes`, { schema: salaryHistoryResponseSchema }),
++    enabled: canReadSalary,
++  });
++
+   if (employee.isError) {
+     const notFound =
+@@ -132,4 +146,5 @@ export function EmployeeDetailPage(): ReactElement {
+   const terminated = data.status === 'terminated';
+   const canWrite = me.permissions.includes('employee.write');
++  const canWriteSalary = me.permissions.includes('salary.write') && !terminated;
+   return (
+     <Stack>
+@@ -146,6 +161,9 @@ export function EmployeeDetailPage(): ReactElement {
+           <Text>{`Hired ${formatDate(data.hireDate)}`}</Text>
+         </Stack>
+-        {canWrite && (
++        {(canWrite || canWriteSalary) && (
+           <Group>
++            {canWriteSalary && (
++              <Button onClick={() => setModal('salary')}>Record salary change</Button>
++            )}
+             <Button variant="default" onClick={() => setModal('edit')}>
+               Edit details
+@@ -165,5 +183,17 @@ export function EmployeeDetailPage(): ReactElement {
+       )}
+       <SalaryCard employee={data} />
++      {canReadSalary && history.data && (
++        <Card title="Salary history">
++          <SalaryHistoryTable items={history.data.items} />
++        </Card>
++      )}
+       <DetailsCard employee={data} />
++      {canWriteSalary && (
++        <SalaryChangeModal
++          employee={data}
++          opened={modal === 'salary'}
++          onClose={() => setModal(undefined)}
++        />
++      )}
+       {canWrite && (
+         <>
+diff --git a/apps/web/src/features/employees/SalaryChangeModal.test.tsx b/apps/web/src/features/employees/SalaryChangeModal.test.tsx
+new file mode 100644
+index 0000000..3bee2e2
+--- /dev/null
++++ b/apps/web/src/features/employees/SalaryChangeModal.test.tsx
+@@ -0,0 +1,264 @@
++import type { EmployeeDetail, Role } from '@acme/shared';
++import { changePct } from '@acme/shared';
++import { screen, waitFor, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
++import { aSalaryChangeItem, aSalaryHistory } from '../../../test/fixtures/salary.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const problem = (status: number, body: Parameters<typeof aProblem>[0]) =>
++  HttpResponse.json(aProblem(body), {
++    status,
++    headers: { 'content-type': 'application/problem+json' },
++  });
++
++type User = ReturnType<typeof userEvent.setup>;
++
++function servesEmployee(role: Role = 'hr_admin', employee: EmployeeDetail = anEmployeeDetail()) {
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))),
++    http.get('/api/employees/4217', () => HttpResponse.json(employee)),
++  );
++}
++
++const renderDetail = () => render(<AppRoutes />, { route: '/employees/4217' });
++
++const openModal = async (user: User) => {
++  await user.click(await screen.findByRole('button', { name: 'Record salary change' }));
++  return screen.findByRole('dialog', { name: 'Record salary change' });
++};
++
++async function choose(user: User, label: string, option: string) {
++  await user.click(await screen.findByRole('combobox', { name: label }));
++  await user.click(await screen.findByRole('option', { name: option }));
++}
++
++describe('record salary change modal (04 section 8.5 S-6)', () => {
++  it('offers the action to HR Admin on an active employee only', async () => {
++    servesEmployee('hr_admin');
++    const admin = renderDetail();
++    expect(await screen.findByRole('button', { name: 'Record salary change' })).toBeVisible();
++    admin.unmount();
++
++    servesEmployee('hr_viewer');
++    const viewer = renderDetail();
++    await screen.findByRole('heading', { level: 1, name: 'Priya Nair' });
++    expect(screen.queryByRole('button', { name: 'Record salary change' })).toBeNull();
++    viewer.unmount();
++
++    servesEmployee(
++      'hr_admin',
++      anEmployeeDetail({ status: 'terminated', terminationDate: '2026-10-01' }),
++    );
++    renderDetail();
++    await screen.findByText(/^Terminated on/);
++    expect(screen.queryByRole('button', { name: 'Record salary change' })).toBeNull();
++  });
++
++  it('locks title and level for merit and offers only higher levels for promotion', async () => {
++    servesEmployee();
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    await choose(user, 'Reason', 'Merit increase');
++    expect(within(dialog).getByRole('combobox', { name: 'Job title' })).toBeDisabled();
++    expect(within(dialog).getByRole('combobox', { name: 'Job title' })).toHaveValue(
++      'Software Engineer',
++    );
++    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toBeDisabled();
++    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toHaveValue('L3 Senior');
++
++    await choose(user, 'Reason', 'Promotion');
++    expect(within(dialog).getByRole('combobox', { name: 'Job title' })).toBeEnabled();
++    const level = within(dialog).getByRole('combobox', { name: 'Level' });
++    expect(level).toBeEnabled();
++    await user.click(level);
++    expect(await screen.findByRole('option', { name: 'L4 Staff' })).toBeVisible();
++    expect(screen.queryByRole('option', { name: 'L2 Mid' })).toBeNull();
++    expect(screen.queryByRole('option', { name: 'L3 Senior' })).toBeNull();
++  });
++
++  it('defaults the date to today, and bounds it by today and the current salary date', async () => {
++    servesEmployee();
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    const date = within(dialog).getByLabelText('Effective date');
++    expect(date).toHaveValue('2026-10-09');
++    expect(date).toHaveAttribute('max', '2026-10-09');
++    expect(date).toHaveAttribute('min', '2026-04-01');
++  });
++
++  it('shows RAISE_REQUIRED under the amount and PROMOTION_LEVEL_NOT_HIGHER under the level', async () => {
++    servesEmployee();
++    let code: 'RAISE_REQUIRED' | 'PROMOTION_LEVEL_NOT_HIGHER' = 'RAISE_REQUIRED';
++    const bodies: unknown[] = [];
++    server.use(
++      http.post('/api/employees/4217/salary-changes', async ({ request }) => {
++        bodies.push(await request.json());
++        return code === 'RAISE_REQUIRED'
++          ? problem(422, { status: 422, code, detail: 'The new salary must be higher.' })
++          : problem(422, { status: 422, code, detail: 'Choose a higher level.' });
++      }),
++    );
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    await choose(user, 'Reason', 'Promotion');
++    await choose(user, 'Level', 'L4 Staff');
++    await user.type(within(dialog).getByLabelText('New annual salary'), '1900000');
++    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
++
++    expect(await within(dialog).findByText('The new salary must be higher.')).toBeVisible();
++    expect(within(dialog).getByLabelText('New annual salary')).toHaveAccessibleDescription(
++      'The new salary must be higher.',
++    );
++    expect(bodies).toEqual([
++      {
++        effectiveDate: '2026-10-09',
++        reason: 'promotion',
++        amount: { amountMinor: 190000000, currency: 'INR' },
++        jobTitleId: 1,
++        levelCode: 'L4',
++      },
++    ]);
++
++    code = 'PROMOTION_LEVEL_NOT_HIGHER';
++    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
++    expect(await within(dialog).findByText('Choose a higher level.')).toBeVisible();
++    expect(within(dialog).getByRole('combobox', { name: 'Level' })).toHaveAccessibleDescription(
++      'Choose a higher level.',
++    );
++  });
++});
++
++const servesBand = () =>
++  server.use(
++    http.get('/api/pay-bands/IN/1/L3', () =>
++      HttpResponse.json({
++        countryCode: 'IN',
++        jobTitleId: 1,
++        levelCode: 'L3',
++        min: { amountMinor: 160000000, currency: 'INR' },
++        mid: { amountMinor: 204000000, currency: 'INR' },
++        max: { amountMinor: 250000000, currency: 'INR' },
++      }),
++    ),
++  );
++
++/** A merit raise from INR 19,80,000 to INR 20,00,000; GETs then serve the recorded state. */
++function servesMeritRaise() {
++  const raised = anEmployeeDetail({ salary: { amountMinor: 200000000, currency: 'INR' } });
++  const change = aSalaryChangeItem({
++    id: 4,
++    effectiveDate: '2026-10-09',
++    reason: 'merit',
++    amount: { amountMinor: 200000000, currency: 'INR' },
++    previousAmount: { amountMinor: 198000000, currency: 'INR' },
++    changePct: changePct(198000000, 200000000),
++    level: { code: 'L3', name: 'Senior' },
++    previousJobTitle: { id: 1, name: 'Software Engineer' },
++    previousLevel: { code: 'L3', name: 'Senior' },
++    changedBy: { displayName: 'HR Admin (demo)' },
++  });
++  const state = { recorded: false };
++  server.use(
++    http.get('/api/employees/4217', () =>
++      HttpResponse.json(state.recorded ? raised : anEmployeeDetail()),
++    ),
++    http.get('/api/employees/4217/salary-changes', () =>
++      HttpResponse.json(aSalaryHistory(state.recorded ? [change] : [])),
++    ),
++    http.post('/api/employees/4217/salary-changes', () => {
++      state.recorded = true;
++      return HttpResponse.json(
++        { employee: raised, change },
++        { status: 201, headers: { Location: '/api/employees/4217' } },
++      );
++    }),
++  );
++}
++
++async function fillMerit(user: User, dialog: HTMLElement) {
++  await choose(user, 'Reason', 'Merit increase');
++  await user.type(within(dialog).getByLabelText('New annual salary'), '2000000');
++}
++
++describe('record salary change outcomes and preview (04 sections 8.5 S-6, 8.6)', () => {
++  it('closes the modal, refreshes the history and toasts after a success', async () => {
++    servesEmployee();
++    servesMeritRaise();
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    await fillMerit(user, dialog);
++    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
++
++    expect(await screen.findByText('Salary change recorded.')).toBeVisible();
++    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
++    const history = await screen.findByRole('region', { name: 'Salary history' });
++    expect(await within(history).findByText('Merit increase')).toBeVisible();
++    const salary = screen.getByRole('region', { name: 'Salary' });
++    expect(within(salary).getByText('INR 20,00,000')).toBeVisible();
++  });
++
++  it('closes, refreshes and toasts the detail on EMPLOYEE_TERMINATED', async () => {
++    const state = { current: anEmployeeDetail() };
++    server.use(
++      http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))),
++      http.get('/api/employees/4217', () => HttpResponse.json(state.current)),
++      http.post('/api/employees/4217/salary-changes', () => {
++        state.current = anEmployeeDetail({ status: 'terminated', terminationDate: '2026-10-08' });
++        return problem(422, {
++          status: 422,
++          code: 'EMPLOYEE_TERMINATED',
++          detail: "A terminated employee's salary can't be changed.",
++        });
++      }),
++    );
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    await fillMerit(user, dialog);
++    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
++
++    expect(
++      await screen.findByText("A terminated employee's salary can't be changed."),
++    ).toBeVisible();
++    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
++    expect(await screen.findByText(/^Terminated on 8 Oct 2026/)).toBeVisible();
++  });
++
++  it('previews the same change % that the history row shows for the same amounts', async () => {
++    servesEmployee();
++    servesMeritRaise();
++    servesBand();
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    await fillMerit(user, dialog);
++
++    const preview = await within(dialog).findByRole('group', { name: 'Preview' });
++    expect(preview).toHaveTextContent('INR 19,80,000 to INR 20,00,000');
++    expect(within(preview).getByText('+1.0%')).toBeVisible();
++    expect(await within(preview).findByText('New compa-ratio 0.98')).toBeVisible();
++    expect(within(preview).getByText('Inside band')).toBeVisible();
++
++    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
++    const history = await screen.findByRole('region', { name: 'Salary history' });
++    const row = (await within(history).findByText('Merit increase')).closest('tr')!;
++    expect(within(row).getByText('+1.0%')).toBeVisible();
++  });
++});
+diff --git a/apps/web/src/features/employees/SalaryChangeModal.tsx b/apps/web/src/features/employees/SalaryChangeModal.tsx
+new file mode 100644
+index 0000000..75697e2
+--- /dev/null
++++ b/apps/web/src/features/employees/SalaryChangeModal.tsx
+@@ -0,0 +1,264 @@
++import {
++  changePct,
++  compaRatio,
++  payBandResponseSchema,
++  salaryChangeBodySchema,
++  type EmployeeDetail,
++  type SalaryChangeBody,
++  type SalaryChangeReason,
++} from '@acme/shared';
++import { Alert, Button, Group, Modal, Select, Stack, Text, TextInput } from '@mantine/core';
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
++import { useState, type FormEvent, type ReactElement } from 'react';
++import { ApiError, apiFetch } from '../../api/client.ts';
++import { Money } from '../../components/Money.tsx';
++import { useViewer } from '../../components/Shell.tsx';
++import { useToast } from '../../components/Toasts.tsx';
++import { formatChangePct, formatCompaRatio, parseMajorToMinor } from '../../format.ts';
++import { useReference } from './useReference.ts';
++
++type Props = { employee: EmployeeDetail; opened: boolean; onClose: () => void };
++
++const REASONS: { value: SalaryChangeReason; label: string }[] = [
++  { value: 'promotion', label: 'Promotion' },
++  { value: 'merit', label: 'Merit increase' },
++  { value: 'market_adjustment', label: 'Market adjustment' },
++  { value: 'correction', label: 'Correction' },
++];
++
++const FIELDS = ['effectiveDate', 'amount', 'jobTitleId', 'levelCode'] as const;
++type Field = (typeof FIELDS)[number];
++type Errors = Partial<Record<Field, string>>;
++
++const fieldOf = (path: string): Field | undefined =>
++  FIELDS.find((field) => field === path.split('.')[0]);
++
++// 04 section 8.6: which rule codes show under which field; the rest show in the form alert.
++const FIELD_OF_CODE: Record<string, Field> = {
++  SALARY_CURRENCY_MISMATCH: 'amount',
++  RAISE_REQUIRED: 'amount',
++  SALARY_DATE_BEFORE_CURRENT: 'effectiveDate',
++  DATE_IN_FUTURE: 'effectiveDate',
++  POSITION_MUST_NOT_CHANGE: 'levelCode',
++  PROMOTION_LEVEL_NOT_HIGHER: 'levelCode',
++};
++
++function Preview({
++  employee,
++  amountMinor,
++  jobTitleId,
++  levelCode,
++}: {
++  employee: EmployeeDetail;
++  amountMinor: number;
++  jobTitleId: string;
++  levelCode: string;
++}): ReactElement {
++  const band = useQuery({
++    queryKey: ['pay-band', employee.country.code, jobTitleId, levelCode],
++    queryFn: () =>
++      apiFetch(`/api/pay-bands/${employee.country.code}/${jobTitleId}/${levelCode}`, {
++        schema: payBandResponseSchema,
++      }),
++    enabled: levelCode !== '',
++    retry: false,
++  });
++  const { salary } = employee;
++  const next = { amountMinor, currency: salary.currency };
++  const bandData = band.data;
++  const position = bandData
++    ? amountMinor < bandData.min.amountMinor
++      ? 'Below band'
++      : amountMinor > bandData.max.amountMinor
++        ? 'Above band'
++        : 'Inside band'
++    : undefined;
++  return (
++    <Stack gap={4} role="group" aria-label="Preview">
++      <Text>
++        <Money value={salary} />
++        {' to '}
++        <Money value={next} />
++      </Text>
++      <Text>{formatChangePct(changePct(salary.amountMinor, amountMinor))}</Text>
++      {bandData && (
++        <>
++          <Text>{`New compa-ratio ${formatCompaRatio(compaRatio(amountMinor, bandData.mid.amountMinor))}`}</Text>
++          <Text>{position}</Text>
++        </>
++      )}
++    </Stack>
++  );
++}
++
++function SalaryChangeForm({ employee, onClose }: Omit<Props, 'opened'>): ReactElement {
++  const me = useViewer();
++  const queryClient = useQueryClient();
++  const toast = useToast();
++  const reference = useReference().data;
++  const currentTitleId = String(employee.jobTitle.id);
++  const currentRank = reference?.levels.find((l) => l.code === employee.level.code)?.rank ?? 0;
++  const [reason, setReason] = useState<SalaryChangeReason>('promotion');
++  const [date, setDate] = useState(me.today);
++  const [amount, setAmount] = useState('');
++  const [jobTitleId, setJobTitleId] = useState(currentTitleId);
++  const [levelCode, setLevelCode] = useState('');
++  const [errors, setErrors] = useState<Errors>({});
++  const [formError, setFormError] = useState<string>();
++
++  const locked = reason === 'merit' || reason === 'market_adjustment';
++  const levels = (reference?.levels ?? []).filter(
++    (l) => reason !== 'promotion' || l.rank > currentRank,
++  );
++  const currency = employee.salary.currency;
++
++  const record = useMutation({
++    mutationFn: (body: SalaryChangeBody) =>
++      apiFetch(`/api/employees/${employee.id}/salary-changes`, {
++        method: 'POST',
++        body,
++      }),
++    onSuccess: () => {
++      void queryClient.invalidateQueries({ queryKey: ['employee', String(employee.id)] });
++      void queryClient.invalidateQueries({ queryKey: ['employees'] });
++      toast('Salary change recorded.');
++      onClose();
++    },
++    onError: (error) => {
++      if (!(error instanceof ApiError)) return setFormError(error.message);
++      if (error.code === 'EMPLOYEE_TERMINATED') {
++        void queryClient.invalidateQueries({ queryKey: ['employee', String(employee.id)] });
++        void queryClient.invalidateQueries({ queryKey: ['employees'] });
++        toast(error.message);
++        return onClose();
++      }
++      if (error.code === 'VALIDATION_FAILED') {
++        const byField: Errors = {};
++        const unmatched: string[] = [];
++        for (const { path, message } of error.errors) {
++          const field = fieldOf(path);
++          if (field) byField[field] ??= message;
++          else unmatched.push(message);
++        }
++        setErrors(byField);
++        return setFormError(unmatched[0]);
++      }
++      const field = FIELD_OF_CODE[error.code];
++      if (field) setErrors({ [field]: error.message });
++      else setFormError(error.message);
++    },
++  });
++
++  const changeReason = (value: string | null) => {
++    const next = REASONS.find((r) => r.value === value)?.value;
++    if (!next) return;
++    setReason(next);
++    if (next === 'merit' || next === 'market_adjustment') {
++      setJobTitleId(currentTitleId);
++      setLevelCode(employee.level.code);
++    } else if (next === 'promotion') {
++      setLevelCode('');
++    }
++  };
++
++  const shownLevel = locked ? employee.level.code : levelCode;
++  const previewMinor = parseMajorToMinor(amount);
++
++  const onSubmit = (event: FormEvent) => {
++    event.preventDefault();
++    setErrors({});
++    setFormError(undefined);
++    const amountMinor = parseMajorToMinor(amount);
++    const found: Errors = {};
++    if (amountMinor === null) found.amount = 'Enter the new annual salary.';
++    if (!shownLevel) found.levelCode = 'Choose a level.';
++    if (Object.keys(found).length > 0) return setErrors(found);
++    const parsed = salaryChangeBodySchema.safeParse({
++      effectiveDate: date,
++      reason,
++      amount: { amountMinor, currency },
++      jobTitleId: Number(jobTitleId),
++      levelCode: shownLevel,
++    });
++    if (!parsed.success) {
++      for (const issue of parsed.error.issues) {
++        const field = fieldOf(issue.path.join('.'));
++        if (field) found[field] ??= issue.message;
++      }
++      return setErrors(found);
++    }
++    record.mutate(parsed.data);
++  };
++
++  return (
++    <form onSubmit={onSubmit} noValidate>
++      <Stack>
++        {formError && <Alert color="red">{formError}</Alert>}
++        <Select
++          label="Reason"
++          data={REASONS}
++          value={reason}
++          onChange={changeReason}
++          allowDeselect={false}
++        />
++        <TextInput
++          label="Effective date"
++          type="date"
++          value={date}
++          min={employee.salaryEffectiveDate}
++          max={me.today}
++          onChange={(event) => setDate(event.currentTarget.value)}
++          error={errors.effectiveDate}
++        />
++        <TextInput
++          label="New annual salary"
++          value={amount}
++          onChange={(event) => setAmount(event.currentTarget.value)}
++          rightSection={<Text size="sm">{currency}</Text>}
++          rightSectionWidth={56}
++          error={errors.amount}
++        />
++        <Select
++          label="Job title"
++          data={reference?.jobTitles.map((t) => ({ value: String(t.id), label: t.name })) ?? []}
++          value={jobTitleId}
++          onChange={(value) => setJobTitleId(value ?? currentTitleId)}
++          disabled={locked}
++          error={errors.jobTitleId}
++          allowDeselect={false}
++        />
++        <Select
++          label="Level"
++          data={levels.map((l) => ({ value: l.code, label: `${l.code} ${l.name}` }))}
++          value={shownLevel || null}
++          onChange={(value) => setLevelCode(value ?? '')}
++          disabled={locked}
++          error={errors.levelCode}
++          allowDeselect={false}
++        />
++        {previewMinor !== null && previewMinor > 0 && (
++          <Preview
++            employee={employee}
++            amountMinor={previewMinor}
++            jobTitleId={jobTitleId}
++            levelCode={shownLevel}
++          />
++        )}
++        <Group justify="flex-end">
++          <Button type="submit" loading={record.isPending}>
++            Record change
++          </Button>
++        </Group>
++      </Stack>
++    </form>
++  );
++}
++
++/** S-6 (04 section 8.5): record a raise, promotion or correction. */
++export function SalaryChangeModal({ employee, opened, onClose }: Props): ReactElement {
++  return (
++    <Modal opened={opened} onClose={onClose} title="Record salary change">
++      <SalaryChangeForm employee={employee} onClose={onClose} />
++    </Modal>
++  );
++}
+diff --git a/apps/web/src/features/employees/SalaryHistoryTable.test.tsx b/apps/web/src/features/employees/SalaryHistoryTable.test.tsx
+new file mode 100644
+index 0000000..14b50f2
+--- /dev/null
++++ b/apps/web/src/features/employees/SalaryHistoryTable.test.tsx
+@@ -0,0 +1,61 @@
++import type { Role } from '@acme/shared';
++import { screen, within } from '@testing-library/react';
++import { http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aThreeRowHistory } from '../../../test/fixtures/salary.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const loggedInAs = (role: Role) =>
++  server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))));
++
++describe('salary history table (04 section 8.5 S-3)', () => {
++  it('shows Imported for seeded rows, a level move for a promotion, and n/a in the hire row', async () => {
++    loggedInAs('hr_viewer');
++    server.use(
++      http.get('/api/employees/4217', () => HttpResponse.json(anEmployeeDetail())),
++      http.get('/api/employees/4217/salary-changes', () => HttpResponse.json(aThreeRowHistory())),
++    );
++    render(<AppRoutes />, { route: '/employees/4217' });
++
++    const history = await screen.findByRole('region', { name: 'Salary history' });
++    const rows = within(within(history).getByRole('table')).getAllByRole('row');
++    expect(
++      within(rows[0]!)
++        .getAllByRole('columnheader')
++        .map((cell) => cell.textContent),
++    ).toEqual(['Effective date', 'Reason', 'Amount', 'Change', 'Position', 'Recorded by']);
++
++    const cells = (row: HTMLElement) =>
++      within(row)
++        .getAllByRole('cell')
++        .map((cell) => cell.textContent);
++    expect(cells(rows[1]!)).toEqual([
++      '1 Apr 2026',
++      'Promotion',
++      'INR 19,80,000',
++      '+4.2%',
++      'L2 Intermediate to L3 Senior',
++      'HR Admin (demo)',
++    ]);
++    expect(cells(rows[2]!)).toEqual([
++      '1 Apr 2023',
++      'Merit increase',
++      'INR 19,00,000',
++      '+26.7%',
++      'Software Engineer, L2 Intermediate',
++      'Imported',
++    ]);
++    expect(cells(rows[3]!)).toEqual([
++      '12 Jul 2021',
++      'Hire',
++      'INR 15,00,000',
++      'n/a',
++      'Software Engineer, L2 Intermediate',
++      'Imported',
++    ]);
++  });
++});
+diff --git a/apps/web/src/features/employees/SalaryHistoryTable.tsx b/apps/web/src/features/employees/SalaryHistoryTable.tsx
+new file mode 100644
+index 0000000..5979de4
+--- /dev/null
++++ b/apps/web/src/features/employees/SalaryHistoryTable.tsx
+@@ -0,0 +1,61 @@
++import type { SalaryChangeItem } from '@acme/shared';
++import { Table } from '@mantine/core';
++import type { ReactElement } from 'react';
++import { Money } from '../../components/Money.tsx';
++import { formatChangePct, formatDate } from '../../format.ts';
++
++const REASONS: Record<SalaryChangeItem['reason'], string> = {
++  hire: 'Hire',
++  merit: 'Merit increase',
++  promotion: 'Promotion',
++  market_adjustment: 'Market adjustment',
++  correction: 'Correction',
++};
++
++const level = ({ code, name }: { code: string; name: string }) => `${code} ${name}`;
++
++// "L2 Intermediate to L3 Senior" when the level moved, otherwise the position as it stands.
++function position(item: SalaryChangeItem): string {
++  const { previousJobTitle, previousLevel } = item;
++  if (!previousJobTitle || !previousLevel) return `${item.jobTitle.name}, ${level(item.level)}`;
++  const titleMoved = previousJobTitle.id !== item.jobTitle.id;
++  const levelMoved = previousLevel.code !== item.level.code;
++  if (titleMoved) {
++    return `${previousJobTitle.name}, ${level(previousLevel)} to ${item.jobTitle.name}, ${level(item.level)}`;
++  }
++  return levelMoved
++    ? `${level(previousLevel)} to ${level(item.level)}`
++    : `${item.jobTitle.name}, ${level(item.level)}`;
++}
++
++/** The history rows of S-3 (04 section 8.5), newest first as served. */
++export function SalaryHistoryTable({ items }: { items: SalaryChangeItem[] }): ReactElement {
++  return (
++    <Table>
++      <Table.Thead>
++        <Table.Tr>
++          <Table.Th>Effective date</Table.Th>
++          <Table.Th>Reason</Table.Th>
++          <Table.Th>Amount</Table.Th>
++          <Table.Th>Change</Table.Th>
++          <Table.Th>Position</Table.Th>
++          <Table.Th>Recorded by</Table.Th>
++        </Table.Tr>
++      </Table.Thead>
++      <Table.Tbody>
++        {items.map((item) => (
++          <Table.Tr key={item.id}>
++            <Table.Td>{formatDate(item.effectiveDate)}</Table.Td>
++            <Table.Td>{REASONS[item.reason]}</Table.Td>
++            <Table.Td>
++              <Money value={item.amount} />
++            </Table.Td>
++            <Table.Td>{formatChangePct(item.changePct)}</Table.Td>
++            <Table.Td>{position(item)}</Table.Td>
++            <Table.Td>{item.changedBy?.displayName ?? 'Imported'}</Table.Td>
++          </Table.Tr>
++        ))}
++      </Table.Tbody>
++    </Table>
++  );
++}
+diff --git a/apps/web/test/fixtures/salary.ts b/apps/web/test/fixtures/salary.ts
+new file mode 100644
+index 0000000..537745c
+--- /dev/null
++++ b/apps/web/test/fixtures/salary.ts
+@@ -0,0 +1,55 @@
++import {
++  salaryChangeItemSchema,
++  salaryHistoryResponseSchema,
++  type SalaryChangeItem,
++  type SalaryHistoryResponse,
++} from '@acme/shared';
++
++// Fixture builders parse with the shared response schema (D-050).
++export const aSalaryChangeItem = (overrides: Partial<SalaryChangeItem> = {}): SalaryChangeItem =>
++  salaryChangeItemSchema.parse({
++    id: 1,
++    effectiveDate: '2021-07-12',
++    reason: 'hire',
++    amount: { amountMinor: 150000000, currency: 'INR' },
++    previousAmount: null,
++    changePct: null,
++    jobTitle: { id: 1, name: 'Software Engineer' },
++    level: { code: 'L2', name: 'Intermediate' },
++    previousJobTitle: null,
++    previousLevel: null,
++    changedBy: null,
++    createdAt: '2021-07-12T00:00:00.000Z',
++    ...overrides,
++  });
++
++export const aSalaryHistory = (items: SalaryChangeItem[]): SalaryHistoryResponse =>
++  salaryHistoryResponseSchema.parse({ items });
++
++/** Newest first: a promotion by HR Admin (L2 to L3, +4.2%), a seeded merit raise, the hire. */
++export const aThreeRowHistory = (): SalaryHistoryResponse =>
++  aSalaryHistory([
++    aSalaryChangeItem({
++      id: 3,
++      effectiveDate: '2026-04-01',
++      reason: 'promotion',
++      amount: { amountMinor: 198000000, currency: 'INR' },
++      previousAmount: { amountMinor: 190000000, currency: 'INR' },
++      changePct: 4.2,
++      level: { code: 'L3', name: 'Senior' },
++      previousJobTitle: { id: 1, name: 'Software Engineer' },
++      previousLevel: { code: 'L2', name: 'Intermediate' },
++      changedBy: { displayName: 'HR Admin (demo)' },
++    }),
++    aSalaryChangeItem({
++      id: 2,
++      effectiveDate: '2023-04-01',
++      reason: 'merit',
++      amount: { amountMinor: 190000000, currency: 'INR' },
++      previousAmount: { amountMinor: 150000000, currency: 'INR' },
++      changePct: 26.7,
++      previousJobTitle: { id: 1, name: 'Software Engineer' },
++      previousLevel: { code: 'L2', name: 'Intermediate' },
++    }),
++    aSalaryChangeItem(),
++  ]);
+diff --git a/apps/web/test/server.ts b/apps/web/test/server.ts
+index 07064ea..dada905 100644
+--- a/apps/web/test/server.ts
++++ b/apps/web/test/server.ts
+@@ -2,8 +2,11 @@ import { http, HttpResponse } from 'msw';
+ import { setupServer } from 'msw/node';
+ import { aReferenceResponse } from './fixtures/reference.ts';
++import { aSalaryHistory } from './fixtures/salary.ts';
+ 
+ // Tests add handlers with server.use(...); anything unhandled fails the test (D-051). Reference
+-// data is the one default: every list page reads it for its filter options.
++// data is the default for list pages (filter options); an empty history is the default for the
++// detail page, whose tests that care about history serve their own.
+ export const server = setupServer(
+   http.get('/api/reference', () => HttpResponse.json(aReferenceResponse())),
++  http.get('/api/employees/:id/salary-changes', () => HttpResponse.json(aSalaryHistory([]))),
+ );
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 2721f07..24af20c 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -7,2 +7,3 @@ export * from './schemas/employee.ts';
+ export * from './percent.ts';
+ export * from './schemas/reference.ts';
++export * from './schemas/salary.ts';
+diff --git a/packages/shared/src/percent.test.ts b/packages/shared/src/percent.test.ts
+index 8dc83a2..f6dc727 100644
+--- a/packages/shared/src/percent.test.ts
++++ b/packages/shared/src/percent.test.ts
+@@ -1,4 +1,4 @@
+ import { describe, expect, it } from 'vitest';
+-import { compaRatio } from './percent.ts';
++import { changePct, compaRatio } from './percent.ts';
+ 
+ describe('compaRatio', () => {
+@@ -25,2 +25,20 @@ describe('compaRatio', () => {
+   });
+ });
++
++describe('changePct', () => {
++  // 04 section 8.4.1: tenths = (next - prev) * 1000 / prev, rounded half away from zero.
++  it.each([
++    { case: 'a tie rounds up', next: 100_050, pct: 0.1 },
++    { case: 'below half rounds to zero', next: 100_040, pct: 0 },
++    { case: 'a small decrease rounds to zero', next: 99_960, pct: 0 },
++    { case: 'a negative tie rounds away from zero', next: 99_950, pct: -0.1 },
++    { case: 'a plain raise', next: 104_200, pct: 4.2 },
++    { case: 'a plain cut', next: 99_000, pct: -1 },
++  ])('$case', ({ next, pct }) => {
++    expect(changePct(100_000, next)).toBe(pct);
++  });
++
++  it('never returns -0', () => {
++    expect(Object.is(changePct(100_000, 99_960), 0)).toBe(true);
++  });
++});
+diff --git a/packages/shared/src/percent.ts b/packages/shared/src/percent.ts
+index f9c533b..78468b0 100644
+--- a/packages/shared/src/percent.ts
++++ b/packages/shared/src/percent.ts
+@@ -6,2 +6,9 @@ export function compaRatio(salaryMinor: number, midMinor: number): number {
+   return salaryMinor < 0 && hundredths !== 0 ? -hundredths / 100 : hundredths / 100;
+ }
++
++// Change as a percentage of the previous amount, to 1 decimal: tenths = (next - prev) * 1000 / prev.
++export function changePct(prevMinor: number, nextMinor: number): number {
++  const numerator = Math.abs(nextMinor - prevMinor) * 1000;
++  const tenths = Math.floor((numerator * 2 + prevMinor) / (prevMinor * 2));
++  return nextMinor < prevMinor && tenths !== 0 ? -tenths / 10 : tenths / 10;
++}
+diff --git a/packages/shared/src/schemas/employee.ts b/packages/shared/src/schemas/employee.ts
+index d015b4d..d543da7 100644
+--- a/packages/shared/src/schemas/employee.ts
++++ b/packages/shared/src/schemas/employee.ts
+@@ -76,4 +76,6 @@ const idName = z.object({ id: z.number().int(), name: z.string() });
+ export const moneySchema = z.object({ amountMinor: z.number().int(), currency: z.string() });
+ 
++export type Money = z.infer<typeof moneySchema>;
++
+ const genderSchema = z.enum(['female', 'male', 'non_binary', 'not_disclosed']);
+ 
+diff --git a/packages/shared/src/schemas/salary.test.ts b/packages/shared/src/schemas/salary.test.ts
+new file mode 100644
+index 0000000..d8d7e81
+--- /dev/null
++++ b/packages/shared/src/schemas/salary.test.ts
+@@ -0,0 +1,50 @@
++import { describe, expect, it } from 'vitest';
++import { salaryChangeBodySchema } from './salary.ts';
++
++const valid = {
++  effectiveDate: '2026-10-09',
++  reason: 'merit',
++  amount: { amountMinor: 206_000_000, currency: 'INR' },
++  jobTitleId: 1,
++  levelCode: 'L3',
++};
++
++describe('salaryChangeBodySchema', () => {
++  it('accepts a complete body', () => {
++    expect(salaryChangeBodySchema.safeParse(valid).success).toBe(true);
++  });
++
++  it.each(['merit', 'promotion', 'market_adjustment', 'correction'])(
++    'accepts reason %s',
++    (reason) => {
++      expect(salaryChangeBodySchema.safeParse({ ...valid, reason }).success).toBe(true);
++    },
++  );
++
++  it('rejects the hire reason', () => {
++    expect(salaryChangeBodySchema.safeParse({ ...valid, reason: 'hire' }).success).toBe(false);
++  });
++
++  it('rejects unknown keys', () => {
++    expect(salaryChangeBodySchema.safeParse({ ...valid, extra: 1 }).success).toBe(false);
++  });
++
++  it.each([0, -1, 1.5, 1_000_000_000_001])('rejects amountMinor %s', (amountMinor) => {
++    const body = { ...valid, amount: { amountMinor, currency: 'INR' } };
++    expect(salaryChangeBodySchema.safeParse(body).success).toBe(false);
++  });
++
++  it.each([1, 1_000_000_000_000])('accepts amountMinor %s', (amountMinor) => {
++    const body = { ...valid, amount: { amountMinor, currency: 'INR' } };
++    expect(salaryChangeBodySchema.safeParse(body).success).toBe(true);
++  });
++
++  it.each(['effectiveDate', 'reason', 'amount', 'jobTitleId', 'levelCode'])(
++    'requires %s',
++    (key) => {
++      const body: Record<string, unknown> = { ...valid };
++      delete body[key];
++      expect(salaryChangeBodySchema.safeParse(body).success).toBe(false);
++    },
++  );
++});
+diff --git a/packages/shared/src/schemas/salary.ts b/packages/shared/src/schemas/salary.ts
+new file mode 100644
+index 0000000..0b16637
+--- /dev/null
++++ b/packages/shared/src/schemas/salary.ts
+@@ -0,0 +1,52 @@
++import { z } from 'zod';
++import { isoDateSchema } from './common.ts';
++import { moneySchema } from './employee.ts';
++
++// 04 section 4.7: the four reasons a user can pick; `hire` is written by the system only.
++export const salaryChangeReasonSchema = z.enum([
++  'merit',
++  'promotion',
++  'market_adjustment',
++  'correction',
++]);
++
++export type SalaryChangeReason = z.infer<typeof salaryChangeReasonSchema>;
++
++// 04 section 5.5 S2 body.
++export const salaryChangeBodySchema = z.strictObject({
++  effectiveDate: isoDateSchema,
++  reason: salaryChangeReasonSchema,
++  amount: z.strictObject({
++    amountMinor: z.number().int().min(1).max(1_000_000_000_000),
++    currency: z.string().regex(/^[A-Z]{3}$/),
++  }),
++  jobTitleId: z.number().int().min(1),
++  levelCode: z.enum(['L1', 'L2', 'L3', 'L4', 'L5']),
++});
++
++export type SalaryChangeBody = z.infer<typeof salaryChangeBodySchema>;
++
++const levelRefSchema = z.object({ code: z.string(), name: z.string() });
++const titleRefSchema = z.object({ id: z.number().int(), name: z.string() });
++
++// 04 section 5.5 S1: one history row with the values before it (null on the hire row).
++export const salaryChangeItemSchema = z.object({
++  id: z.number().int(),
++  effectiveDate: isoDateSchema,
++  reason: z.enum(['hire', 'promotion', 'merit', 'market_adjustment', 'correction']),
++  amount: moneySchema,
++  previousAmount: moneySchema.nullable(),
++  changePct: z.number().nullable(),
++  jobTitle: titleRefSchema,
++  level: levelRefSchema,
++  previousJobTitle: titleRefSchema.nullable(),
++  previousLevel: levelRefSchema.nullable(),
++  changedBy: z.object({ displayName: z.string() }).nullable(),
++  createdAt: z.string(),
++});
++
++export type SalaryChangeItem = z.infer<typeof salaryChangeItemSchema>;
++
++export const salaryHistoryResponseSchema = z.object({ items: z.array(salaryChangeItemSchema) });
++
++export type SalaryHistoryResponse = z.infer<typeof salaryHistoryResponseSchema>;
+diff --git a/vitest.config.ts b/vitest.config.ts
+index 7d6b607..79b3b00 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -9,4 +9,7 @@ export default defineConfig({
+   },
+   test: {
++    // Eleven jsdom workers on 12 cores starve each other; the first test of a web file then runs
++    // past its timeout. Fewer workers finish sooner than a run that retries.
++    maxWorkers: 6,
+     projects: [
+       { test: { name: 'shared', root: 'packages/shared', environment: 'node' } },

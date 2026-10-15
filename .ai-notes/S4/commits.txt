@@ -1,0 +1,25 @@
+fcc743b test(shared): parse comma lists and new list filters
+5c7e7fb test(shared): use a truly unknown param in strict query tests
+29be887 feat(shared): extend list query schema
+9b68f08 test(employees): search by name without accents and by employee code
+5452640 feat(employees): add name and code search
+1fb2c11 test(employees): filter by country, department, title, level, gender
+a1dd029 feat(employees): add list filters
+e939bca test(employees): filter by band position and stale salary date
+d1d8b52 feat(employees): add band and stale-salary filters
+dce44d1 test(employees): sort by usd salary and reject unknown params
+c1da0be feat(employees): add sorting and strict query params
+d9b79f4 test(export): write excel-safe csv with bom, crlf and formula guard
+1705252 feat(export): add csv builder
+cf5b057 test(export): export the same rows and order as the list
+3851d3c feat(export): add employee csv export endpoint
+e75a87f test(web): keep list filters in the url and reset the page on change
+88c57e4 test(web): scope filter lookups, wait longer for cold renders
+965de69 feat(web): add filter bar and url state
+4f112a4 test(web): sort headers, unknown url values and empty filtered state
+b97f551 feat(web): add sort headers and url value validation
+1b688b3 test(web): export the current filters as csv
+8f1c724 test(web): make the export spinner test deterministic
+5868682 feat(web): add export button
+0a92861 test(web): show an alert when the csv export fails
+4b25d87 feat(web): show export failures with a retry

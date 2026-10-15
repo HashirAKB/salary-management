@@ -1,0 +1,32 @@
+5f67cdd test(ask): keep the tool schema and zod schema in agreement
+7dfb541 feat(ask): build strict tool schemas from reference data
+f29b647 test(web): compare the export blob by type, not class
+7ec0c9b test(ask): normalise enum casing and reject gender gap by gender
+7a4d709 feat(ask): parse and check interpreted queries
+5034b15 test(ask): write answers and refusals from templates
+640974d feat(ask): add answer templates
+c3e503b build(api): add @anthropic-ai/sdk 0.133.0
+1b37d92 test(ask): send strict tools and map stop reasons in interpreter
+4adda9b feat(ask): add anthropic interpreter
+de6dc18 fix(ask): avoid parameter properties in interpreters
+0f1ed76 chore(ask): add eval set
+457ed4c test(ask): return 503 without a key and answer with the fake
+b3dcb89 feat(ask): add ask endpoint
+407386d test(ask): enforce per-user and global daily caps
+d2ff42b feat(ask): add daily caps from the ask log
+fb27f4a test(web): show answers, interpretation and refusals
+a2dff3d feat(web): add ask page
+5584a7c chore(ask): add eval runner
+8e2eeb3 test(ask): choose the ask provider, model and key from config
+5852b87 feat(ask): add ask provider config
+da4022f test(ask): send tools and map replies in the gemini interpreter
+1d51460 feat(ask): add gemini interpreter
+1c4680c test(ask): build the interpreter for the configured provider
+cacfd96 feat(ask): choose the interpreter by provider
+1904167 chore(ask): run the eval on the configured provider
+9d0b2d4 docs(ask): add gemini provider adr and update env, api and test docs
+166edd6 fix(ask): create the eval report folder
+c2ce034 test(ask): default to gemini-flash-latest and report google's error
+c2db0b4 feat(ask): default to gemini-flash-latest and report google's error
+0ec77b8 docs(ask): record the gemini-flash-latest default
+866d1a9 docs(ask): record first eval run

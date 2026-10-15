@@ -1,0 +1,27 @@
+e55a651 test(shared): compute change percent and validate salary change body
+4fba87f feat(shared): add change percent and salary schemas
+c30d9e3 test(salary): accept an equal date, reject future and earlier dates
+4de6a15 feat(salary): add date rules
+8de6a8a test(salary): require a raise and same position for merit
+f5dc066 feat(salary): add merit and market adjustment rules
+b4c963a test(salary): require a raise and a higher level for promotion
+11318d8 feat(salary): add promotion rules
+edac2b4 test(salary): allow lower pay on correction but reject no change
+22b3ab2 feat(salary): add correction rules
+9ceda10 test(salary): check the rules in order and return the first violation
+ba6682e feat(salary): add terminated, currency and pay band rules
+9db6e34 refactor(salary): table-drive the per-reason rules
+a02abcd test(salary): record a change and update the current salary
+4da72d1 feat(salary): add salary change endpoint
+e3a3469 test(salary): return 422 for each rule violation
+7a36eca test(salary): keep neither write when the second one fails
+7bd40bb test(salary): list history newest first with previous values
+e104407 feat(salary): add salary history endpoint
+e4f904f test(web): show history with imported rows and position changes
+9ac11c3 feat(web): add salary history table
+ab50c82 test(web): lock fields by reason and map rule errors to fields
+3985a9b test(web): fix selectors and expect the salary change button for admin
+fb48819 test(web): close and refresh after a salary change
+ea25754 test(web): match the preview amounts across Money spans
+1555781 feat(web): refresh history and show outcome toasts
+4f64256 chore(web): cap vitest workers to stop timeouts under load

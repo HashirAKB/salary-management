@@ -1,0 +1,1666 @@
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 88c622b..2cda2c2 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -10,5 +10,7 @@ import { registerStatic } from './http/static.ts';
+ import { registerAuth } from './modules/auth/plugin.ts';
+ import { authRoutes } from './modules/auth/routes.ts';
++import { employeeRoutes } from './modules/employees/routes.ts';
+ import { healthRoutes } from './modules/health/routes.ts';
++import { referenceRoutes } from './modules/reference/routes.ts';
+ 
+ export type AppDeps = {
+@@ -39,4 +41,6 @@ export function buildApp(deps: AppDeps): FastifyInstance {
+   healthRoutes(app, { db: deps.db });
+   authRoutes(app, deps);
++  referenceRoutes(app, { db: deps.db });
++  employeeRoutes(app, { db: deps.db });
+   return app;
+ }
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+index 795e33f..af84d2a 100644
+--- a/apps/api/src/http/access-matrix.test.ts
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -14,4 +14,6 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
+   'POST /api/auth/logout': 'public',
+   'GET /api/auth/me': 'authenticated',
++  'GET /api/reference': 'reference.read',
++  'GET /api/employees': 'employee.read',
+ };
+ 
+diff --git a/apps/api/src/modules/employees/routes.test.ts b/apps/api/src/modules/employees/routes.test.ts
+new file mode 100644
+index 0000000..cb5d178
+--- /dev/null
++++ b/apps/api/src/modules/employees/routes.test.ts
+@@ -0,0 +1,168 @@
++import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
++
++describe('GET /api/employees (E1)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<void>) {
++    const db = await testDb();
++    await seed(db);
++    const { cookie } = await loggedInAs(db, 'hr_viewer');
++    app = testApp({ db });
++    return (query = '') =>
++      app!.inject({ method: 'GET', url: `/api/employees${query}`, headers: { cookie } });
++  }
++
++  async function insertMany(db: Db, count: number) {
++    for (let i = 0; i < count; i++) {
++      await anEmployee()
++        .named('Asha', `Surname${String(i).padStart(3, '0')}`)
++        .insert(db);
++    }
++  }
++
++  it('returns active employees sorted by last name, 50 per page, with total and totalPages', async () => {
++    const get = await setup(async (db) => {
++      await insertMany(db, 120);
++      await anEmployee().named('Zed', 'Aaa').terminatedOn('2025-01-31').insert(db);
++    });
++
++    const response = await get();
++
++    expect(response.statusCode).toBe(200);
++    const body = employeeListResponseSchema.parse(response.json());
++    expect(body).toMatchObject({ page: 1, pageSize: 50, total: 120, totalPages: 3 });
++    expect(body.items).toHaveLength(50);
++    const lastNames = body.items.map((item) => item.lastName);
++    expect(lastNames[0]).toBe('Surname000');
++    expect(lastNames).toEqual([...lastNames].sort());
++    expect(body.items.every((item) => item.status === 'active')).toBe(true);
++    expect(body.fxAsOf).toBe('2026-09-30');
++  });
++
++  it('breaks ties on first name and then id', async () => {
++    const get = await setup(async (db) => {
++      await anEmployee().named('Bea', 'Same').insert(db);
++      await anEmployee().named('Abe', 'Same').insert(db);
++      await anEmployee().named('Abe', 'Same').insert(db);
++    });
++
++    const body = employeeListResponseSchema.parse((await get()).json());
++
++    expect(body.items.map((item) => [item.firstName, item.id])).toEqual([
++      ['Abe', 2],
++      ['Abe', 3],
++      ['Bea', 1],
++    ]);
++  });
++
++  it('returns the requested page', async () => {
++    const get = await setup((db) => insertMany(db, 120));
++
++    const body = employeeListResponseSchema.parse((await get('?page=3')).json());
++
++    expect(body.page).toBe(3);
++    expect(body.items).toHaveLength(20);
++    expect(body.items[0]?.lastName).toBe('Surname100');
++  });
++
++  it('a page past the end returns no items and the real total', async () => {
++    const get = await setup((db) => insertMany(db, 120));
++
++    const response = await get('?page=9');
++
++    expect(response.statusCode).toBe(200);
++    const body = employeeListResponseSchema.parse(response.json());
++    expect(body).toMatchObject({ items: [], page: 9, total: 120, totalPages: 3 });
++  });
++
++  it('returns terminated employees only when asked, or all of them', async () => {
++    const get = await setup(async (db) => {
++      await anEmployee().named('Ann', 'Active').insert(db);
++      await anEmployee().named('Tom', 'Gone').terminatedOn('2025-01-31').insert(db);
++    });
++
++    const terminated = employeeListResponseSchema.parse((await get('?status=terminated')).json());
++    const all = employeeListResponseSchema.parse((await get('?status=all')).json());
++
++    expect(terminated.items.map((item) => item.lastName)).toEqual(['Gone']);
++    expect(terminated.items[0]?.terminationDate).toBe('2025-01-31');
++    expect(all.total).toBe(2);
++  });
++
++  it('rejects pageSize 30 and an unknown param with 400 VALIDATION_FAILED', async () => {
++    const get = await setup(async () => {});
++
++    for (const query of ['?pageSize=30', '?page=0', '?country=IN']) {
++      const response = await get(query);
++      expect({ query, status: response.statusCode, code: response.json().code }).toEqual({
++        query,
++        status: 400,
++        code: 'VALIDATION_FAILED',
++      });
++    }
++  });
++
++  describe('salary in local currency and USD, with compa-ratio and band position', () => {
++    const band = generateBands().find(
++      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
++    )!;
++    const INR_MICROS = 11_500;
++
++    it.each([
++      ['below', band.minMinor - 1],
++      ['inside', band.minMinor],
++      ['inside', band.midMinor],
++      ['inside', band.maxMinor],
++      ['above', band.maxMinor + 1],
++    ] as const)('places %s the band a salary of %i', async (position, salaryMinor) => {
++      const get = await setup(async (db) => {
++        await anEmployee().inCountry('IN').withSalary(salaryMinor).insert(db);
++      });
++
++      const [item] = (await get()).json().items;
++
++      expect(item).toMatchObject({
++        salary: { amountMinor: salaryMinor, currency: 'INR' },
++        salaryUsd: { amountMinor: toUsdMinor(salaryMinor, INR_MICROS), currency: 'USD' },
++        compaRatio: compaRatio(salaryMinor, band.midMinor),
++        bandPosition: position,
++      });
++    });
++
++    it('shows a USD salary unchanged', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().inCountry('US').withSalary(12_345_600).insert(db);
++      });
++
++      const [item] = (await get()).json().items;
++
++      expect(item.salary).toEqual({ amountMinor: 12_345_600, currency: 'USD' });
++      expect(item.salaryUsd).toEqual({ amountMinor: 12_345_600, currency: 'USD' });
++    });
++
++    it('rounds the USD figure half up to the cent for each employee', async () => {
++      // At 0.011500, 44 paise is 0.506 of a cent (rounds up to 1) and 43 is 0.4945 (rounds to 0).
++      const get = await setup(async (db) => {
++        await anEmployee().named('A', 'First').inCountry('IN').withSalary(44).insert(db);
++        await anEmployee().named('B', 'Second').inCountry('IN').withSalary(43).insert(db);
++      });
++
++      const items = (await get()).json().items;
++
++      expect(
++        items.map((item: { salaryUsd: { amountMinor: number } }) => item.salaryUsd.amountMinor),
++      ).toEqual([toUsdMinor(44, INR_MICROS), toUsdMinor(43, INR_MICROS)]);
++    });
++  });
++});
+diff --git a/apps/api/src/modules/employees/routes.ts b/apps/api/src/modules/employees/routes.ts
+new file mode 100644
+index 0000000..26df85c
+--- /dev/null
++++ b/apps/api/src/modules/employees/routes.ts
+@@ -0,0 +1,19 @@
++import {
++  employeeListQuerySchema,
++  type EmployeeListQuery,
++  type EmployeeListResponse,
++} from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import type { Db } from '../../db/client.ts';
++import { requires } from '../../http/guard.ts';
++import { listEmployees } from './service.ts';
++
++// E1 (04 section 5.4).
++export function employeeRoutes(app: FastifyInstance, deps: { db: Db }) {
++  app.get(
++    '/api/employees',
++    { onRequest: requires('employee.read'), schema: { querystring: employeeListQuerySchema } },
++    async (request): Promise<EmployeeListResponse> =>
++      listEmployees(deps.db, request.query as EmployeeListQuery),
++  );
++}
+diff --git a/apps/api/src/modules/employees/service.ts b/apps/api/src/modules/employees/service.ts
+new file mode 100644
+index 0000000..99fc538
+--- /dev/null
++++ b/apps/api/src/modules/employees/service.ts
+@@ -0,0 +1,93 @@
++import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
++import { and, asc, count, eq, type SQL } from 'drizzle-orm';
++import type { Db } from '../../db/client.ts';
++import { usdMinorSql } from '../../db/money-sql.ts';
++import {
++  countries,
++  departments,
++  employees,
++  fxRates,
++  jobTitles,
++  levels,
++  payBands,
++} from '../../db/schema.ts';
++import { fxAsOf } from '../auth/sessions.ts';
++
++// E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
++export async function listEmployees(
++  db: Db,
++  query: EmployeeListQuery,
++): Promise<EmployeeListResponse> {
++  const { page, pageSize, status } = query;
++  const where: SQL | undefined = status === 'all' ? undefined : eq(employees.status, status);
++
++  const [rows, [totals], asOf] = await Promise.all([
++    db
++      .select({
++        employee: employees,
++        country: countries,
++        jobTitle: jobTitles,
++        department: departments,
++        level: levels,
++        band: payBands,
++        salaryUsdMinor: usdMinorSql(employees.salaryMinor, fxRates.usdPerUnitMicros),
++      })
++      .from(employees)
++      .innerJoin(countries, eq(countries.code, employees.countryCode))
++      .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
++      .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
++      .innerJoin(levels, eq(levels.code, employees.levelCode))
++      .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
++      // Every employee has a band (02 section 3).
++      .innerJoin(
++        payBands,
++        and(
++          eq(payBands.countryCode, employees.countryCode),
++          eq(payBands.jobTitleId, employees.jobTitleId),
++          eq(payBands.levelCode, employees.levelCode),
++        ),
++      )
++      .where(where)
++      .orderBy(asc(employees.lastName), asc(employees.firstName), asc(employees.id))
++      .limit(pageSize)
++      .offset((page - 1) * pageSize),
++    db.select({ total: count() }).from(employees).where(where),
++    fxAsOf(db),
++  ]);
++  const total = totals?.total ?? 0;
++
++  return {
++    items: rows.map(
++      ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
++        id: e.id,
++        employeeCode: e.employeeCode,
++        firstName: e.firstName,
++        lastName: e.lastName,
++        gender: e.gender,
++        country: { code: country.code, name: country.name },
++        department: { id: department.id, name: department.name },
++        jobTitle: { id: jobTitle.id, name: jobTitle.name },
++        level: { code: level.code, name: level.name },
++        status: e.status,
++        hireDate: e.hireDate,
++        terminationDate: e.terminationDate,
++        salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
++        salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
++        salaryEffectiveDate: e.salaryEffectiveDate,
++        compaRatio: compaRatio(e.salaryMinor, band.midMinor),
++        // Equal to min or max is inside (02 section 4).
++        bandPosition:
++          e.salaryMinor < band.minMinor
++            ? 'below'
++            : e.salaryMinor > band.maxMinor
++              ? 'above'
++              : 'inside',
++      }),
++    ),
++    page,
++    pageSize,
++    total,
++    totalPages: Math.ceil(total / pageSize),
++    fxAsOf: asOf,
++  };
++}
+diff --git a/apps/api/src/modules/reference/routes.test.ts b/apps/api/src/modules/reference/routes.test.ts
+new file mode 100644
+index 0000000..5720c57
+--- /dev/null
++++ b/apps/api/src/modules/reference/routes.test.ts
+@@ -0,0 +1,84 @@
++import { referenceResponseSchema } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++
++describe('GET /api/reference (R1)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function getReference(role: 'hr_admin' | 'hr_viewer' | 'finance' = 'hr_viewer') {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, role);
++    app = testApp({ db });
++    const response = await app.inject({
++      method: 'GET',
++      url: '/api/reference',
++      headers: { cookie },
++    });
++    // Check the status first so a failing route reports its status, not a schema error.
++    expect(response.statusCode).toBe(200);
++    return { response, body: referenceResponseSchema.parse(response.json()) };
++  }
++
++  it('returns reference data sorted by name, levels by rank, with the fx as-of date', async () => {
++    const { response, body } = await getReference();
++
++    expect(response.statusCode).toBe(200);
++    const names = (list: { name: string }[]) => list.map((item) => item.name);
++    const sorted = (list: string[]) => [...list].sort();
++    expect(body.countries.length).toBeGreaterThan(0);
++    expect(names(body.countries)).toEqual(sorted(names(body.countries)));
++    expect(names(body.departments)).toEqual(sorted(names(body.departments)));
++    expect(names(body.jobTitles)).toEqual(sorted(names(body.jobTitles)));
++    expect(body.levels.map((level) => level.rank)).toEqual([1, 2, 3, 4, 5]);
++    expect(body.levels[2]).toEqual({ code: 'L3', name: 'Senior', rank: 3 });
++    expect(body.fx.asOfDate).toBe('2026-09-30');
++  });
++
++  it('gives each country its currency and each job title its department', async () => {
++    const { body } = await getReference();
++
++    expect(body.countries).toContainEqual({ code: 'IN', name: 'India', currency: 'INR' });
++    const engineer = body.jobTitles.find((title) => title.name === 'Software Engineer');
++    const engineering = body.departments.find((department) => department.name === 'Engineering');
++    expect(engineer?.departmentId).toBe(engineering?.id);
++  });
++
++  it('lists the genders and the four salary change reasons a person can choose', async () => {
++    const { body } = await getReference();
++
++    expect(body.genders).toEqual([
++      { code: 'female', name: 'Female' },
++      { code: 'male', name: 'Male' },
++      { code: 'non_binary', name: 'Non-binary' },
++      { code: 'not_disclosed', name: 'Not disclosed' },
++    ]);
++    expect(body.salaryChangeReasons).toEqual([
++      { code: 'promotion', name: 'Promotion' },
++      { code: 'merit', name: 'Merit increase' },
++      { code: 'market_adjustment', name: 'Market adjustment' },
++      { code: 'correction', name: 'Correction' },
++    ]);
++  });
++
++  it('shows each rate as a display string built from the micros, sorted by currency', async () => {
++    const { body } = await getReference();
++
++    expect(body.fx.rates).toContainEqual({ currency: 'INR', usdPerUnit: '0.011500' });
++    expect(body.fx.rates).toContainEqual({ currency: 'GBP', usdPerUnit: '1.340000' });
++    const currencies = body.fx.rates.map((rate) => rate.currency);
++    expect(currencies).toEqual([...currencies].sort());
++  });
++
++  it.each(['hr_admin', 'hr_viewer', 'finance'] as const)('answers %s with 200', async (role) => {
++    const { response } = await getReference(role);
++
++    expect(response.statusCode).toBe(200);
++  });
++});
+diff --git a/apps/api/src/modules/reference/routes.ts b/apps/api/src/modules/reference/routes.ts
+new file mode 100644
+index 0000000..617affb
+--- /dev/null
++++ b/apps/api/src/modules/reference/routes.ts
+@@ -0,0 +1,63 @@
++import type { ReferenceResponse } from '@acme/shared';
++import { asc } from 'drizzle-orm';
++import type { FastifyInstance } from 'fastify';
++import type { Db } from '../../db/client.ts';
++import { countries, departments, fxRates, jobTitles, levels } from '../../db/schema.ts';
++import { requires } from '../../http/guard.ts';
++import { fxAsOf } from '../auth/sessions.ts';
++
++// Static in v1 (04 section 5.3). `hire` is written by the system, so it is not a UI reason.
++const GENDERS = [
++  { code: 'female', name: 'Female' },
++  { code: 'male', name: 'Male' },
++  { code: 'non_binary', name: 'Non-binary' },
++  { code: 'not_disclosed', name: 'Not disclosed' },
++];
++
++const SALARY_CHANGE_REASONS = [
++  { code: 'promotion', name: 'Promotion' },
++  { code: 'merit', name: 'Merit increase' },
++  { code: 'market_adjustment', name: 'Market adjustment' },
++  { code: 'correction', name: 'Correction' },
++];
++
++// 11_500 micros is "0.011500"; integer arithmetic, display only.
++const microsToDisplay = (micros: number) =>
++  `${Math.floor(micros / 1_000_000)}.${String(micros % 1_000_000).padStart(6, '0')}`;
++
++// R1 (04 section 5.3).
++export function referenceRoutes(app: FastifyInstance, deps: { db: Db }) {
++  app.get(
++    '/api/reference',
++    { onRequest: requires('reference.read') },
++    async (): Promise<ReferenceResponse> => {
++      const { db } = deps;
++      const [countryRows, departmentRows, jobTitleRows, levelRows, rateRows] = await Promise.all([
++        db.select().from(countries).orderBy(asc(countries.name)),
++        db.select().from(departments).orderBy(asc(departments.name)),
++        db.select().from(jobTitles).orderBy(asc(jobTitles.name)),
++        db.select().from(levels).orderBy(asc(levels.rank)),
++        db.select().from(fxRates).orderBy(asc(fxRates.currencyCode)),
++      ]);
++      return {
++        countries: countryRows.map((c) => ({
++          code: c.code,
++          name: c.name,
++          currency: c.currencyCode,
++        })),
++        departments: departmentRows,
++        jobTitles: jobTitleRows,
++        levels: levelRows,
++        genders: GENDERS,
++        salaryChangeReasons: SALARY_CHANGE_REASONS,
++        fx: {
++          asOfDate: await fxAsOf(db),
++          rates: rateRows.map((r) => ({
++            currency: r.currencyCode,
++            usdPerUnit: microsToDisplay(r.usdPerUnitMicros),
++          })),
++        },
++      };
++    },
++  );
++}
+diff --git a/apps/web/src/AppRoutes.tsx b/apps/web/src/AppRoutes.tsx
+index 4cf362e..a32a5aa 100644
+--- a/apps/web/src/AppRoutes.tsx
++++ b/apps/web/src/AppRoutes.tsx
+@@ -1,17 +1,30 @@
+ import type { Action } from '@acme/shared';
+-import type { ReactElement } from 'react';
++import type { ComponentType, ReactElement } from 'react';
+ import { Navigate, Route, Routes } from 'react-router';
+ import { PlaceholderPage } from './components/PlaceholderPage.tsx';
+ import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
+ import { Shell, useViewer } from './components/Shell.tsx';
++import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
+ import { LoginPage } from './features/auth/LoginPage.tsx';
+ import { landingPath } from './features/auth/useSession.ts';
+ import { ROUTES } from './routes.ts';
+ 
+-function Gated({ action, title }: { action: Action; title: string }): ReactElement {
++// Screens built so far, by path; every other route shows a placeholder.
++const SCREENS: Record<string, ComponentType> = { '/employees': EmployeeListPage };
++
++function Gated({
++  action,
++  title,
++  path,
++}: {
++  action: Action;
++  title: string;
++  path: string;
++}): ReactElement {
+   const me = useViewer();
++  const Screen = SCREENS[path];
+   return (
+     <RoleGate me={me} action={action}>
+-      <PlaceholderPage title={title} />
++      {Screen ? <Screen /> : <PlaceholderPage title={title} />}
+     </RoleGate>
+   );
+@@ -34,5 +47,9 @@ export function AppRoutes(): ReactElement {
+         <Route path="/" element={<Landing />} />
+         {ROUTES.map(({ path, action, title }) => (
+-          <Route key={path} path={path} element={<Gated action={action} title={title} />} />
++          <Route
++            key={path}
++            path={path}
++            element={<Gated action={action} title={title} path={path} />}
++          />
+         ))}
+         <Route path="*" element={<NotFound />} />
+diff --git a/apps/web/src/components/FxAsOf.tsx b/apps/web/src/components/FxAsOf.tsx
+new file mode 100644
+index 0000000..1dca602
+--- /dev/null
++++ b/apps/web/src/components/FxAsOf.tsx
+@@ -0,0 +1,12 @@
++import { Text } from '@mantine/core';
++import type { ReactElement } from 'react';
++import { formatDate } from '../format.ts';
++
++/** `FX as of 30 Sep 2026`, under every view with converted figures (04 section 8.4). */
++export function FxAsOf({ date }: { date: string }): ReactElement {
++  return (
++    <Text size="xs" c="dimmed">
++      {`FX as of ${formatDate(date)}`}
++    </Text>
++  );
++}
+diff --git a/apps/web/src/components/Money.tsx b/apps/web/src/components/Money.tsx
+new file mode 100644
+index 0000000..ce05133
+--- /dev/null
++++ b/apps/web/src/components/Money.tsx
+@@ -0,0 +1,12 @@
++import { Text, type TextProps } from '@mantine/core';
++import type { ReactElement } from 'react';
++import { formatMoney, type MoneyValue } from '../format.ts';
++
++/** The only place money is formatted for display (04 section 8.4). */
++export function Money({ value, ...props }: { value: MoneyValue } & TextProps): ReactElement {
++  return (
++    <Text span {...props}>
++      {formatMoney(value)}
++    </Text>
++  );
++}
+diff --git a/apps/web/src/components/Shell.test.tsx b/apps/web/src/components/Shell.test.tsx
+new file mode 100644
+index 0000000..862ddc1
+--- /dev/null
++++ b/apps/web/src/components/Shell.test.tsx
+@@ -0,0 +1,31 @@
++import { screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { beforeEach, describe, expect, it } from 'vitest';
++import { aMeResponse } from '../../test/fixtures/me.ts';
++import { render } from '../../test/render.tsx';
++import { server } from '../../test/server.ts';
++import { AppRoutes } from '../AppRoutes.tsx';
++import { COLOR_SCHEME_KEY } from '../theme.ts';
++
++describe('dark mode toggle (06 S3)', () => {
++  beforeEach(() => {
++    window.localStorage.clear();
++    server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))));
++  });
++
++  it('switches between dark and light mode and persists the choice in localStorage', async () => {
++    const user = userEvent.setup();
++    render(<AppRoutes />, { route: '/employees' });
++
++    await user.click(await screen.findByRole('button', { name: 'Switch to dark mode' }));
++
++    expect(document.documentElement).toHaveAttribute('data-mantine-color-scheme', 'dark');
++    expect(window.localStorage.getItem(COLOR_SCHEME_KEY)).toBe('dark');
++
++    await user.click(screen.getByRole('button', { name: 'Switch to light mode' }));
++
++    expect(document.documentElement).toHaveAttribute('data-mantine-color-scheme', 'light');
++    expect(window.localStorage.getItem(COLOR_SCHEME_KEY)).toBe('light');
++  });
++});
+diff --git a/apps/web/src/components/Shell.tsx b/apps/web/src/components/Shell.tsx
+index 442f7eb..a2a8591 100644
+--- a/apps/web/src/components/Shell.tsx
++++ b/apps/web/src/components/Shell.tsx
+@@ -1,4 +1,16 @@
+ import type { Action, MeResponse, Role } from '@acme/shared';
+-import { AppShell, Badge, Button, Center, Group, Loader, Menu, Title } from '@mantine/core';
++import {
++  ActionIcon,
++  AppShell,
++  Badge,
++  Button,
++  Center,
++  Group,
++  Loader,
++  Menu,
++  Title,
++  useComputedColorScheme,
++  useMantineColorScheme,
++} from '@mantine/core';
+ import { useQueryClient } from '@tanstack/react-query';
+ import { useEffect, type ReactElement } from 'react';
+@@ -29,4 +41,40 @@ const ROLE_LABELS: Record<Role, string> = {
+ export const useViewer = () => useOutletContext<MeResponse>();
+ 
++const iconProps = {
++  width: 18,
++  height: 18,
++  viewBox: '0 0 24 24',
++  fill: 'none',
++  stroke: 'currentColor',
++  strokeWidth: 2,
++  strokeLinecap: 'round',
++  strokeLinejoin: 'round',
++  'aria-hidden': true,
++} as const;
++
++function ColorSchemeToggle(): ReactElement {
++  const { setColorScheme } = useMantineColorScheme();
++  const scheme = useComputedColorScheme('light');
++  const next = scheme === 'dark' ? 'light' : 'dark';
++  return (
++    <ActionIcon
++      variant="subtle"
++      aria-label={`Switch to ${next} mode`}
++      onClick={() => setColorScheme(next)}
++    >
++      {scheme === 'dark' ? (
++        <svg {...iconProps}>
++          <circle cx="12" cy="12" r="4" />
++          <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
++        </svg>
++      ) : (
++        <svg {...iconProps}>
++          <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
++        </svg>
++      )}
++    </ActionIcon>
++  );
++}
++
+ function UserMenu({ me }: { me: MeResponse }): ReactElement {
+   const navigate = useNavigate();
+@@ -99,5 +147,8 @@ export function Shell(): ReactElement {
+             </Group>
+           </Group>
+-          <UserMenu me={me.data} />
++          <Group gap="xs">
++            <ColorSchemeToggle />
++            <UserMenu me={me.data} />
++          </Group>
+         </Group>
+       </AppShell.Header>
+diff --git a/apps/web/src/features/employees/EmployeeListPage.test.tsx b/apps/web/src/features/employees/EmployeeListPage.test.tsx
+new file mode 100644
+index 0000000..590e0c1
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeListPage.test.tsx
+@@ -0,0 +1,227 @@
++import type { Role } from '@acme/shared';
++import { screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { delay, http, HttpResponse } from 'msw';
++import { useLocation } from 'react-router';
++import { describe, expect, it } from 'vitest';
++import {
++  anEmployeeListItem,
++  anEmployeeListResponse,
++  someEmployees,
++} from '../../../test/fixtures/employees.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const Location = () => {
++  const { pathname, search } = useLocation();
++  return <output aria-label="location">{pathname + search}</output>;
++};
++
++const renderList = (route: string) =>
++  render(
++    <>
++      <AppRoutes />
++      <Location />
++    </>,
++    { route },
++  );
++
++/** Serves 120 employees in pages of the requested size; records each request's query. */
++function servesPages(requests: URLSearchParams[]) {
++  server.use(
++    http.get('/api/employees', ({ request }) => {
++      const params = new URL(request.url).searchParams;
++      requests.push(params);
++      const page = Number(params.get('page'));
++      const pageSize = Number(params.get('pageSize'));
++      const totalPages = Math.ceil(120 / pageSize);
++      const first = (page - 1) * pageSize;
++      return HttpResponse.json(
++        anEmployeeListResponse({
++          items: page > totalPages ? [] : someEmployees(Math.min(pageSize, 120 - first), first + 1),
++          page,
++          pageSize,
++          total: 120,
++          totalPages,
++        }),
++      );
++    }),
++  );
++}
++
++const loggedInAs = (role: Role) =>
++  server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))));
++
++describe('employee list page (04 section 8.5)', () => {
++  it('renders the rows and the "Showing 1 to 50 of N" line', async () => {
++    loggedInAs('hr_viewer');
++    server.use(
++      http.get('/api/employees', () =>
++        HttpResponse.json(
++          anEmployeeListResponse({
++            items: [
++              anEmployeeListItem(),
++              anEmployeeListItem({
++                id: 4218,
++                employeeCode: 'E004218',
++                firstName: 'Tom',
++                lastName: 'Okafor',
++                status: 'terminated',
++                terminationDate: '2026-03-01',
++                bandPosition: 'above',
++              }),
++              ...someEmployees(48, 1),
++            ],
++            total: 2431,
++            totalPages: 49,
++          }),
++        ),
++      ),
++    );
++
++    render(<AppRoutes />, { route: '/employees' });
++
++    expect(await screen.findByText('Showing 1 to 50 of 2,431 employees')).toBeInTheDocument();
++    const row = screen.getByRole('row', { name: /E004217/ });
++    expect(within(row).getByText('Priya Nair')).toBeInTheDocument();
++    expect(within(row).getByText('India')).toBeInTheDocument();
++    expect(within(row).getByText('Software Engineer')).toBeInTheDocument();
++    expect(within(row).getByText('L3 Senior')).toBeInTheDocument();
++    expect(within(row).getByText('INR 19,80,000')).toBeInTheDocument();
++    expect(within(row).getByText('USD 22,770')).toBeInTheDocument();
++    expect(within(row).getByText('Inside')).toBeInTheDocument();
++    expect(within(row).getByText('12 Jul 2021')).toBeInTheDocument();
++    expect(within(row).queryByText('Terminated')).not.toBeInTheDocument();
++    const terminated = screen.getByRole('row', { name: /E004218/ });
++    expect(within(terminated).getByText('Above')).toBeInTheDocument();
++    expect(within(terminated).getByText('Terminated')).toBeInTheDocument();
++    expect(screen.getByText('FX as of 30 Sep 2026')).toBeInTheDocument();
++    expect(screen.getByRole('button', { name: '49' })).toBeInTheDocument();
++  });
++
++  it('shows 10 skeleton rows on first load', async () => {
++    loggedInAs('hr_viewer');
++    server.use(
++      http.get('/api/employees', async () => {
++        await delay('infinite');
++        return HttpResponse.json(anEmployeeListResponse());
++      }),
++    );
++
++    render(<AppRoutes />, { route: '/employees' });
++
++    const table = await screen.findByRole('table');
++    expect(within(table).getAllByRole('row')).toHaveLength(11);
++    expect(screen.getByRole('heading', { level: 1, name: 'Employees' })).toBeInTheDocument();
++  });
++
++  it('changing the page or page size updates the URL and requests that page', async () => {
++    loggedInAs('hr_viewer');
++    const requests: URLSearchParams[] = [];
++    servesPages(requests);
++    const user = userEvent.setup();
++    renderList('/employees');
++    await screen.findByText('Showing 1 to 50 of 120 employees');
++    expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/);
++
++    await user.click(screen.getByRole('button', { name: '2' }));
++
++    expect(await screen.findByText('Showing 51 to 100 of 120 employees')).toBeInTheDocument();
++    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?page=2');
++    expect(requests.at(-1)?.get('page')).toBe('2');
++
++    await user.click(screen.getByRole('combobox', { name: 'Page size' }));
++    await user.click(await screen.findByRole('option', { name: '25' }));
++
++    expect(await screen.findByText('Showing 1 to 25 of 120 employees')).toBeInTheDocument();
++    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?pageSize=25');
++    expect(requests.at(-1)?.get('page')).toBe('1');
++    expect(requests.at(-1)?.get('pageSize')).toBe('25');
++  });
++
++  it('reads the page and page size from the URL', async () => {
++    loggedInAs('hr_viewer');
++    const requests: URLSearchParams[] = [];
++    servesPages(requests);
++    renderList('/employees?page=2&pageSize=100');
++
++    expect(await screen.findByText('Showing 101 to 120 of 120 employees')).toBeInTheDocument();
++    expect(requests[0]?.get('page')).toBe('2');
++    expect(requests[0]?.get('pageSize')).toBe('100');
++  });
++
++  it('shows the past-the-end notice with a link to the last page', async () => {
++    loggedInAs('hr_viewer');
++    const requests: URLSearchParams[] = [];
++    servesPages(requests);
++    const user = userEvent.setup();
++    renderList('/employees?page=9');
++
++    expect(
++      await screen.findByText('This page is past the end of the results.'),
++    ).toBeInTheDocument();
++
++    await user.click(screen.getByRole('button', { name: 'Go to last page' }));
++
++    expect(await screen.findByText('Showing 101 to 120 of 120 employees')).toBeInTheDocument();
++    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?page=3');
++    expect(screen.queryByText('This page is past the end of the results.')).not.toBeInTheDocument();
++  });
++
++  it('shows the error alert with "Retry" on a 500 problem', async () => {
++    loggedInAs('hr_viewer');
++    let calls = 0;
++    server.use(
++      http.get('/api/employees', () => {
++        calls += 1;
++        return calls === 1
++          ? HttpResponse.json(
++              aProblem({ status: 500, code: 'INTERNAL', detail: 'The server hit a snag.' }),
++              { status: 500, headers: { 'content-type': 'application/problem+json' } },
++            )
++          : HttpResponse.json(anEmployeeListResponse());
++      }),
++    );
++    const user = userEvent.setup();
++    render(<AppRoutes />, { route: '/employees' });
++
++    expect(await screen.findByRole('alert')).toHaveTextContent('The server hit a snag.');
++
++    await user.click(screen.getByRole('button', { name: 'Retry' }));
++
++    expect(await screen.findByText('Priya Nair')).toBeInTheDocument();
++    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
++  });
++
++  it('shows "No employees yet." with "Add employee" for HR Admin', async () => {
++    loggedInAs('hr_admin');
++    server.use(
++      http.get('/api/employees', () =>
++        HttpResponse.json(anEmployeeListResponse({ items: [], total: 0, totalPages: 0 })),
++      ),
++    );
++    render(<AppRoutes />, { route: '/employees' });
++
++    expect(await screen.findByText('No employees yet.')).toBeInTheDocument();
++    expect(screen.getAllByRole('link', { name: 'Add employee' })).toHaveLength(1);
++    expect(screen.queryByText('This page is past the end of the results.')).not.toBeInTheDocument();
++  });
++
++  it.each<[Role, boolean]>([
++    ['hr_admin', true],
++    ['hr_viewer', false],
++  ])('shows "Add employee" to HR Admin only (%s)', async (role, shown) => {
++    loggedInAs(role);
++    server.use(http.get('/api/employees', () => HttpResponse.json(anEmployeeListResponse())));
++    render(<AppRoutes />, { route: '/employees' });
++    await screen.findByText('Priya Nair');
++
++    const link = screen.queryByRole('link', { name: 'Add employee' });
++
++    if (shown) expect(link).toHaveAttribute('href', '/employees/new');
++    else expect(link).not.toBeInTheDocument();
++  });
++});
+diff --git a/apps/web/src/features/employees/EmployeeListPage.tsx b/apps/web/src/features/employees/EmployeeListPage.tsx
+new file mode 100644
+index 0000000..b1d41ad
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeListPage.tsx
+@@ -0,0 +1,180 @@
++import type { EmployeeListItem } from '@acme/shared';
++import { employeeListResponseSchema } from '@acme/shared';
++import {
++  Alert,
++  Badge,
++  Button,
++  Group,
++  Pagination,
++  Select,
++  Skeleton,
++  Stack,
++  Table,
++  Text,
++  Title,
++  Tooltip,
++} from '@mantine/core';
++import { keepPreviousData, useQuery } from '@tanstack/react-query';
++import type { ReactElement } from 'react';
++import { Link } from 'react-router';
++import { apiFetch } from '../../api/client.ts';
++import { FxAsOf } from '../../components/FxAsOf.tsx';
++import { Money } from '../../components/Money.tsx';
++import { useViewer } from '../../components/Shell.tsx';
++import { formatCompaRatio, formatDate } from '../../format.ts';
++import { useEmployeeFilters } from './useEmployeeFilters.ts';
++
++const BAND_LABELS = { below: 'Below', inside: 'Inside', above: 'Above' } as const;
++const BAND_COLORS = { below: 'orange', inside: 'green', above: 'blue' } as const;
++const COLUMNS = [
++  'Employee ID',
++  'Name',
++  'Country',
++  'Job title',
++  'Level',
++  'Salary',
++  'Band',
++  'Hire date',
++];
++const SKELETON_ROWS = 10;
++const PAGE_SIZES = ['25', '50', '100'];
++const count = new Intl.NumberFormat('en-US');
++
++function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement {
++  return (
++    <Table.Tr>
++      <Table.Td>{employee.employeeCode}</Table.Td>
++      <Table.Td>
++        <Group gap="xs" wrap="nowrap">
++          <span>{`${employee.firstName} ${employee.lastName}`}</span>
++          {employee.status === 'terminated' && (
++            <Badge color="gray" variant="light">
++              Terminated
++            </Badge>
++          )}
++        </Group>
++      </Table.Td>
++      <Table.Td>{employee.country.name}</Table.Td>
++      <Table.Td>{employee.jobTitle.name}</Table.Td>
++      <Table.Td>{`${employee.level.code} ${employee.level.name}`}</Table.Td>
++      <Table.Td>
++        <Money value={employee.salary} display="block" />
++        <Money value={employee.salaryUsd} display="block" size="xs" c="dimmed" />
++      </Table.Td>
++      <Table.Td>
++        <Tooltip label={`Compa-ratio ${formatCompaRatio(employee.compaRatio)}`}>
++          <Badge color={BAND_COLORS[employee.bandPosition]} variant="light">
++            {BAND_LABELS[employee.bandPosition]}
++          </Badge>
++        </Tooltip>
++      </Table.Td>
++      <Table.Td>{formatDate(employee.hireDate)}</Table.Td>
++    </Table.Tr>
++  );
++}
++
++/** S-2 Employees list (04 section 8.5). */
++export function EmployeeListPage(): ReactElement {
++  const { page, pageSize, setPage, setPageSize } = useEmployeeFilters();
++  const query = { page, pageSize };
++  const employees = useQuery({
++    queryKey: ['employees', query],
++    queryFn: () =>
++      apiFetch(`/api/employees?page=${query.page}&pageSize=${query.pageSize}`, {
++        schema: employeeListResponseSchema,
++      }),
++    staleTime: 30_000,
++    placeholderData: keepPreviousData,
++  });
++  const data = employees.data;
++  const empty = data?.total === 0;
++  const pastTheEnd =
++    data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
++  const showTable = !empty && (data !== undefined || !employees.isError);
++  const canAdd = useViewer().permissions.includes('employee.write');
++  const addButton = (
++    <Button component={Link} to="/employees/new">
++      Add employee
++    </Button>
++  );
++
++  return (
++    <Stack>
++      <Group justify="space-between">
++        <Title order={1}>Employees</Title>
++        {canAdd && !empty && addButton}
++      </Group>
++      {employees.isError && (
++        <Alert color="red">
++          <Group justify="space-between">
++            <Text>{employees.error.message}</Text>
++            <Button variant="light" onClick={() => void employees.refetch()}>
++              Retry
++            </Button>
++          </Group>
++        </Alert>
++      )}
++      {empty && (
++        <Stack align="flex-start">
++          <Text>No employees yet.</Text>
++          {canAdd && addButton}
++        </Stack>
++      )}
++      {data && !pastTheEnd && (
++        <Text>
++          {`Showing ${count.format((data.page - 1) * data.pageSize + 1)} to ${count.format(
++            Math.min(data.page * data.pageSize, data.total),
++          )} of ${count.format(data.total)} employees`}
++        </Text>
++      )}
++      {data && pastTheEnd && (
++        <Alert color="yellow">
++          <Group justify="space-between">
++            <Text>This page is past the end of the results.</Text>
++            <Button variant="light" onClick={() => setPage(data.totalPages)}>
++              Go to last page
++            </Button>
++          </Group>
++        </Alert>
++      )}
++      {showTable && (
++        <Table striped>
++          <Table.Thead>
++            <Table.Tr>
++              {COLUMNS.map((column) => (
++                <Table.Th key={column}>{column}</Table.Th>
++              ))}
++            </Table.Tr>
++          </Table.Thead>
++          <Table.Tbody>
++            {data
++              ? data.items.map((employee) => <EmployeeRow key={employee.id} employee={employee} />)
++              : Array.from({ length: SKELETON_ROWS }, (_, row) => (
++                  <Table.Tr key={row}>
++                    {COLUMNS.map((column) => (
++                      <Table.Td key={column}>
++                        <Skeleton height={16} />
++                      </Table.Td>
++                    ))}
++                  </Table.Tr>
++                ))}
++          </Table.Tbody>
++        </Table>
++      )}
++      {data && !empty && (
++        <Group justify="space-between">
++          <Pagination value={data.page} total={data.totalPages} onChange={setPage} />
++          <Select
++            aria-label="Page size"
++            w={90}
++            allowDeselect={false}
++            data={PAGE_SIZES}
++            value={String(pageSize)}
++            onChange={(value) => value && setPageSize(Number(value))}
++          />
++          <FxAsOf date={data.fxAsOf} />
++        </Group>
++      )}
++    </Stack>
++  );
++}
+diff --git a/apps/web/src/features/employees/useEmployeeFilters.ts b/apps/web/src/features/employees/useEmployeeFilters.ts
+new file mode 100644
+index 0000000..087e16f
+--- /dev/null
++++ b/apps/web/src/features/employees/useEmployeeFilters.ts
+@@ -0,0 +1,30 @@
++import { useSearchParams } from 'react-router';
++
++const DEFAULT_PAGE_SIZE = 50;
++
++/** List state kept in the URL (04 section 8.3); defaults are left out of it. */
++export function useEmployeeFilters(): {
++  page: number;
++  pageSize: number;
++  setPage: (page: number) => void;
++  setPageSize: (pageSize: number) => void;
++} {
++  const [params, setParams] = useSearchParams();
++  const page = Number(params.get('page') ?? 1);
++  const pageSize = Number(params.get('pageSize') ?? DEFAULT_PAGE_SIZE);
++
++  const update = (next: { page: number; pageSize: number }) => {
++    const search = new URLSearchParams();
++    if (next.page !== 1) search.set('page', String(next.page));
++    if (next.pageSize !== DEFAULT_PAGE_SIZE) search.set('pageSize', String(next.pageSize));
++    setParams(search);
++  };
++
++  return {
++    page,
++    pageSize,
++    setPage: (nextPage) => update({ page: nextPage, pageSize }),
++    // A new page size starts again from page 1.
++    setPageSize: (nextSize) => update({ page: 1, pageSize: nextSize }),
++  };
++}
+diff --git a/apps/web/src/format.test.ts b/apps/web/src/format.test.ts
+new file mode 100644
+index 0000000..741c78d
+--- /dev/null
++++ b/apps/web/src/format.test.ts
+@@ -0,0 +1,94 @@
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import {
++  formatChangePct,
++  formatCompaRatio,
++  formatDate,
++  formatGapPct,
++  formatMoney,
++  formatSharePct,
++  parseMajorToMinor,
++} from './format.ts';
++
++describe('formatMoney (04 section 8.4)', () => {
++  it.each([
++    [{ amountMinor: 204800000, currency: 'INR' }, 'INR 20,48,000'],
++    [{ amountMinor: 2355200, currency: 'USD' }, 'USD 23,552'],
++    [{ amountMinor: 1234500, currency: 'CAD' }, 'CAD 12,345'],
++  ])('formats %j as %s', (money, expected) => {
++    expect(formatMoney(money)).toBe(expected);
++  });
++});
++
++describe('formatDate (04 section 8.4)', () => {
++  afterEach(() => vi.unstubAllEnvs());
++
++  it('formats an ISO date as 9 Oct 2026', () => {
++    expect(formatDate('2026-10-09')).toBe('9 Oct 2026');
++  });
++
++  it('writes September as Sep, not the ICU "Sept"', () => {
++    expect(formatDate('2026-09-30')).toBe('30 Sep 2026');
++  });
++
++  it.each(['Pacific/Kiritimati', 'Pacific/Pago_Pago'])(
++    'does not shift the day in the %s zone',
++    (zone) => {
++      vi.stubEnv('TZ', zone);
++      expect(formatDate('2026-10-09')).toBe('9 Oct 2026');
++    },
++  );
++});
++
++describe('parseMajorToMinor (04 section 8.4)', () => {
++  it.each([
++    ['0.29', 29],
++    ['20480.50', 2048050],
++    ['20480', 2048000],
++    ['0', 0],
++  ])('converts %s to %d by string parsing', (input, minor) => {
++    expect(parseMajorToMinor(input)).toBe(minor);
++  });
++
++  it.each(['1.234', '', 'abc', '-1', '1.'])('rejects %j', (input) => {
++    expect(parseMajorToMinor(input)).toBeNull();
++  });
++});
++
++describe('percentages and compa-ratio (04 section 8.4.1)', () => {
++  it.each<[number | null, string]>([
++    [4.2, '+4.2%'],
++    [-1.0, '-1.0%'],
++    [0, '0.0%'],
++    [-0, '0.0%'],
++    [0.04, '0.0%'],
++    [-0.04, '0.0%'],
++    [null, 'n/a'],
++    [0.05, '+0.1%'],
++    [-0.05, '-0.1%'],
++  ])('shows a salary change of %s as %s', (value, expected) => {
++    expect(formatChangePct(value)).toBe(expected);
++  });
++
++  it.each<[number | null, string]>([
++    [8.0, '8.0%'],
++    [-1.2, '-1.2%'],
++    [0.04, '0.0%'],
++    [-0.04, '0.0%'],
++    [null, 'Too few to compare'],
++  ])('shows a gender gap of %s as %s', (value, expected) => {
++    expect(formatGapPct(value)).toBe(expected);
++  });
++
++  it.each<[number | null, string]>([
++    [40, '40.0%'],
++    [0.04, '0.0%'],
++    [null, 'n/a'],
++  ])('shows a share of %s as %s', (value, expected) => {
++    expect(formatSharePct(value)).toBe(expected);
++  });
++
++  it('shows a compa-ratio to two decimals', () => {
++    expect(formatCompaRatio(0.97)).toBe('0.97');
++    expect(formatCompaRatio(1)).toBe('1.00');
++  });
++});
+diff --git a/apps/web/src/format.ts b/apps/web/src/format.ts
+new file mode 100644
+index 0000000..51f083b
+--- /dev/null
++++ b/apps/web/src/format.ts
+@@ -0,0 +1,82 @@
++export type MoneyValue = { amountMinor: number; currency: string };
++
++const moneyFormatters = new Map<string, Intl.NumberFormat>();
++
++function moneyFormatter(currency: string): Intl.NumberFormat {
++  let formatter = moneyFormatters.get(currency);
++  if (!formatter) {
++    formatter = new Intl.NumberFormat(currency === 'INR' ? 'en-IN' : 'en-US', {
++      style: 'currency',
++      currency,
++      currencyDisplay: 'code',
++      minimumFractionDigits: 0,
++      maximumFractionDigits: 0,
++    });
++    moneyFormatters.set(currency, formatter);
++  }
++  return formatter;
++}
++
++/** `INR 20,48,000`, `USD 23,552`: whole major units, code before the number. */
++export function formatMoney({ amountMinor, currency }: MoneyValue): string {
++  return moneyFormatter(currency)
++    .format(amountMinor / 100)
++    .replace(/\s/g, ' ');
++}
++
++const dateFormatter = new Intl.DateTimeFormat('en-GB', {
++  day: 'numeric',
++  month: 'short',
++  year: 'numeric',
++  timeZone: 'UTC',
++});
++
++/**
++ * `2026-10-09` to `9 Oct 2026`, in UTC whatever the machine's zone. ICU's en-GB writes September
++ * as `Sept`; 04 section 8.4 shows `Sep`, so the month is normalised.
++ */
++export function formatDate(isoDate: string): string {
++  return dateFormatter.format(new Date(`${isoDate}T00:00:00Z`)).replace(' Sept ', ' Sep ');
++}
++
++/** Parses major units ("20480.50") to minor units by string parsing; null when invalid. */
++export function parseMajorToMinor(input: string): number | null {
++  const match = /^(\d+)(?:\.(\d{1,2}))?$/.exec(input.trim());
++  if (!match) return null;
++  const [, whole, fraction = ''] = match;
++  return Number(whole + fraction.padEnd(2, '0'));
++}
++
++const pctFormatters = {
++  signed: new Intl.NumberFormat('en-US', {
++    minimumFractionDigits: 1,
++    maximumFractionDigits: 1,
++    signDisplay: 'exceptZero',
++  }),
++  unsigned: new Intl.NumberFormat('en-US', {
++    minimumFractionDigits: 1,
++    maximumFractionDigits: 1,
++    signDisplay: 'negative',
++  }),
++};
++
++/** One decimal; a value that rounds to zero shows `0.0%` with no sign (04 section 8.4.1). */
++export function formatPct(value: number, { signed = false }: { signed?: boolean } = {}): string {
++  return `${pctFormatters[signed ? 'signed' : 'unsigned'].format(value)}%`;
++}
++
++export const formatChangePct = (value: number | null): string =>
++  value === null ? 'n/a' : formatPct(value, { signed: true });
++
++export const formatGapPct = (value: number | null): string =>
++  value === null ? 'Too few to compare' : formatPct(value);
++
++export const formatSharePct = (value: number | null): string =>
++  value === null ? 'n/a' : formatPct(value);
++
++const compaFormatter = new Intl.NumberFormat('en-US', {
++  minimumFractionDigits: 2,
++  maximumFractionDigits: 2,
++});
++
++export const formatCompaRatio = (value: number): string => compaFormatter.format(value);
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index 33e4eca..101652d 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,4 +1,4 @@
+ import '@mantine/core/styles.css';
+-import { MantineProvider } from '@mantine/core';
++import { ColorSchemeScript, MantineProvider } from '@mantine/core';
+ import { QueryClientProvider } from '@tanstack/react-query';
+ import { StrictMode } from 'react';
+@@ -7,4 +7,5 @@ import { BrowserRouter } from 'react-router';
+ import { AppRoutes } from './AppRoutes.tsx';
+ import { createQueryClient } from './queryClient.ts';
++import { COLOR_SCHEME_KEY, colorSchemeManager, theme } from './theme.ts';
+ 
+ const queryClient = createQueryClient();
+@@ -12,5 +13,6 @@ const queryClient = createQueryClient();
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+-    <MantineProvider>
++    <ColorSchemeScript localStorageKey={COLOR_SCHEME_KEY} />
++    <MantineProvider theme={theme} colorSchemeManager={colorSchemeManager}>
+       <QueryClientProvider client={queryClient}>
+         <BrowserRouter>
+diff --git a/apps/web/src/theme.ts b/apps/web/src/theme.ts
+new file mode 100644
+index 0000000..d52964c
+--- /dev/null
++++ b/apps/web/src/theme.ts
+@@ -0,0 +1,13 @@
++import { createTheme, localStorageColorSchemeManager, Table } from '@mantine/core';
++
++export const theme = createTheme({
++  primaryColor: 'violet',
++  defaultRadius: 'md',
++  components: {
++    Table: Table.extend({ defaultProps: { striped: true, highlightOnHover: true } }),
++  },
++});
++
++// The colour scheme survives reloads in localStorage (06 S3).
++export const COLOR_SCHEME_KEY = 'acme-color-scheme';
++export const colorSchemeManager = localStorageColorSchemeManager({ key: COLOR_SCHEME_KEY });
+diff --git a/apps/web/test/fixtures/employees.ts b/apps/web/test/fixtures/employees.ts
+new file mode 100644
+index 0000000..72b601f
+--- /dev/null
++++ b/apps/web/test/fixtures/employees.ts
+@@ -0,0 +1,53 @@
++import {
++  employeeListItemSchema,
++  employeeListResponseSchema,
++  type EmployeeListItem,
++  type EmployeeListResponse,
++} from '@acme/shared';
++
++// Fixture builders parse with the shared response schema (D-050).
++export const anEmployeeListItem = (overrides: Partial<EmployeeListItem> = {}): EmployeeListItem =>
++  employeeListItemSchema.parse({
++    id: 4217,
++    employeeCode: 'E004217',
++    firstName: 'Priya',
++    lastName: 'Nair',
++    gender: 'female',
++    country: { code: 'IN', name: 'India' },
++    department: { id: 1, name: 'Engineering' },
++    jobTitle: { id: 1, name: 'Software Engineer' },
++    level: { code: 'L3', name: 'Senior' },
++    status: 'active',
++    hireDate: '2021-07-12',
++    terminationDate: null,
++    salary: { amountMinor: 198000000, currency: 'INR' },
++    salaryUsd: { amountMinor: 2277000, currency: 'USD' },
++    salaryEffectiveDate: '2026-04-01',
++    compaRatio: 0.97,
++    bandPosition: 'inside',
++    ...overrides,
++  });
++
++export const anEmployeeListResponse = (
++  overrides: Partial<EmployeeListResponse> = {},
++): EmployeeListResponse =>
++  employeeListResponseSchema.parse({
++    items: [anEmployeeListItem()],
++    page: 1,
++    pageSize: 50,
++    total: 1,
++    totalPages: 1,
++    fxAsOf: '2026-09-30',
++    ...overrides,
++  });
++
++/** `count` distinct employees, ids from `firstId`. */
++export const someEmployees = (count: number, firstId = 1): EmployeeListItem[] =>
++  Array.from({ length: count }, (_, index) =>
++    anEmployeeListItem({
++      id: firstId + index,
++      employeeCode: `E${String(firstId + index).padStart(6, '0')}`,
++      firstName: `First${firstId + index}`,
++      lastName: `Last${firstId + index}`,
++    }),
++  );
+diff --git a/apps/web/test/render.tsx b/apps/web/test/render.tsx
+index 2255828..b938426 100644
+--- a/apps/web/test/render.tsx
++++ b/apps/web/test/render.tsx
+@@ -4,4 +4,5 @@ import { render as rtlRender } from '@testing-library/react';
+ import type { ReactElement, ReactNode } from 'react';
+ import { MemoryRouter } from 'react-router';
++import { colorSchemeManager, theme } from '../src/theme.ts';
+ 
+ // The test wrapper from 05 section 3.1: Mantine, TanStack Query (retries off) and a router.
+@@ -9,5 +10,5 @@ export function render(ui: ReactElement, { route = '/' }: { route?: string } = {
+   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+   const Wrapper = ({ children }: { children: ReactNode }) => (
+-    <MantineProvider>
++    <MantineProvider theme={theme} colorSchemeManager={colorSchemeManager} env="test">
+       <QueryClientProvider client={queryClient}>
+         <MemoryRouter initialEntries={[route]}>{children}</MemoryRouter>
+diff --git a/docs/06-build-plan.md b/docs/06-build-plan.md
+index 18abd2b..d4e362e 100644
+--- a/docs/06-build-plan.md
++++ b/docs/06-build-plan.md
+@@ -332,5 +332,5 @@ refactor(web): extract api client problem parsing
+ 
+ **Test list.**
+-- 05 section 5.3: U rows 1 and 2; I rows 1, 2 and 12 (default list, past-the-end page, item fields); C rows 1, 6 and 7 (rows and count line, error, role buttons).
++- 05 section 5.3: U rows 1 and 2; I rows 1, 2 and 12 (default list, past-the-end page, item fields); C rows 1, 6 and 7 (rows and count line, error, role buttons). U row 1 covers defaults and unknown params only; comma lists come with the S4 list filters. C row 7 covers "Add employee" only; its "Export CSV" half moves to S4 with the export button.
+ - 05 section 5.9: the five U formatting rows.
+ - 05 section 5.6: the TS and SQL USD conversion agreement row (needed for the list's USD column).
+@@ -376,5 +376,5 @@ feat(web): add employee list page
+ 
+ **Test list.**
+-- 05 section 5.3: all rows not done in S3.
++- 05 section 5.3: all rows not done in S3, including the comma-list part of U row 1 and the "Export CSV" half of C row 7 ("Export CSV" shown to both HR roles).
+ - 05 section 5.7: all rows.
+ 
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 7892974..2721f07 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -4,2 +4,5 @@ export * from './schemas/health.ts';
+ export * from './schemas/problem.ts';
+ export * from './money.ts';
++export * from './schemas/employee.ts';
++export * from './percent.ts';
++export * from './schemas/reference.ts';
+diff --git a/packages/shared/src/percent.test.ts b/packages/shared/src/percent.test.ts
+new file mode 100644
+index 0000000..8dc83a2
+--- /dev/null
++++ b/packages/shared/src/percent.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it } from 'vitest';
++import { compaRatio } from './percent.ts';
++
++describe('compaRatio', () => {
++  // 04 section 8.4.1: hundredths = salary * 100 / mid, rounded half away from zero in integers.
++  it.each([
++    {
++      case: 'a tie rounds up, not to floating-point 1.00',
++      salary: 100_500,
++      mid: 100_000,
++      ratio: 1.01,
++    },
++    { case: 'exactly the midpoint', salary: 100_000, mid: 100_000, ratio: 1 },
++    { case: 'below the midpoint', salary: 97_000, mid: 100_000, ratio: 0.97 },
++    { case: 'rounds down below half', salary: 100_499, mid: 100_000, ratio: 1 },
++    { case: 'rounds up above half', salary: 100_501, mid: 100_000, ratio: 1.01 },
++    { case: 'a large ratio', salary: 250_000, mid: 100_000, ratio: 2.5 },
++    { case: 'a negative tie rounds away from zero', salary: -100_500, mid: 100_000, ratio: -1.01 },
++  ])('$case', ({ salary, mid, ratio }) => {
++    expect(compaRatio(salary, mid)).toBe(ratio);
++  });
++
++  it('never returns -0', () => {
++    expect(Object.is(compaRatio(-1, 100_000), 0)).toBe(true);
++  });
++});
+diff --git a/packages/shared/src/percent.ts b/packages/shared/src/percent.ts
+new file mode 100644
+index 0000000..f9c533b
+--- /dev/null
++++ b/packages/shared/src/percent.ts
+@@ -0,0 +1,7 @@
++// 04 section 8.4.1: integer arithmetic on minor units, rounded half away from zero.
++// `Math.round` is not used; a result of zero is never `-0`.
++export function compaRatio(salaryMinor: number, midMinor: number): number {
++  const numerator = Math.abs(salaryMinor) * 100;
++  const hundredths = Math.floor((numerator * 2 + midMinor) / (midMinor * 2));
++  return salaryMinor < 0 && hundredths !== 0 ? -hundredths / 100 : hundredths / 100;
++}
+diff --git a/packages/shared/src/schemas/employee.test.ts b/packages/shared/src/schemas/employee.test.ts
+new file mode 100644
+index 0000000..b8fbe9e
+--- /dev/null
++++ b/packages/shared/src/schemas/employee.test.ts
+@@ -0,0 +1,43 @@
++import { describe, expect, it } from 'vitest';
++import { employeeListQuerySchema } from './employee.ts';
++
++describe('employeeListQuerySchema', () => {
++  it('applies defaults page 1, pageSize 50 and status active', () => {
++    const result = employeeListQuerySchema.safeParse({});
++
++    expect(result.success).toBe(true);
++    expect(result.data).toEqual({ page: 1, pageSize: 50, status: 'active' });
++  });
++
++  it('coerces query-string values to numbers', () => {
++    const result = employeeListQuerySchema.safeParse({
++      page: '3',
++      pageSize: '100',
++      status: 'all',
++    });
++
++    expect(result.data).toEqual({ page: 3, pageSize: 100, status: 'all' });
++  });
++
++  it('rejects unknown params', () => {
++    const result = employeeListQuerySchema.safeParse({ q: 'nair' });
++
++    expect(result.success).toBe(false);
++  });
++
++  it.each([0, -1, 1.5, 'abc'])('rejects page %s', (page) => {
++    expect(employeeListQuerySchema.safeParse({ page }).success).toBe(false);
++  });
++
++  it.each([25, 50, 100])('accepts pageSize %s', (pageSize) => {
++    expect(employeeListQuerySchema.safeParse({ pageSize }).data?.pageSize).toBe(pageSize);
++  });
++
++  it.each([0, 10, 30, 101, 'abc'])('rejects pageSize %s', (pageSize) => {
++    expect(employeeListQuerySchema.safeParse({ pageSize }).success).toBe(false);
++  });
++
++  it('rejects an unknown status', () => {
++    expect(employeeListQuerySchema.safeParse({ status: 'gone' }).success).toBe(false);
++  });
++});
+diff --git a/packages/shared/src/schemas/employee.ts b/packages/shared/src/schemas/employee.ts
+new file mode 100644
+index 0000000..32c093f
+--- /dev/null
++++ b/packages/shared/src/schemas/employee.ts
+@@ -0,0 +1,54 @@
++import { z } from 'zod';
++import { isoDateSchema } from './common.ts';
++
++// 04 section 5.4 E1 query, S3 subset. Strict: S4 adds the filters, sort and `q`.
++export const employeeListQuerySchema = z.strictObject({
++  page: z.coerce.number().int().min(1).default(1),
++  pageSize: z.coerce
++    .number()
++    .pipe(z.union([z.literal(25), z.literal(50), z.literal(100)]))
++    .default(50),
++  status: z.enum(['active', 'terminated', 'all']).default('active'),
++});
++
++export type EmployeeListQuery = z.infer<typeof employeeListQuerySchema>;
++
++const codeName = z.object({ code: z.string(), name: z.string() });
++const idName = z.object({ id: z.number().int(), name: z.string() });
++
++export const moneySchema = z.object({ amountMinor: z.number().int(), currency: z.string() });
++
++export const bandPositionSchema = z.enum(['below', 'inside', 'above']);
++
++// 04 section 5.4 E1 item.
++export const employeeListItemSchema = z.object({
++  id: z.number().int(),
++  employeeCode: z.string(),
++  firstName: z.string(),
++  lastName: z.string(),
++  gender: z.enum(['female', 'male', 'non_binary', 'not_disclosed']),
++  country: codeName,
++  department: idName,
++  jobTitle: idName,
++  level: codeName,
++  status: z.enum(['active', 'terminated']),
++  hireDate: isoDateSchema,
++  terminationDate: isoDateSchema.nullable(),
++  salary: moneySchema,
++  salaryUsd: moneySchema,
++  salaryEffectiveDate: isoDateSchema,
++  compaRatio: z.number(),
++  bandPosition: bandPositionSchema,
++});
++
++export const employeeListResponseSchema = z.object({
++  items: z.array(employeeListItemSchema),
++  page: z.number().int(),
++  pageSize: z.number().int(),
++  total: z.number().int(),
++  totalPages: z.number().int(),
++  fxAsOf: isoDateSchema,
++});
++
++export type EmployeeListItem = z.infer<typeof employeeListItemSchema>;
++export type EmployeeListResponse = z.infer<typeof employeeListResponseSchema>;
+diff --git a/packages/shared/src/schemas/reference.ts b/packages/shared/src/schemas/reference.ts
+new file mode 100644
+index 0000000..f8cd734
+--- /dev/null
++++ b/packages/shared/src/schemas/reference.ts
+@@ -0,0 +1,23 @@
++import { z } from 'zod';
++import { isoDateSchema } from './common.ts';
++
++const codeName = z.object({ code: z.string(), name: z.string() });
++
++// R1 (04 section 5.3).
++export const referenceResponseSchema = z.object({
++  countries: z.array(codeName.extend({ currency: z.string() })),
++  departments: z.array(z.object({ id: z.number().int(), name: z.string() })),
++  jobTitles: z.array(
++    z.object({ id: z.number().int(), name: z.string(), departmentId: z.number().int() }),
++  ),
++  levels: z.array(codeName.extend({ rank: z.number().int() })),
++  genders: z.array(codeName),
++  salaryChangeReasons: z.array(codeName),
++  fx: z.object({
++    asOfDate: isoDateSchema,
++    // A display string built from the micros, for example "0.011500"; never used in arithmetic.
++    rates: z.array(z.object({ currency: z.string(), usdPerUnit: z.string() })),
++  }),
++});
++
++export type ReferenceResponse = z.infer<typeof referenceResponseSchema>;
+diff --git a/vitest.config.ts b/vitest.config.ts
+index 400e1aa..7d6b607 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -20,4 +20,6 @@ export default defineConfig({
+           environment: 'jsdom',
+           setupFiles: ['test/setup.ts'],
++          // A 50-row Mantine table renders slowly in jsdom when workers compete (about 5 s).
++          testTimeout: 15_000,
+         },
+       },

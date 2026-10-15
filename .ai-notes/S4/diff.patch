@@ -1,0 +1,2249 @@
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 2cda2c2..6531c33 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -42,5 +42,5 @@ export function buildApp(deps: AppDeps): FastifyInstance {
+   authRoutes(app, deps);
+   referenceRoutes(app, { db: deps.db });
+-  employeeRoutes(app, { db: deps.db });
++  employeeRoutes(app, { db: deps.db, clock: deps.clock });
+   return app;
+ }
+diff --git a/apps/api/src/domain/employee-search.test.ts b/apps/api/src/domain/employee-search.test.ts
+new file mode 100644
+index 0000000..c7ed5c4
+--- /dev/null
++++ b/apps/api/src/domain/employee-search.test.ts
+@@ -0,0 +1,27 @@
++import { describe, expect, it } from 'vitest';
++import { normaliseSearchText, parseSearch } from './employee-search.ts';
++
++describe('parseSearch', () => {
++  it.each(['4217', 'E4217', 'e004217', '004217', ' E4217 '])(
++    'turns %j into the employee code E004217',
++    (q) => {
++      expect(parseSearch(q)).toEqual({ kind: 'code', code: 'E004217' });
++    },
++  );
++
++  it.each([
++    ['Jürgen', 'jurgen'],
++    ['E12 Nair', 'e12 nair'],
++    ['1234567', '1234567'],
++    ['E', 'e'],
++    ['50%_off', '50%_off'],
++  ])('turns %j into the normalised name text %j', (q, text) => {
++    expect(parseSearch(q)).toEqual({ kind: 'name', text });
++  });
++});
++
++describe('normaliseSearchText', () => {
++  it('removes diacritics, lower-cases and collapses spaces', () => {
++    expect(normaliseSearchText('  Jürgen  MÜLLER ')).toBe('jurgen muller');
++  });
++});
+diff --git a/apps/api/src/domain/employee-search.ts b/apps/api/src/domain/employee-search.ts
+new file mode 100644
+index 0000000..9055ae5
+--- /dev/null
++++ b/apps/api/src/domain/employee-search.ts
+@@ -0,0 +1,16 @@
++export type EmployeeSearch = { kind: 'code'; code: string } | { kind: 'name'; text: string };
++
++// Same normalisation as name_search (02 section 5), applied to the search text.
++export function normaliseSearchText(text: string): string {
++  return text.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
++}
++
++const CODE_PATTERN = /^E?0*(\d{1,6})$/i;
++
++// 04 section 5.4 q: 4217, E4217 and e004217 are an employee code; anything else is a name.
++export function parseSearch(q: string): EmployeeSearch {
++  const trimmed = q.trim();
++  const digits = CODE_PATTERN.exec(trimmed)?.[1];
++  if (digits !== undefined) return { kind: 'code', code: `E${digits.padStart(6, '0')}` };
++  return { kind: 'name', text: normaliseSearchText(trimmed) };
++}
+diff --git a/apps/api/src/domain/genders.ts b/apps/api/src/domain/genders.ts
+new file mode 100644
+index 0000000..68ab5a2
+--- /dev/null
++++ b/apps/api/src/domain/genders.ts
+@@ -0,0 +1,7 @@
++// Static reference list (04 section 5.3); also gives the names used in the CSV export.
++export const GENDERS: { code: string; name: string }[] = [
++  { code: 'female', name: 'Female' },
++  { code: 'male', name: 'Male' },
++  { code: 'non_binary', name: 'Non-binary' },
++  { code: 'not_disclosed', name: 'Not disclosed' },
++];
+diff --git a/apps/api/src/domain/name-search.ts b/apps/api/src/domain/name-search.ts
+index c9fbf57..e35bc76 100644
+--- a/apps/api/src/domain/name-search.ts
++++ b/apps/api/src/domain/name-search.ts
+@@ -1,10 +1,7 @@
++import { normaliseSearchText } from './employee-search.ts';
++
+ // name_search (02 section 5): "first last", Unicode NFKD, diacritics removed, lower-cased,
+ // spaces collapsed. Search input is normalised the same way, so "muller" finds "Müller".
+ export function nameSearch(firstName: string, lastName: string): string {
+-  return `${firstName} ${lastName}`
+-    .normalize('NFKD')
+-    .replace(/\p{M}/gu, '')
+-    .toLowerCase()
+-    .replace(/\s+/g, ' ')
+-    .trim();
++  return normaliseSearchText(`${firstName} ${lastName}`);
+ }
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+index af84d2a..94eb30c 100644
+--- a/apps/api/src/http/access-matrix.test.ts
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -16,4 +16,5 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
+   'GET /api/reference': 'reference.read',
+   'GET /api/employees': 'employee.read',
++  'GET /api/exports/employees.csv': 'export.employees',
+ };
+ 
+diff --git a/apps/api/src/http/error-handler.ts b/apps/api/src/http/error-handler.ts
+index 9ba5c93..9b7c2d2 100644
+--- a/apps/api/src/http/error-handler.ts
++++ b/apps/api/src/http/error-handler.ts
+@@ -38,4 +38,5 @@ export function registerErrorHandling(
+         detail: error.message,
+         instance: pathOf(request),
++        ...(error.errors && { errors: error.errors }),
+       });
+     }
+diff --git a/apps/api/src/http/problem.ts b/apps/api/src/http/problem.ts
+index c52d996..2ff6020 100644
+--- a/apps/api/src/http/problem.ts
++++ b/apps/api/src/http/problem.ts
+@@ -20,7 +20,9 @@ export class AppError extends Error {
+   readonly status: number;
+   readonly code: string;
++  readonly errors: ProblemFieldError[] | undefined;
+ 
+-  constructor(status: number, code: string, detail: string) {
++  constructor(status: number, code: string, detail: string, errors?: ProblemFieldError[]) {
+     super(detail);
++    this.errors = errors;
+     this.name = 'AppError';
+     this.status = status;
+diff --git a/apps/api/src/modules/employees/csv.test.ts b/apps/api/src/modules/employees/csv.test.ts
+new file mode 100644
+index 0000000..c87d022
+--- /dev/null
++++ b/apps/api/src/modules/employees/csv.test.ts
+@@ -0,0 +1,143 @@
++import type { EmployeeListItem } from '@acme/shared';
++import { describe, expect, it } from 'vitest';
++import { buildEmployeesCsv } from './csv.ts';
++
++const BOM = '﻿';
++
++const item = (overrides: Partial<EmployeeListItem> = {}): EmployeeListItem => ({
++  id: 4217,
++  employeeCode: 'E004217',
++  firstName: 'Asha',
++  lastName: 'Rao',
++  gender: 'female',
++  country: { code: 'IN', name: 'India' },
++  department: { id: 1, name: 'Engineering' },
++  jobTitle: { id: 1, name: 'Software Engineer' },
++  level: { code: 'L3', name: 'Senior' },
++  status: 'active',
++  hireDate: '2022-01-10',
++  terminationDate: null,
++  salary: { amountMinor: 198_000_000, currency: 'INR' },
++  salaryUsd: { amountMinor: 2_277_000, currency: 'USD' },
++  salaryEffectiveDate: '2024-04-01',
++  compaRatio: 0.97,
++  bandPosition: 'inside',
++  ...overrides,
++});
++
++const rowsOf = (csv: string): string[] => csv.slice(BOM.length).split('\r\n');
++
++// First data row as a list of unquoted cells; assumes no embedded `","`.
++const cells = (csv: string): string[] => rowsOf(csv)[1]!.slice(1, -1).split('","');
++
++describe('buildEmployeesCsv', () => {
++  it('starts with a BOM, uses CRLF, and has the header row in order', () => {
++    const csv = buildEmployeesCsv([item(), item({ id: 2 })], '2026-09-30');
++
++    expect(csv.startsWith(BOM)).toBe(true);
++    const lines = rowsOf(csv);
++    expect(lines[0]).toBe(
++      [
++        'Employee ID',
++        'First name',
++        'Last name',
++        'Gender',
++        'Country',
++        'Department',
++        'Job title',
++        'Level',
++        'Status',
++        'Hire date',
++        'Termination date',
++        'Salary',
++        'Currency',
++        'Salary (USD)',
++        'FX as of',
++        'Compa-ratio',
++        'Band position',
++        'Salary effective date',
++      ]
++        .map((name) => `"${name}"`)
++        .join(','),
++    );
++    expect(csv).not.toMatch(/[^\r]\n/);
++    // header, two rows, and the empty piece after the final CRLF
++    expect(lines).toHaveLength(4);
++    expect(lines[3]).toBe('');
++  });
++
++  it('has only the header row when there are no employees', () => {
++    expect(rowsOf(buildEmployeesCsv([], '2026-09-30'))).toHaveLength(2);
++  });
++
++  it('doubles quotes inside fields and quotes every field', () => {
++    const csv = buildEmployeesCsv([item({ firstName: 'Ann "Annie"', lastName: 'O,Brien' })], 'x');
++
++    expect(rowsOf(csv)[1]!.startsWith('"E004217","Ann ""Annie""","O,Brien","Female",')).toBe(true);
++  });
++
++  it.each(['=1+1', '+1', '-1', '@SUM(A1)', '\tx', '\rx'])(
++    'prefixes a tab inside the quotes for text starting with %j',
++    (text) => {
++      const csv = buildEmployeesCsv([item({ firstName: text })], 'x');
++
++      expect(csv).toContain(`,"\t${text}",`);
++    },
++  );
++
++  it('does not touch text that merely contains a formula character', () => {
++    const csv = buildEmployeesCsv([item({ firstName: 'a=b' })], 'x');
++
++    expect(csv).toContain(',"a=b",');
++  });
++
++  it('writes plain decimals, 2 dp compa-ratio, reference gender names and empty dates', () => {
++    const csv = buildEmployeesCsv([item({ gender: 'non_binary', compaRatio: 1 })], '2026-09-30');
++
++    expect(cells(csv)).toEqual([
++      'E004217',
++      'Asha',
++      'Rao',
++      'Non-binary',
++      'India',
++      'Engineering',
++      'Software Engineer',
++      'L3 Senior',
++      'Active',
++      '2022-01-10',
++      '',
++      '1980000.00',
++      'INR',
++      '22770.00',
++      '2026-09-30',
++      '1.00',
++      'Inside',
++      '2024-04-01',
++    ]);
++  });
++
++  it('writes the termination date and Terminated and Below when they apply', () => {
++    const csv = buildEmployeesCsv(
++      [item({ status: 'terminated', terminationDate: '2025-01-31', bandPosition: 'below' })],
++      'x',
++    );
++
++    const row = cells(csv);
++    expect([row[8], row[10], row[16]]).toEqual(['Terminated', '2025-01-31', 'Below']);
++  });
++
++  it('writes amounts under one major unit with a leading zero', () => {
++    const csv = buildEmployeesCsv(
++      [
++        item({
++          salary: { amountMinor: 5, currency: 'USD' },
++          salaryUsd: { amountMinor: 105, currency: 'USD' },
++        }),
++      ],
++      'x',
++    );
++
++    const row = cells(csv);
++    expect([row[11], row[13]]).toEqual(['0.05', '1.05']);
++  });
++});
+diff --git a/apps/api/src/modules/employees/csv.ts b/apps/api/src/modules/employees/csv.ts
+new file mode 100644
+index 0000000..8ad46a6
+--- /dev/null
++++ b/apps/api/src/modules/employees/csv.ts
+@@ -0,0 +1,65 @@
++import type { EmployeeListItem } from '@acme/shared';
++import { GENDERS } from '../../domain/genders.ts';
++
++// D-044: UTF-8 BOM, CRLF, every field double-quoted, quotes doubled. Excel reads text that
++// starts with = + - @ tab or CR as a formula, so a tab goes inside the quotes in front of it.
++const BOM = '﻿';
++const FORMULA_START = /^[=+\-@\t\r]/;
++
++const HEADER = [
++  'Employee ID',
++  'First name',
++  'Last name',
++  'Gender',
++  'Country',
++  'Department',
++  'Job title',
++  'Level',
++  'Status',
++  'Hire date',
++  'Termination date',
++  'Salary',
++  'Currency',
++  'Salary (USD)',
++  'FX as of',
++  'Compa-ratio',
++  'Band position',
++  'Salary effective date',
++];
++
++const field = (text: string): string =>
++  `"${(FORMULA_START.test(text) ? `\t${text}` : text).replaceAll('"', '""')}"`;
++
++// Plain decimal in major units, 2 dp, no grouping. Every v1 currency has 2 minor-unit digits.
++const major = (amountMinor: number): string => {
++  const abs = Math.abs(amountMinor);
++  return `${amountMinor < 0 ? '-' : ''}${Math.floor(abs / 100)}.${String(abs % 100).padStart(2, '0')}`;
++};
++
++const capitalise = (text: string): string => text.charAt(0).toUpperCase() + text.slice(1);
++
++const row = (e: EmployeeListItem, fxAsOf: string): string[] => [
++  e.employeeCode,
++  e.firstName,
++  e.lastName,
++  GENDERS.find((g) => g.code === e.gender)?.name ?? e.gender,
++  e.country.name,
++  e.department.name,
++  e.jobTitle.name,
++  `${e.level.code} ${e.level.name}`,
++  capitalise(e.status),
++  e.hireDate,
++  e.terminationDate ?? '',
++  major(e.salary.amountMinor),
++  e.salary.currency,
++  major(e.salaryUsd.amountMinor),
++  fxAsOf,
++  e.compaRatio.toFixed(2),
++  capitalise(e.bandPosition),
++  e.salaryEffectiveDate,
++];
++
++export function buildEmployeesCsv(items: EmployeeListItem[], fxAsOf: string): string {
++  const lines = [HEADER, ...items.map((item) => row(item, fxAsOf))];
++  return BOM + lines.map((cells) => cells.map(field).join(',') + '\r\n').join('');
++}
+diff --git a/apps/api/src/modules/employees/export.test.ts b/apps/api/src/modules/employees/export.test.ts
+new file mode 100644
+index 0000000..c474271
+--- /dev/null
++++ b/apps/api/src/modules/employees/export.test.ts
+@@ -0,0 +1,103 @@
++import { employeeListResponseSchema } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++
++// Cells of the first column, header row dropped.
++const firstColumn = (csv: string) =>
++  csv
++    .replace('﻿', '')
++    .split('\r\n')
++    .filter((line) => line !== '')
++    .slice(1)
++    .map((line) => /^"((?:[^"]|"")*)"/.exec(line)?.[1]);
++
++describe('GET /api/exports/employees.csv (X1)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
++    const db = await testDb();
++    await seed(db);
++    app = testApp({ db });
++    const as = async (role: 'hr_admin' | 'hr_viewer' | 'finance') => {
++      const { cookie } = await loggedInAs(db, role);
++      return (path: string) => app!.inject({ method: 'GET', url: path, headers: { cookie } });
++    };
++    return { as };
++  }
++
++  it('returns the same employees in the same order as the list for the same filters', async () => {
++    const { as } = await setup(async (db) => {
++      for (let i = 0; i < 60; i++) {
++        await anEmployee()
++          .named('Asha', `Surname${String(i).padStart(3, '0')}`)
++          .inCountry(i % 2 === 0 ? 'IN' : 'US')
++          .withSalary(1_000_000 + (i % 7) * 1000)
++          .insert(db);
++      }
++      await anEmployee().named('Zed', 'Gone').terminatedOn('2025-01-31').insert(db);
++    });
++    const get = await as('hr_viewer');
++    const query = '?country=IN,US&status=all&sort=salaryUsd&order=desc';
++
++    const list = employeeListResponseSchema.parse(
++      (await get(`/api/employees${query}&pageSize=100`)).json(),
++    );
++    const exported = await get(`/api/exports/employees.csv${query}`);
++
++    expect(exported.statusCode).toBe(200);
++    expect(list.items).toHaveLength(61);
++    expect(firstColumn(exported.body)).toEqual(list.items.map((item) => item.employeeCode));
++  });
++
++  it('exports every matching row, not one page of them', async () => {
++    const { as } = await setup(async (db) => {
++      for (let i = 0; i < 60; i++) await anEmployee().insert(db);
++    });
++    const get = await as('hr_admin');
++
++    const exported = await get('/api/exports/employees.csv');
++
++    expect(firstColumn(exported.body)).toHaveLength(60);
++  });
++
++  it('rejects page, pageSize and unknown params with 400 VALIDATION_FAILED', async () => {
++    const { as } = await setup();
++    const get = await as('hr_admin');
++
++    for (const query of ['?page=2', '?pageSize=25', '?nope=1']) {
++      const response = await get(`/api/exports/employees.csv${query}`);
++      expect(response.statusCode).toBe(400);
++      expect(response.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
++    }
++  });
++
++  it('sets the filename from the clock, text/csv and no-store', async () => {
++    const { as } = await setup();
++    const get = await as('hr_admin');
++
++    const response = await get('/api/exports/employees.csv');
++
++    expect(response.headers['content-type']).toBe('text/csv; charset=utf-8');
++    expect(response.headers['content-disposition']).toBe(
++      'attachment; filename="employees-2026-10-09.csv"',
++    );
++    expect(response.headers['cache-control']).toBe('no-store');
++  });
++
++  it('lets HR Viewer export, refuses Finance with 403 and anonymous with 401', async () => {
++    const { as } = await setup();
++
++    expect((await (await as('hr_viewer'))('/api/exports/employees.csv')).statusCode).toBe(200);
++    expect((await (await as('finance'))('/api/exports/employees.csv')).statusCode).toBe(403);
++    const anonymous = await app!.inject({ method: 'GET', url: '/api/exports/employees.csv' });
++    expect(anonymous.statusCode).toBe(401);
++  });
++});
+diff --git a/apps/api/src/modules/employees/routes.test.ts b/apps/api/src/modules/employees/routes.test.ts
+index cb5d178..b2c4354 100644
+--- a/apps/api/src/modules/employees/routes.test.ts
++++ b/apps/api/src/modules/employees/routes.test.ts
+@@ -2,5 +2,5 @@ import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared
+ import type { FastifyInstance } from 'fastify';
+ import { afterEach, describe, expect, it } from 'vitest';
+-import { anEmployee, loggedInAs } from '../../../test/builders/index.ts';
++import { anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
+ import { testApp, testDb } from '../../../test/helpers.ts';
+ import type { Db } from '../../db/client.ts';
+@@ -104,5 +104,5 @@ describe('GET /api/employees (E1)', () => {
+     const get = await setup(async () => {});
+ 
+-    for (const query of ['?pageSize=30', '?page=0', '?country=IN']) {
++    for (const query of ['?pageSize=30', '?page=0', '?nope=IN']) {
+       const response = await get(query);
+       expect({ query, status: response.statusCode, code: response.json().code }).toEqual({
+@@ -114,4 +114,250 @@ describe('GET /api/employees (E1)', () => {
+   });
+ 
++  describe('search q', () => {
++    const namesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
++      employeeListResponseSchema
++        .parse((await get(`?q=${encodeURIComponent(q)}`)).json())
++        .items.map((item) => item.lastName);
++
++    it('finds "Müller" when searching for "muller"', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().named('Jörg', 'Müller').insert(db);
++        await anEmployee().named('Ann', 'Other').insert(db);
++      });
++
++      expect(await namesOf(get, 'muller')).toEqual(['Müller']);
++      expect(await namesOf(get, '  JÖRG  mül')).toEqual(['Müller']);
++    });
++
++    it.each(['2', 'E2', 'e000002', '000002'])(
++      'finds an employee by code written as %s',
++      async (q) => {
++        const get = await setup(async (db) => {
++          await anEmployee().named('Ann', 'First').insert(db);
++          await anEmployee().named('Bob', 'Second').insert(db);
++          await anEmployee().named('Cy', 'Third').insert(db);
++        });
++
++        expect(await namesOf(get, q)).toEqual(['Second']);
++      },
++    );
++
++    it('treats % and _ in the search text as literal characters', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().named('Ann', '100%Real').insert(db);
++        await anEmployee().named('Bob', 'Under_score').insert(db);
++        await anEmployee().named('Cy', 'Plain').insert(db);
++      });
++
++      expect(await namesOf(get, '%')).toEqual(['100%Real']);
++      expect(await namesOf(get, '_')).toEqual(['Under_score']);
++    });
++  });
++
++  describe('filters', () => {
++    const lastNamesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
++      employeeListResponseSchema.parse((await get(q)).json()).items.map((item) => item.lastName);
++
++    // Differs from the default employee (IN, Software Engineer, L3, female) on every filter.
++    async function seedTargetAndOther(db: Db) {
++      await anEmployee()
++        .named('Tara', 'Target')
++        .inCountry('US')
++        .withTitle(3)
++        .atLevel('L4')
++        .withGender('male')
++        .insert(db);
++      await anEmployee().named('Olive', 'Other').insert(db);
++    }
++
++    it.each([
++      ['country', '?country=US'],
++      ['department', '?department=2'],
++      ['job title', '?jobTitle=3'],
++      ['level', '?level=L4'],
++      ['gender', '?gender=male'],
++    ])('filters by %s', async (_name, query) => {
++      const get = await setup(seedTargetAndOther);
++
++      expect(await lastNamesOf(get, query)).toEqual(['Target']);
++    });
++
++    it('combines department and job title with AND', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().named('Pam', 'Manager').withTitle(3).insert(db);
++        await anEmployee().named('Dee', 'Designer').withTitle(4).insert(db);
++      });
++
++      expect(await lastNamesOf(get, '?department=2&jobTitle=4')).toEqual(['Designer']);
++      expect(await lastNamesOf(get, '?department=1&jobTitle=4')).toEqual([]);
++    });
++
++    it('counts the filtered total, not the whole table', async () => {
++      const get = await setup(seedTargetAndOther);
++
++      const body = employeeListResponseSchema.parse((await get('?country=US')).json());
++
++      expect(body).toMatchObject({ total: 1, totalPages: 1 });
++    });
++
++    it('combines different filters with AND and values within one filter with OR', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().named('A', 'InL3').inCountry('IN').atLevel('L3').insert(db);
++        await anEmployee().named('B', 'UsL3').inCountry('US').atLevel('L3').insert(db);
++        await anEmployee().named('C', 'UsL4').inCountry('US').atLevel('L4').insert(db);
++        await anEmployee().named('D', 'DeL3').inCountry('DE').atLevel('L3').insert(db);
++      });
++
++      expect(await lastNamesOf(get, '?country=IN,US&level=L3')).toEqual(['InL3', 'UsL3']);
++      expect(await lastNamesOf(get, '?level=L3,L4&country=US')).toEqual(['UsL3', 'UsL4']);
++    });
++
++    it.each([
++      ['?country=IN,XX', 'country[1]'],
++      ['?level=L3,L9', 'level[1]'],
++      ['?department=1,99', 'department[1]'],
++      ['?jobTitle=abc', 'jobTitle[0]'],
++      ['?gender=female,robot', 'gender[1]'],
++    ])('rejects an unknown value in %s with 400 and path %s', async (query, path) => {
++      const get = await setup(async () => {});
++
++      const response = await get(query);
++
++      expect(response.statusCode).toBe(400);
++      expect(response.json()).toMatchObject({
++        code: 'VALIDATION_FAILED',
++        errors: [{ path }],
++      });
++    });
++  });
++
++  describe('band and stale-salary filters', () => {
++    const inBand = generateBands().find(
++      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
++    )!;
++    const lastNamesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
++      employeeListResponseSchema.parse((await get(q)).json()).items.map((item) => item.lastName);
++
++    // Salary exactly at min and at max is inside the band (02 section 4).
++    async function seedPositions(db: Db) {
++      await anEmployee()
++        .named('A', 'Below')
++        .withSalary(inBand.minMinor - 1)
++        .insert(db);
++      await anEmployee().named('B', 'AtMin').withSalary(inBand.minMinor).insert(db);
++      await anEmployee().named('C', 'Mid').withSalary(inBand.midMinor).insert(db);
++      await anEmployee().named('D', 'AtMax').withSalary(inBand.maxMinor).insert(db);
++      await anEmployee()
++        .named('E', 'Above')
++        .withSalary(inBand.maxMinor + 1)
++        .insert(db);
++    }
++
++    it.each([
++      ['below', ['Below']],
++      ['above', ['Above']],
++      ['outside', ['Above', 'Below']],
++      ['inside', ['AtMax', 'AtMin', 'Mid']],
++    ])('band=%s returns %j', async (band, expected) => {
++      const get = await setup(seedPositions);
++
++      expect(await lastNamesOf(get, `?band=${band}`)).toEqual(expected);
++    });
++
++    it('salaryUnchangedSince keeps employees whose salary date is before that date', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().named('A', 'Older').hiredOn('2023-06-14').insert(db);
++        await anEmployee().named('B', 'OnTheDay').hiredOn('2023-06-15').insert(db);
++        await anEmployee().named('C', 'Newer').hiredOn('2024-01-01').insert(db);
++        await anEmployee()
++          .named('D', 'Raised')
++          .hiredOn('2020-01-01')
++          .withHistory([merit('2024-02-01', 5)])
++          .insert(db);
++      });
++
++      expect(await lastNamesOf(get, '?salaryUnchangedSince=2023-06-15')).toEqual(['Older']);
++    });
++  });
++
++  describe('sort', () => {
++    const lastNamesOf = async (get: (q?: string) => Promise<{ json: () => unknown }>, q: string) =>
++      employeeListResponseSchema.parse((await get(q)).json()).items.map((item) => item.lastName);
++
++    it('sorts by USD salary across currencies, with ties in id order', async () => {
++      // At 0.011500, 1,000,000 paise is 11,500 cents, the same as a USD salary of 11,500.
++      const get = await setup(async (db) => {
++        await anEmployee().named('A', 'Low').inCountry('US').withSalary(5_000).insert(db);
++        await anEmployee().named('B', 'TieIn').inCountry('IN').withSalary(1_000_000).insert(db);
++        await anEmployee().named('C', 'TieUs').inCountry('US').withSalary(11_500).insert(db);
++        await anEmployee().named('D', 'High').inCountry('IN').withSalary(3_000_000).insert(db);
++        await anEmployee().named('E', 'Mid').inCountry('US').withSalary(20_000).insert(db);
++      });
++
++      expect(await lastNamesOf(get, '?sort=salaryUsd')).toEqual([
++        'Low',
++        'TieIn',
++        'TieUs',
++        'Mid',
++        'High',
++      ]);
++      expect(await lastNamesOf(get, '?sort=salaryUsd&order=desc')).toEqual([
++        'High',
++        'Mid',
++        'TieUs',
++        'TieIn',
++        'Low',
++      ]);
++    });
++
++    it('lists every row once across pages when salaries tie', async () => {
++      const get = await setup(async (db) => {
++        for (let i = 0; i < 30; i++) {
++          await anEmployee().named('Asha', `Same${i}`).withSalary(1_000_000).insert(db);
++        }
++      });
++
++      const ids: number[] = [];
++      for (const page of [1, 2]) {
++        const body = employeeListResponseSchema.parse(
++          (await get(`?sort=salaryUsd&pageSize=25&page=${page}`)).json(),
++        );
++        ids.push(...body.items.map((item) => item.id));
++      }
++
++      expect(ids).toEqual(Array.from({ length: 30 }, (_, i) => i + 1));
++    });
++
++    it('sorts by hire date and by name in both orders', async () => {
++      const get = await setup(async (db) => {
++        await anEmployee().named('A', 'Bravo').hiredOn('2021-05-01').insert(db);
++        await anEmployee().named('B', 'Charlie').hiredOn('2019-03-01').insert(db);
++        await anEmployee().named('C', 'Alpha').hiredOn('2023-07-01').insert(db);
++      });
++
++      expect(await lastNamesOf(get, '?sort=hireDate')).toEqual(['Charlie', 'Bravo', 'Alpha']);
++      expect(await lastNamesOf(get, '?sort=hireDate&order=desc')).toEqual([
++        'Alpha',
++        'Bravo',
++        'Charlie',
++      ]);
++      expect(await lastNamesOf(get, '?sort=name&order=asc')).toEqual(['Alpha', 'Bravo', 'Charlie']);
++      expect(await lastNamesOf(get, '?sort=name&order=desc')).toEqual([
++        'Charlie',
++        'Bravo',
++        'Alpha',
++      ]);
++    });
++
++    it('rejects an unknown param next to valid filters with 400 VALIDATION_FAILED', async () => {
++      const get = await setup(async () => {});
++
++      const response = await get('?country=IN&sort=name&order=asc&colour=red');
++
++      expect(response.statusCode).toBe(400);
++      expect(response.json().code).toBe('VALIDATION_FAILED');
++    });
++  });
++
+   describe('salary in local currency and USD, with compa-ratio and band position', () => {
+     const band = generateBands().find(
+diff --git a/apps/api/src/modules/employees/routes.ts b/apps/api/src/modules/employees/routes.ts
+index 26df85c..babb004 100644
+--- a/apps/api/src/modules/employees/routes.ts
++++ b/apps/api/src/modules/employees/routes.ts
+@@ -1,4 +1,6 @@
+ import {
++  employeeExportQuerySchema,
+   employeeListQuerySchema,
++  type EmployeeExportQuery,
+   type EmployeeListQuery,
+   type EmployeeListResponse,
+@@ -6,9 +8,10 @@ import {
+ import type { FastifyInstance } from 'fastify';
+ import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
+ import { requires } from '../../http/guard.ts';
+-import { listEmployees } from './service.ts';
++import { exportEmployees, listEmployees } from './service.ts';
+ 
+ // E1 (04 section 5.4).
+-export function employeeRoutes(app: FastifyInstance, deps: { db: Db }) {
++export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Clock }) {
+   app.get(
+     '/api/employees',
+@@ -17,3 +20,17 @@ export function employeeRoutes(app: FastifyInstance, deps: { db: Db }) {
+       listEmployees(deps.db, request.query as EmployeeListQuery),
+   );
++
++  // X1 (04 section 5.7).
++  app.get(
++    '/api/exports/employees.csv',
++    { onRequest: requires('export.employees'), schema: { querystring: employeeExportQuerySchema } },
++    async (request, reply) => {
++      const csv = await exportEmployees(deps.db, request.query as EmployeeExportQuery);
++      return reply
++        .header('Content-Type', 'text/csv; charset=utf-8')
++        .header('Content-Disposition', `attachment; filename="employees-${deps.clock.today()}.csv"`)
++        .header('Cache-Control', 'no-store')
++        .send(csv);
++    },
++  );
+ }
+diff --git a/apps/api/src/modules/employees/service.ts b/apps/api/src/modules/employees/service.ts
+index 99fc538..814d70d 100644
+--- a/apps/api/src/modules/employees/service.ts
++++ b/apps/api/src/modules/employees/service.ts
+@@ -1,8 +1,31 @@
+-import { compaRatio, type EmployeeListQuery, type EmployeeListResponse } from '@acme/shared';
+-import { and, asc, count, eq, type SQL } from 'drizzle-orm';
++import {
++  compaRatio,
++  type EmployeeExportQuery,
++  type EmployeeListItem,
++  type EmployeeListQuery,
++  type EmployeeListResponse,
++} from '@acme/shared';
++import {
++  and,
++  asc,
++  count,
++  desc,
++  eq,
++  gt,
++  gte,
++  inArray,
++  lt,
++  lte,
++  or,
++  sql,
++  type SQL,
++} from 'drizzle-orm';
+ import type { Db } from '../../db/client.ts';
+ import { usdMinorSql } from '../../db/money-sql.ts';
+ import {
++  type Gender,
++  type LevelCode,
+   countries,
++  genders,
+   departments,
+   employees,
+@@ -12,5 +35,176 @@ import {
+   payBands,
+ } from '../../db/schema.ts';
++import { parseSearch } from '../../domain/employee-search.ts';
++import { AppError, type ProblemFieldError } from '../../http/problem.ts';
+ import { fxAsOf } from '../auth/sessions.ts';
++import { buildEmployeesCsv } from './csv.ts';
++
++// Values in the list filters must exist in the reference tables (brief ruling 1); the shared
++// schema only checks their shape. The path names the offending item, e.g. `country[1]`.
++async function checkListValues(db: Db, query: EmployeeListQuery): Promise<void> {
++  const [countryRows, levelRows, departmentRows, titleRows] = await Promise.all([
++    db.select({ key: countries.code }).from(countries),
++    db.select({ key: levels.code }).from(levels),
++    db.select({ key: departments.id }).from(departments),
++    db.select({ key: jobTitles.id }).from(jobTitles),
++  ]);
++  const known = (rows: { key: string | number }[]) => new Set(rows.map((r) => String(r.key)));
++  const checks = [
++    ['country', query.country, known(countryRows)],
++    ['department', query.department, known(departmentRows)],
++    ['jobTitle', query.jobTitle, known(titleRows)],
++    ['level', query.level, known(levelRows)],
++    ['gender', query.gender, new Set<string>(genders)],
++  ] as const;
++  const errors: ProblemFieldError[] = [];
++  for (const [name, values, allowed] of checks) {
++    values?.forEach((value, index) => {
++      if (!allowed.has(value)) {
++        errors.push({ path: `${name}[${index}]`, message: `Unknown ${name} "${value}".` });
++      }
++    });
++  }
++  if (errors.length > 0) {
++    const detail =
++      errors.length === 1 ? '1 field is invalid.' : `${errors.length} fields are invalid.`;
++    throw new AppError(400, 'VALIDATION_FAILED', detail, errors);
++  }
++}
++
++const usdSalary = usdMinorSql(employees.salaryMinor, fxRates.usdPerUnitMicros);
++
++// Every sort ends with id so that pages never repeat or skip a row; id follows the order.
++function orderBy({ sort = 'name', order = 'asc' }: EmployeeListQuery): SQL[] {
++  const dir = order === 'asc' ? asc : desc;
++  const keys =
++    sort === 'salaryUsd'
++      ? [usdSalary]
++      : sort === 'hireDate'
++        ? [employees.hireDate]
++        : [employees.lastName, employees.firstName];
++  return [...keys, employees.id].map((key) => dir(key));
++}
++
++// The conditions every filter in E1 and X1 shares; (04 section 5.4).
++function filterConditions(db: Db, query: EmployeeListQuery): SQL | undefined {
++  const { status, q } = query;
++  const conditions: (SQL | undefined)[] = [
++    status === 'all' ? undefined : eq(employees.status, status),
++  ];
++  if (q !== undefined) {
++    const search = parseSearch(q);
++    conditions.push(
++      search.kind === 'code'
++        ? eq(employees.employeeCode, search.code)
++        : sql`instr(${employees.nameSearch}, ${search.text}) > 0`,
++    );
++  }
++  if (query.country?.length) conditions.push(inArray(employees.countryCode, query.country));
++  if (query.level?.length)
++    conditions.push(inArray(employees.levelCode, query.level as LevelCode[]));
++  if (query.gender?.length) {
++    conditions.push(inArray(employees.gender, query.gender as Gender[]));
++  }
++  if (query.jobTitle?.length) {
++    conditions.push(inArray(employees.jobTitleId, query.jobTitle.map(Number)));
++  }
++  if (query.department?.length) {
++    conditions.push(
++      inArray(
++        employees.jobTitleId,
++        db
++          .select({ id: jobTitles.id })
++          .from(jobTitles)
++          .where(inArray(jobTitles.departmentId, query.department.map(Number))),
++      ),
++    );
++  }
++  // Equal to min or max is inside (02 section 4).
++  if (query.band === 'below') conditions.push(lt(employees.salaryMinor, payBands.minMinor));
++  if (query.band === 'above') conditions.push(gt(employees.salaryMinor, payBands.maxMinor));
++  if (query.band === 'outside') {
++    conditions.push(
++      or(
++        lt(employees.salaryMinor, payBands.minMinor),
++        gt(employees.salaryMinor, payBands.maxMinor),
++      ),
++    );
++  }
++  if (query.band === 'inside') {
++    conditions.push(
++      and(
++        gte(employees.salaryMinor, payBands.minMinor),
++        lte(employees.salaryMinor, payBands.maxMinor),
++      ),
++    );
++  }
++  if (query.salaryUnchangedSince) {
++    conditions.push(lt(employees.salaryEffectiveDate, query.salaryUnchangedSince));
++  }
++  return and(...conditions);
++}
++
++// Every employee has a band (02 section 3); the band filters read its columns.
++const bandJoin = and(
++  eq(payBands.countryCode, employees.countryCode),
++  eq(payBands.jobTitleId, employees.jobTitleId),
++  eq(payBands.levelCode, employees.levelCode),
++);
++
++// Rows in the query's sort order; a limit pages them, no limit returns all of them.
++async function selectItems(
++  db: Db,
++  query: EmployeeListQuery,
++  paging?: { limit: number; offset: number },
++): Promise<EmployeeListItem[]> {
++  const select = db
++    .select({
++      employee: employees,
++      country: countries,
++      jobTitle: jobTitles,
++      department: departments,
++      level: levels,
++      band: payBands,
++      salaryUsdMinor: usdSalary,
++    })
++    .from(employees)
++    .innerJoin(countries, eq(countries.code, employees.countryCode))
++    .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
++    .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
++    .innerJoin(levels, eq(levels.code, employees.levelCode))
++    .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
++    .innerJoin(payBands, bandJoin)
++    .where(filterConditions(db, query))
++    .orderBy(...orderBy(query))
++    .$dynamic();
++  const rows = await (paging ? select.limit(paging.limit).offset(paging.offset) : select);
++  return rows.map(
++    ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
++      id: e.id,
++      employeeCode: e.employeeCode,
++      firstName: e.firstName,
++      lastName: e.lastName,
++      gender: e.gender,
++      country: { code: country.code, name: country.name },
++      department: { id: department.id, name: department.name },
++      jobTitle: { id: jobTitle.id, name: jobTitle.name },
++      level: { code: level.code, name: level.name },
++      status: e.status,
++      hireDate: e.hireDate,
++      terminationDate: e.terminationDate,
++      salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
++      salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
++      salaryEffectiveDate: e.salaryEffectiveDate,
++      compaRatio: compaRatio(e.salaryMinor, band.midMinor),
++      // Equal to min or max is inside (02 section 4).
++      bandPosition:
++        e.salaryMinor < band.minMinor
++          ? 'below'
++          : e.salaryMinor > band.maxMinor
++            ? 'above'
++            : 'inside',
++    }),
++  );
++}
+ 
+ // E1 (04 section 5.4). Name order is last_name, first_name, id, which index I2 serves.
+@@ -19,75 +213,24 @@ export async function listEmployees(
+   query: EmployeeListQuery,
+ ): Promise<EmployeeListResponse> {
+-  const { page, pageSize, status } = query;
+-  const where: SQL | undefined = status === 'all' ? undefined : eq(employees.status, status);
+-
+-  const [rows, [totals], asOf] = await Promise.all([
++  const { page, pageSize } = query;
++  await checkListValues(db, query);
++  const [items, [totals], asOf] = await Promise.all([
++    selectItems(db, query, { limit: pageSize, offset: (page - 1) * pageSize }),
+     db
+-      .select({
+-        employee: employees,
+-        country: countries,
+-        jobTitle: jobTitles,
+-        department: departments,
+-        level: levels,
+-        band: payBands,
+-        salaryUsdMinor: usdMinorSql(employees.salaryMinor, fxRates.usdPerUnitMicros),
+-      })
++      .select({ total: count() })
+       .from(employees)
+-      .innerJoin(countries, eq(countries.code, employees.countryCode))
+-      .innerJoin(jobTitles, eq(jobTitles.id, employees.jobTitleId))
+-      .innerJoin(departments, eq(departments.id, jobTitles.departmentId))
+-      .innerJoin(levels, eq(levels.code, employees.levelCode))
+-      .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
+-      // Every employee has a band (02 section 3).
+-      .innerJoin(
+-        payBands,
+-        and(
+-          eq(payBands.countryCode, employees.countryCode),
+-          eq(payBands.jobTitleId, employees.jobTitleId),
+-          eq(payBands.levelCode, employees.levelCode),
+-        ),
+-      )
+-      .where(where)
+-      .orderBy(asc(employees.lastName), asc(employees.firstName), asc(employees.id))
+-      .limit(pageSize)
+-      .offset((page - 1) * pageSize),
+-    db.select({ total: count() }).from(employees).where(where),
++      .innerJoin(payBands, bandJoin)
++      .where(filterConditions(db, query)),
+     fxAsOf(db),
+   ]);
+   const total = totals?.total ?? 0;
++  return { items, page, pageSize, total, totalPages: Math.ceil(total / pageSize), fxAsOf: asOf };
++}
+ 
+-  return {
+-    items: rows.map(
+-      ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
+-        id: e.id,
+-        employeeCode: e.employeeCode,
+-        firstName: e.firstName,
+-        lastName: e.lastName,
+-        gender: e.gender,
+-        country: { code: country.code, name: country.name },
+-        department: { id: department.id, name: department.name },
+-        jobTitle: { id: jobTitle.id, name: jobTitle.name },
+-        level: { code: level.code, name: level.name },
+-        status: e.status,
+-        hireDate: e.hireDate,
+-        terminationDate: e.terminationDate,
+-        salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
+-        salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
+-        salaryEffectiveDate: e.salaryEffectiveDate,
+-        compaRatio: compaRatio(e.salaryMinor, band.midMinor),
+-        // Equal to min or max is inside (02 section 4).
+-        bandPosition:
+-          e.salaryMinor < band.minMinor
+-            ? 'below'
+-            : e.salaryMinor > band.maxMinor
+-              ? 'above'
+-              : 'inside',
+-      }),
+-    ),
+-    page,
+-    pageSize,
+-    total,
+-    totalPages: Math.ceil(total / pageSize),
+-    fxAsOf: asOf,
+-  };
++// X1 (04 section 5.7): every row matching the filters, in the list's sort order, as CSV.
++export async function exportEmployees(db: Db, query: EmployeeExportQuery): Promise<string> {
++  const listQuery = { ...query, page: 1, pageSize: 50 } as EmployeeListQuery;
++  await checkListValues(db, listQuery);
++  const [items, asOf] = await Promise.all([selectItems(db, listQuery), fxAsOf(db)]);
++  return buildEmployeesCsv(items, asOf);
+ }
+diff --git a/apps/api/src/modules/reference/routes.ts b/apps/api/src/modules/reference/routes.ts
+index 617affb..36555f9 100644
+--- a/apps/api/src/modules/reference/routes.ts
++++ b/apps/api/src/modules/reference/routes.ts
+@@ -4,15 +4,9 @@ import type { FastifyInstance } from 'fastify';
+ import type { Db } from '../../db/client.ts';
+ import { countries, departments, fxRates, jobTitles, levels } from '../../db/schema.ts';
++import { GENDERS } from '../../domain/genders.ts';
+ import { requires } from '../../http/guard.ts';
+ import { fxAsOf } from '../auth/sessions.ts';
+ 
+ // Static in v1 (04 section 5.3). `hire` is written by the system, so it is not a UI reason.
+-const GENDERS = [
+-  { code: 'female', name: 'Female' },
+-  { code: 'male', name: 'Male' },
+-  { code: 'non_binary', name: 'Non-binary' },
+-  { code: 'not_disclosed', name: 'Not disclosed' },
+-];
+-
+ const SALARY_CHANGE_REASONS = [
+   { code: 'promotion', name: 'Promotion' },
+diff --git a/apps/api/test/builders/employee.ts b/apps/api/test/builders/employee.ts
+index 0dd170e..aa98fac 100644
+--- a/apps/api/test/builders/employee.ts
++++ b/apps/api/test/builders/employee.ts
+@@ -3,4 +3,5 @@ import { employees, salaryChanges } from '../../src/db/schema.ts';
+ import { COUNTRIES, generateBands, SOFTWARE_ENGINEER } from '../../src/seed/reference.ts';
+ import { nextId, type DbOrTx } from './db.ts';
++import { nameSearch } from '../../src/domain/name-search.ts';
+ 
+ export type HistoryEntry = {
+@@ -125,5 +126,5 @@ class EmployeeBuilder {
+       firstName: this.#firstName,
+       lastName: this.#lastName,
+-      nameSearch: `${this.#firstName} ${this.#lastName}`.toLowerCase(),
++      nameSearch: nameSearch(this.#firstName, this.#lastName),
+       gender: this.#gender,
+       countryCode: this.#countryCode,
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 9195708..858e047 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -43,9 +43,5 @@ export function onUnauthenticated(listener: () => void): () => void {
+ }
+ 
+-/** Calls the same-origin API (ADR 0002). Throws ApiError for a problem response. */
+-export async function apiFetch<T = void>(
+-  path: string,
+-  { method = 'GET', body, schema }: ApiRequest<T> = {},
+-): Promise<T> {
++async function send(path: string, method: string, body?: unknown): Promise<Response> {
+   const response = await fetch(path, {
+     method,
+@@ -59,4 +55,23 @@ export async function apiFetch<T = void>(
+     throw error;
+   }
++  return response;
++}
++
++/** Calls the same-origin API (ADR 0002). Throws ApiError for a problem response. */
++export async function apiFetch<T = void>(
++  path: string,
++  { method = 'GET', body, schema }: ApiRequest<T> = {},
++): Promise<T> {
++  const response = await send(path, method, body);
+   return (schema ? schema.parse(await response.json()) : undefined) as T;
+ }
++
++/** Fetches a file; the name comes from Content-Disposition. Throws ApiError for a problem response. */
++export async function apiDownload(path: string): Promise<{ blob: Blob; filename: string }> {
++  const response = await send(path, 'GET');
++  const disposition = response.headers.get('content-disposition') ?? '';
++  return {
++    blob: await response.blob(),
++    filename: /filename="([^"]+)"/.exec(disposition)?.[1] ?? 'download',
++  };
++}
+diff --git a/apps/web/src/features/employees/EmployeeExport.test.tsx b/apps/web/src/features/employees/EmployeeExport.test.tsx
+new file mode 100644
+index 0000000..528e96b
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeExport.test.tsx
+@@ -0,0 +1,110 @@
++import type { Role } from '@acme/shared';
++import { screen, waitFor } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
++import { anEmployeeListResponse } from '../../../test/fixtures/employees.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const loggedInAs = (role: Role) =>
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))),
++    http.get('/api/employees', () => HttpResponse.json(anEmployeeListResponse())),
++  );
++
++describe('export CSV button (04 sections 5.7 and 8.5)', () => {
++  const createObjectURL = vi.fn(() => 'blob:employees');
++  const revokeObjectURL = vi.fn();
++
++  beforeEach(() => {
++    URL.createObjectURL = createObjectURL;
++    URL.revokeObjectURL = revokeObjectURL;
++  });
++  afterEach(() => {
++    createObjectURL.mockClear();
++    revokeObjectURL.mockClear();
++  });
++
++  it.each<Role>(['hr_admin', 'hr_viewer'])('shows "Export CSV" to %s', async (role) => {
++    loggedInAs(role);
++    render(<AppRoutes />, { route: '/employees' });
++    await screen.findByText('Priya Nair');
++
++    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeInTheDocument();
++  });
++
++  it('requests the current filters and shows a spinner until the file arrives', async () => {
++    loggedInAs('hr_admin');
++    const requests: URLSearchParams[] = [];
++    let release: () => void = () => {};
++    const released = new Promise<void>((resolve) => {
++      release = resolve;
++    });
++    server.use(
++      http.get('/api/exports/employees.csv', async ({ request }) => {
++        requests.push(new URL(request.url).searchParams);
++        await released;
++        return new HttpResponse('﻿"Employee ID"\r\n', {
++          headers: {
++            'content-type': 'text/csv; charset=utf-8',
++            'content-disposition': 'attachment; filename="employees-2026-10-09.csv"',
++          },
++        });
++      }),
++    );
++    render(<AppRoutes />, { route: '/employees?country=IN&status=all&sort=salaryUsd&page=2' });
++    await screen.findByText('Priya Nair');
++
++    await userEvent.click(await screen.findByRole('button', { name: 'Export CSV' }));
++
++    const exporting = await screen.findByRole('button', { name: 'Export CSV' });
++    expect(exporting).toBeDisabled();
++    expect(exporting).toHaveAttribute('data-loading', 'true');
++    release();
++    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
++    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
++    expect(requests).toHaveLength(1);
++    expect(Object.fromEntries(requests[0] ?? [])).toEqual({
++      country: 'IN',
++      status: 'all',
++      sort: 'salaryUsd',
++    });
++    await waitFor(() => expect(screen.getByRole('button', { name: 'Export CSV' })).toBeEnabled());
++  });
++
++  it('shows an alert with "Retry" when the export fails, and retrying downloads the file', async () => {
++    loggedInAs('hr_admin');
++    let calls = 0;
++    server.use(
++      http.get('/api/exports/employees.csv', () => {
++        calls += 1;
++        return calls === 1
++          ? HttpResponse.json(
++              aProblem({ status: 500, code: 'INTERNAL', detail: 'The export hit a snag.' }),
++              { status: 500, headers: { 'content-type': 'application/problem+json' } },
++            )
++          : new HttpResponse('"Employee ID"\r\n', {
++              headers: { 'content-disposition': 'attachment; filename="employees-2026-10-09.csv"' },
++            });
++      }),
++    );
++    const user = userEvent.setup();
++    render(<AppRoutes />, { route: '/employees' });
++    await screen.findByText('Priya Nair');
++
++    await user.click(await screen.findByRole('button', { name: 'Export CSV' }));
++
++    expect(await screen.findByRole('alert')).toHaveTextContent('The export hit a snag.');
++    expect(createObjectURL).not.toHaveBeenCalled();
++    expect(screen.getByRole('button', { name: 'Export CSV' })).toBeEnabled();
++
++    await user.click(screen.getByRole('button', { name: 'Retry' }));
++
++    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
++    await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
++  });
++});
+diff --git a/apps/web/src/features/employees/EmployeeFilterBar.tsx b/apps/web/src/features/employees/EmployeeFilterBar.tsx
+new file mode 100644
+index 0000000..3214c5f
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeFilterBar.tsx
+@@ -0,0 +1,125 @@
++import type { EmployeeListQuery } from '@acme/shared';
++import { Button, Group, MultiSelect, Select, TextInput } from '@mantine/core';
++import { useDebouncedCallback } from '@mantine/hooks';
++import { useEffect, useRef, useState, type ReactElement } from 'react';
++import type { useEmployeeFilters } from './useEmployeeFilters.ts';
++import { useReference } from './useReference.ts';
++
++const SEARCH_DEBOUNCE_MS = 300;
++const STATUS_OPTIONS = [
++  { value: 'active', label: 'Active' },
++  { value: 'terminated', label: 'Terminated' },
++  { value: 'all', label: 'All' },
++];
++const BAND_OPTIONS = [
++  { value: 'any', label: 'Any' },
++  { value: 'below', label: 'Below band' },
++  { value: 'above', label: 'Above band' },
++  { value: 'outside', label: 'Outside band' },
++  { value: 'inside', label: 'Inside band' },
++];
++
++type ListKey = 'country' | 'department' | 'jobTitle' | 'level' | 'gender';
++
++/** Filter bar of S-2 (04 section 8.5); every change goes through `setFilters`. */
++export function EmployeeFilterBar({
++  filters,
++}: {
++  filters: ReturnType<typeof useEmployeeFilters>;
++}): ReactElement {
++  const { query, setFilters, clearFilters } = filters;
++  const reference = useReference().data;
++
++  const [search, setSearch] = useState(query.q ?? '');
++  // The last q this bar put in the URL; a different q in the URL came from outside (back, clear).
++  const sentQ = useRef(query.q);
++  useEffect(() => {
++    if (query.q !== sentQ.current) {
++      sentQ.current = query.q;
++      setSearch(query.q ?? '');
++    }
++  }, [query.q]);
++  const sendSearch = useDebouncedCallback((value: string) => {
++    const q = value.trim() || undefined;
++    sentQ.current = q;
++    setFilters({ q }, { replace: true });
++  }, SEARCH_DEBOUNCE_MS);
++
++  const departmentIds = (query.department ?? []).map(Number);
++  const titles = (reference?.jobTitles ?? []).filter(
++    (title) => departmentIds.length === 0 || departmentIds.includes(title.departmentId),
++  );
++  const options: Record<ListKey, { value: string; label: string }[]> = {
++    country: (reference?.countries ?? []).map((c) => ({ value: c.code, label: c.name })),
++    department: (reference?.departments ?? []).map((d) => ({
++      value: String(d.id),
++      label: d.name,
++    })),
++    jobTitle: titles.map((t) => ({ value: String(t.id), label: t.name })),
++    level: (reference?.levels ?? []).map((l) => ({ value: l.code, label: `${l.code} ${l.name}` })),
++    gender: (reference?.genders ?? []).map((g) => ({ value: g.code, label: g.name })),
++  };
++
++  const multi = (key: ListKey, label: string) => (
++    <MultiSelect
++      key={key}
++      label={label}
++      data={options[key]}
++      value={query[key] ?? []}
++      onChange={(values) => setFilters({ [key]: values.length > 0 ? values : undefined })}
++      clearable
++    />
++  );
++
++  return (
++    <Group align="flex-end" gap="sm">
++      <TextInput
++        label="Search"
++        placeholder="Search name or employee ID"
++        value={search}
++        onChange={(event) => {
++          setSearch(event.currentTarget.value);
++          sendSearch(event.currentTarget.value);
++        }}
++      />
++      {multi('country', 'Country')}
++      {multi('department', 'Department')}
++      {multi('jobTitle', 'Job title')}
++      {multi('level', 'Level')}
++      {multi('gender', 'Gender')}
++      <Select
++        label="Status"
++        allowDeselect={false}
++        data={STATUS_OPTIONS}
++        value={query.status}
++        onChange={(value) => value && setFilters({ status: value as EmployeeListQuery['status'] })}
++      />
++      <Select
++        label="Pay band"
++        allowDeselect={false}
++        data={BAND_OPTIONS}
++        value={query.band ?? 'any'}
++        onChange={(value) =>
++          setFilters({ band: value === 'any' ? undefined : (value as EmployeeListQuery['band']) })
++        }
++      />
++      <TextInput
++        type="date"
++        label="No salary change since"
++        value={query.salaryUnchangedSince ?? ''}
++        onChange={(event) =>
++          setFilters({ salaryUnchangedSince: event.currentTarget.value || undefined })
++        }
++      />
++      <Button
++        variant="subtle"
++        onClick={() => {
++          sendSearch.cancel();
++          clearFilters();
++        }}
++      >
++        Clear filters
++      </Button>
++    </Group>
++  );
++}
+diff --git a/apps/web/src/features/employees/EmployeeFilters.test.tsx b/apps/web/src/features/employees/EmployeeFilters.test.tsx
+new file mode 100644
+index 0000000..0f6e60e
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeFilters.test.tsx
+@@ -0,0 +1,238 @@
++import { screen, waitFor, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { useLocation, useNavigationType } from 'react-router';
++import { describe, expect, it } from 'vitest';
++import { anEmployeeListResponse, someEmployees } from '../../../test/fixtures/employees.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const Location = () => {
++  const { pathname, search } = useLocation();
++  return (
++    <output aria-label="location" data-navigation={useNavigationType()}>
++      {pathname + search}
++    </output>
++  );
++};
++
++// The dropdown options stay mounted, so a chosen value's name also appears there.
++const pill = (name: string) => screen.queryByText(name, { selector: '[class*="Pill-label"]' });
++const findPill = (name: string) => screen.findByText(name, { selector: '[class*="Pill-label"]' });
++
++// A Mantine select's dropdown list carries the same label as its input.
++const field = (label: string) =>
++  screen.getAllByLabelText(label).find((element) => element.tagName === 'INPUT')!;
++
++const renderList = (route: string) =>
++  render(
++    <>
++      <AppRoutes />
++      <Location />
++    </>,
++    { route },
++  );
++
++/** Serves 120 employees whatever the query is; records each request's query. */
++function servesEmployees(requests: URLSearchParams[]) {
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_viewer'))),
++    http.get('/api/employees', ({ request }) => {
++      const params = new URL(request.url).searchParams;
++      requests.push(params);
++      return HttpResponse.json(
++        anEmployeeListResponse({
++          // Not India or the United States, so those names only appear in the filter bar.
++          items: someEmployees(50).map((e) => ({ ...e, country: { code: 'DE', name: 'Germany' } })),
++          page: Number(params.get('page')),
++          pageSize: Number(params.get('pageSize')),
++          total: 120,
++          totalPages: 3,
++        }),
++      );
++    }),
++  );
++}
++
++describe('employee list filters (04 sections 8.3 and 8.5)', () => {
++  it('changing a filter updates the URL, resets the page to 1 and requests the new query', async () => {
++    const requests: URLSearchParams[] = [];
++    servesEmployees(requests);
++    const user = userEvent.setup();
++    renderList('/employees?page=2');
++    await screen.findByText('Showing 51 to 100 of 120 employees');
++
++    await user.click(field('Country'));
++    await user.click(await screen.findByRole('option', { name: 'India' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees\?country=IN$/),
++    );
++    expect(screen.getByLabelText('location')).toHaveAttribute('data-navigation', 'PUSH');
++    await waitFor(() => expect(requests.at(-1)?.get('country')).toBe('IN'));
++    expect(requests.at(-1)?.get('page')).toBe('1');
++
++    await user.click(field('Status'));
++    await user.click(await screen.findByRole('option', { name: 'Terminated' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(
++        /^\/employees\?status=terminated&country=IN$/,
++      ),
++    );
++    expect(requests.at(-1)?.get('status')).toBe('terminated');
++  });
++
++  it('loading the page from a URL with filters shows those filters selected', async () => {
++    const requests: URLSearchParams[] = [];
++    servesEmployees(requests);
++    renderList(
++      '/employees?q=priya&country=IN,US&level=L3&status=all&band=below&salaryUnchangedSince=2025-01-01',
++    );
++
++    expect(await findPill('India')).toBeInTheDocument();
++    expect(pill('United States')).toBeInTheDocument();
++    expect(pill('L3 Senior')).toBeInTheDocument();
++    expect(field('Status')).toHaveValue('All');
++    expect(field('Pay band')).toHaveValue('Below band');
++    expect(screen.getByLabelText('No salary change since')).toHaveValue('2025-01-01');
++    expect(screen.getByPlaceholderText('Search name or employee ID')).toHaveValue('priya');
++    await waitFor(() => expect(requests.length).toBeGreaterThan(0));
++    expect(requests[0]?.get('country')).toBe('IN,US');
++    expect(requests[0]?.get('level')).toBe('L3');
++    expect(requests[0]?.get('status')).toBe('all');
++    expect(requests[0]?.get('band')).toBe('below');
++    expect(requests[0]?.get('q')).toBe('priya');
++    expect(requests[0]?.get('salaryUnchangedSince')).toBe('2025-01-01');
++  });
++
++  it('narrows the job title options to the chosen departments', async () => {
++    servesEmployees([]);
++    const user = userEvent.setup();
++    renderList('/employees?department=2');
++    await findPill('Design');
++
++    await user.click(field('Job title'));
++
++    expect(await screen.findByRole('option', { name: 'Product Designer' })).toBeInTheDocument();
++    expect(screen.queryByRole('option', { name: 'Software Engineer' })).not.toBeInTheDocument();
++  });
++
++  it('search typing is debounced 300 ms and replaces the history entry', async () => {
++    const requests: URLSearchParams[] = [];
++    servesEmployees(requests);
++    const user = userEvent.setup();
++    renderList('/employees');
++    await screen.findByText('Showing 1 to 50 of 120 employees');
++
++    await user.type(screen.getByPlaceholderText('Search name or employee ID'), 'pri');
++
++    expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/);
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees\?q=pri$/),
++    );
++    expect(screen.getByLabelText('location')).toHaveAttribute('data-navigation', 'REPLACE');
++    await waitFor(() => expect(requests.at(-1)?.get('q')).toBe('pri'));
++    expect(requests.map((params) => params.get('q')).filter(Boolean)).toEqual(['pri']);
++  });
++
++  it('"Clear filters" removes every filter and the search text', async () => {
++    servesEmployees([]);
++    const user = userEvent.setup();
++    renderList('/employees?q=priya&country=IN&status=all');
++    await findPill('India');
++
++    await user.click(screen.getByRole('button', { name: 'Clear filters' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/),
++    );
++    expect(screen.getByPlaceholderText('Search name or employee ID')).toHaveValue('');
++    expect(pill('India')).not.toBeInTheDocument();
++  });
++});
++
++describe('sorting, unrecognised URL values and the empty filtered state (04 section 8.5)', () => {
++  const header = (name: string) => screen.getByRole('columnheader', { name });
++
++  it('clicking a sortable header sets sort and order in the URL', async () => {
++    const requests: URLSearchParams[] = [];
++    servesEmployees(requests);
++    const user = userEvent.setup();
++    renderList('/employees');
++    await screen.findByText('Showing 1 to 50 of 120 employees');
++    expect(header('Name')).toHaveAttribute('aria-sort', 'ascending');
++
++    await user.click(screen.getByRole('button', { name: 'Salary' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees\?sort=salaryUsd$/),
++    );
++    expect(screen.getByLabelText('location')).toHaveAttribute('data-navigation', 'PUSH');
++    expect(header('Salary')).toHaveAttribute('aria-sort', 'ascending');
++    await waitFor(() => expect(requests.at(-1)?.get('sort')).toBe('salaryUsd'));
++
++    await user.click(screen.getByRole('button', { name: 'Salary' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(
++        /^\/employees\?sort=salaryUsd&order=desc$/,
++      ),
++    );
++    expect(header('Salary')).toHaveAttribute('aria-sort', 'descending');
++    await waitFor(() => expect(requests.at(-1)?.get('order')).toBe('desc'));
++
++    await user.click(screen.getByRole('button', { name: 'Hire date' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees\?sort=hireDate$/),
++    );
++    expect(header('Salary')).not.toHaveAttribute('aria-sort', 'descending');
++  });
++
++  it('drops unknown URL values, rewrites the URL and shows the notice', async () => {
++    const requests: URLSearchParams[] = [];
++    servesEmployees(requests);
++    renderList('/employees?country=IN,XX&level=L9&band=sideways&sort=bogus&nope=1&status=all');
++
++    expect(
++      await screen.findByText("Some filters in this link weren't recognised and were removed."),
++    ).toBeInTheDocument();
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(
++        /^\/employees\?status=all&country=IN$/,
++      ),
++    );
++    expect(screen.getByLabelText('location')).toHaveAttribute('data-navigation', 'REPLACE');
++    await screen.findByText('Showing 1 to 50 of 120 employees');
++    for (const request of requests) {
++      expect(request.get('country')).toBe('IN');
++      expect(request.get('level')).toBeNull();
++      expect(request.get('band')).toBeNull();
++      expect(request.get('sort')).toBeNull();
++      expect(request.get('nope')).toBeNull();
++    }
++  });
++
++  it('shows "No employees match these filters." with "Clear filters" for an empty filtered result', async () => {
++    servesEmployees([]);
++    server.use(
++      http.get('/api/employees', () =>
++        HttpResponse.json(anEmployeeListResponse({ items: [], total: 0, totalPages: 0 })),
++      ),
++    );
++    const user = userEvent.setup();
++    renderList('/employees?country=IN');
++
++    const message = await screen.findByText('No employees match these filters.');
++    expect(screen.queryByText('No employees yet.')).not.toBeInTheDocument();
++
++    await user.click(within(message.parentElement!).getByRole('button', { name: 'Clear filters' }));
++
++    await waitFor(() =>
++      expect(screen.getByLabelText('location')).toHaveTextContent(/^\/employees$/),
++    );
++  });
++});
+diff --git a/apps/web/src/features/employees/EmployeeListPage.tsx b/apps/web/src/features/employees/EmployeeListPage.tsx
+index 2d9ae5f..065ca35 100644
+--- a/apps/web/src/features/employees/EmployeeListPage.tsx
++++ b/apps/web/src/features/employees/EmployeeListPage.tsx
+@@ -1,4 +1,4 @@
+ import type { EmployeeListItem } from '@acme/shared';
+-import { employeeListResponseSchema } from '@acme/shared';
++import { employeeListResponseSchema, serializeEmployeeListQuery } from '@acme/shared';
+ import {
+   Alert,
+@@ -15,13 +15,15 @@ import {
+   Title,
+   Tooltip,
++  UnstyledButton,
+ } from '@mantine/core';
+ import { keepPreviousData, useQuery } from '@tanstack/react-query';
+-import type { ReactElement } from 'react';
++import { useState, type ReactElement } from 'react';
+ import { Link } from 'react-router';
+-import { apiFetch } from '../../api/client.ts';
++import { ApiError, apiDownload, apiFetch } from '../../api/client.ts';
+ import { FxAsOf } from '../../components/FxAsOf.tsx';
+ import { Money } from '../../components/Money.tsx';
+ import { useViewer } from '../../components/Shell.tsx';
+ import { formatCompaRatio, formatDate } from '../../format.ts';
++import { EmployeeFilterBar } from './EmployeeFilterBar.tsx';
+ import { useEmployeeFilters } from './useEmployeeFilters.ts';
+ 
+@@ -38,4 +40,5 @@ const COLUMNS = [
+   'Hire date',
+ ];
++const SORTABLE = { Name: 'name', Salary: 'salaryUsd', 'Hire date': 'hireDate' } as const;
+ const SKELETON_ROWS = 10;
+ const PAGE_SIZES = ['25', '50', '100'];
+@@ -77,12 +80,30 @@ function EmployeeRow({ employee }: { employee: EmployeeListItem }): ReactElement
+ /** S-2 Employees list (04 section 8.5). */
+ export function EmployeeListPage(): ReactElement {
+-  const { page, pageSize, setPage, setPageSize } = useEmployeeFilters();
+-  const query = { page, pageSize };
++  const filters = useEmployeeFilters();
++  const { query, page, pageSize, setPage, setPageSize, setFilters, clearFilters } = filters;
++  const sort = query.sort ?? 'name';
++  const order = query.order ?? 'asc';
++  const sortBy = (column: (typeof SORTABLE)[keyof typeof SORTABLE]) =>
++    setFilters(
++      column === sort
++        ? { order: order === 'asc' ? 'desc' : undefined }
++        : { sort: column === 'name' ? undefined : column, order: undefined },
++    );
++  const filtered =
++    query.status !== 'active' ||
++    [query.q, query.band, query.salaryUnchangedSince].some(Boolean) ||
++    [query.country, query.department, query.jobTitle, query.level, query.gender].some(
++      (values) => values && values.length > 0,
++    );
++  // page and pageSize are always sent; the serializer leaves out every default.
++  const filterQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
+   const employees = useQuery({
+     queryKey: ['employees', query],
+     queryFn: () =>
+-      apiFetch(`/api/employees?page=${query.page}&pageSize=${query.pageSize}`, {
+-        schema: employeeListResponseSchema,
+-      }),
++      apiFetch(
++        `/api/employees?page=${page}&pageSize=${pageSize}${filterQuery && `&${filterQuery}`}`,
++        { schema: employeeListResponseSchema },
++      ),
++    enabled: filters.ready,
+     staleTime: 30_000,
+     placeholderData: keepPreviousData,
+@@ -94,5 +115,31 @@ export function EmployeeListPage(): ReactElement {
+     data !== undefined && data.total > 0 && data.items.length === 0 && data.page > data.totalPages;
+   const showTable = !empty && (data !== undefined || !employees.isError);
+-  const canAdd = useViewer().permissions.includes('employee.write');
++  const permissions = useViewer().permissions;
++  const canAdd = permissions.includes('employee.write');
++  const canExport = permissions.includes('export.employees');
++  const [exporting, setExporting] = useState(false);
++  const [exportError, setExportError] = useState<string>();
++  const exportCsv = async () => {
++    setExporting(true);
++    setExportError(undefined);
++    try {
++      const exportQuery = serializeEmployeeListQuery({ ...query, page: 1, pageSize: 50 });
++      const { blob, filename } = await apiDownload(
++        `/api/exports/employees.csv${exportQuery && `?${exportQuery}`}`,
++      );
++      const url = URL.createObjectURL(blob);
++      const link = document.createElement('a');
++      link.href = url;
++      link.download = filename;
++      link.click();
++      URL.revokeObjectURL(url);
++    } catch (error) {
++      // A 401 is handled for every call by the session listener.
++      if (!(error instanceof ApiError && error.code === 'UNAUTHENTICATED'))
++        setExportError(error instanceof Error ? error.message : 'The export failed.');
++    } finally {
++      setExporting(false);
++    }
++  };
+   const addButton = (
+     <Button component={Link} to="/employees/new">
+@@ -105,6 +152,34 @@ export function EmployeeListPage(): ReactElement {
+       <Group justify="space-between">
+         <Title order={1}>Employees</Title>
+-        {canAdd && !empty && addButton}
++        <Group>
++          {canExport && (
++            <Button
++              variant="default"
++              loading={exporting}
++              disabled={exporting}
++              onClick={() => void exportCsv()}
++            >
++              Export CSV
++            </Button>
++          )}
++          {canAdd && !empty && addButton}
++        </Group>
+       </Group>
++      {filters.droppedValues && (
++        <Alert color="yellow" withCloseButton onClose={filters.dismissDropped}>
++          Some filters in this link weren't recognised and were removed.
++        </Alert>
++      )}
++      <EmployeeFilterBar filters={filters} />
++      {exportError && (
++        <Alert color="red">
++          <Group justify="space-between">
++            <Text>{exportError}</Text>
++            <Button variant="light" onClick={() => void exportCsv()}>
++              Retry
++            </Button>
++          </Group>
++        </Alert>
++      )}
+       {employees.isError && (
+         <Alert color="red">
+@@ -117,5 +192,13 @@ export function EmployeeListPage(): ReactElement {
+         </Alert>
+       )}
+-      {empty && (
++      {empty && filtered && (
++        <Stack align="flex-start">
++          <Text>No employees match these filters.</Text>
++          <Button variant="light" onClick={clearFilters}>
++            Clear filters
++          </Button>
++        </Stack>
++      )}
++      {empty && !filtered && (
+         <Stack align="flex-start">
+           <Text>No employees yet.</Text>
+@@ -149,7 +232,23 @@ export function EmployeeListPage(): ReactElement {
+           <Table.Thead>
+             <Table.Tr>
+-              {COLUMNS.map((column) => (
+-                <Table.Th key={column}>{column}</Table.Th>
+-              ))}
++              {COLUMNS.map((column) => {
++                const key = SORTABLE[column as keyof typeof SORTABLE] as string | undefined;
++                if (!key) return <Table.Th key={column}>{column}</Table.Th>;
++                const active = key === sort;
++                return (
++                  <Table.Th
++                    key={column}
++                    aria-sort={active ? (order === 'asc' ? 'ascending' : 'descending') : undefined}
++                  >
++                    <UnstyledButton
++                      fw="inherit"
++                      onClick={() => sortBy(key as (typeof SORTABLE)[keyof typeof SORTABLE])}
++                    >
++                      {column}
++                      {active && <span aria-hidden>{order === 'asc' ? ' ▲' : ' ▼'}</span>}
++                    </UnstyledButton>
++                  </Table.Th>
++                );
++              })}
+             </Table.Tr>
+           </Table.Thead>
+@@ -178,5 +277,5 @@ export function EmployeeListPage(): ReactElement {
+             data={PAGE_SIZES}
+             value={String(pageSize)}
+-            onChange={(value) => value && setPageSize(Number(value))}
++            onChange={(value) => value && setPageSize(Number(value) as 25 | 50 | 100)}
+           />
+           <FxAsOf date={data.fxAsOf} />
+diff --git a/apps/web/src/features/employees/useEmployeeFilters.ts b/apps/web/src/features/employees/useEmployeeFilters.ts
+index 087e16f..db7b7d2 100644
+--- a/apps/web/src/features/employees/useEmployeeFilters.ts
++++ b/apps/web/src/features/employees/useEmployeeFilters.ts
+@@ -1,30 +1,106 @@
+-import { useSearchParams } from 'react-router';
++import {
++  employeeListQuerySchema,
++  serializeEmployeeListQuery,
++  type EmployeeListQuery,
++  type ReferenceResponse,
++} from '@acme/shared';
++import { useEffect, useState } from 'react';
++import { useNavigate, useSearchParams } from 'react-router';
++import { useReference } from './useReference.ts';
+ 
+-const DEFAULT_PAGE_SIZE = 50;
++type FilterChange = Partial<Omit<EmployeeListQuery, 'page'>>;
++
++const LIST_KEYS = ['country', 'department', 'jobTitle', 'level', 'gender'] as const;
++const shape: Record<string, { safeParse(value: unknown): { success: boolean } }> =
++  employeeListQuerySchema.shape;
++
++const knownValues = (
++  reference: ReferenceResponse,
++): Record<(typeof LIST_KEYS)[number], string[]> => ({
++  country: reference.countries.map((c) => c.code),
++  department: reference.departments.map((d) => String(d.id)),
++  jobTitle: reference.jobTitles.map((t) => String(t.id)),
++  level: reference.levels.map((l) => l.code),
++  gender: reference.genders.map((g) => g.code),
++});
++
++/**
++ * The query a URL stands for. Anything the schema or the reference data doesn't recognise is
++ * left out and reported in `dropped` (04 section 8.3).
++ */
++function parseUrl(
++  params: URLSearchParams,
++  reference: ReferenceResponse | undefined,
++): { query: EmployeeListQuery; dropped: boolean } {
++  let dropped = false;
++  const valid: Record<string, string> = {};
++  for (const [key, value] of params) {
++    if (shape[key]?.safeParse(value).success) valid[key] = value;
++    else dropped = true;
++  }
++  const query = employeeListQuerySchema.parse(valid);
++  if (reference) {
++    const known = knownValues(reference);
++    for (const key of LIST_KEYS) {
++      const values = query[key];
++      const kept = values?.filter((value) => known[key].includes(value));
++      if (kept && kept.length !== values?.length) {
++        dropped = true;
++        query[key] = kept;
++      }
++    }
++  }
++  return { query, dropped };
++}
+ 
+ /** List state kept in the URL (04 section 8.3); defaults are left out of it. */
+ export function useEmployeeFilters(): {
++  query: EmployeeListQuery;
+   page: number;
+   pageSize: number;
++  /** False until the reference data that list values are checked against has loaded. */
++  ready: boolean;
++  /** True once a URL value was dropped; the page shows the notice. */
++  droppedValues: boolean;
++  dismissDropped: () => void;
+   setPage: (page: number) => void;
+-  setPageSize: (pageSize: number) => void;
++  setPageSize: (pageSize: EmployeeListQuery['pageSize']) => void;
++  /** Changes filters or sort and goes back to page 1; `replace` skips a history entry. */
++  setFilters: (change: FilterChange, options?: { replace?: boolean }) => void;
++  clearFilters: () => void;
+ } {
+-  const [params, setParams] = useSearchParams();
+-  const page = Number(params.get('page') ?? 1);
+-  const pageSize = Number(params.get('pageSize') ?? DEFAULT_PAGE_SIZE);
+-
+-  const update = (next: { page: number; pageSize: number }) => {
+-    const search = new URLSearchParams();
+-    if (next.page !== 1) search.set('page', String(next.page));
+-    if (next.pageSize !== DEFAULT_PAGE_SIZE) search.set('pageSize', String(next.pageSize));
+-    setParams(search);
++  const [params] = useSearchParams();
++  const navigate = useNavigate();
++  const reference = useReference();
++  const ready = !reference.isPending;
++  const { query, dropped } = parseUrl(params, reference.data);
++  const [droppedValues, setDroppedValues] = useState(false);
++
++  const go = (next: EmployeeListQuery, replace = false) => {
++    const search = serializeEmployeeListQuery(next);
++    void navigate({ search: search ? `?${search}` : '' }, { replace });
+   };
+ 
++  // Rewrite the URL without the dropped values; the notice outlives the rewrite.
++  useEffect(() => {
++    if (dropped && ready) {
++      setDroppedValues(true);
++      const search = serializeEmployeeListQuery(query);
++      void navigate({ search: search ? `?${search}` : '' }, { replace: true });
++    }
++  }, [dropped, ready, query, navigate]);
++
+   return {
+-    page,
+-    pageSize,
+-    setPage: (nextPage) => update({ page: nextPage, pageSize }),
++    query,
++    page: query.page,
++    pageSize: query.pageSize,
++    ready,
++    droppedValues,
++    dismissDropped: () => setDroppedValues(false),
++    setPage: (page) => go({ ...query, page }),
+     // A new page size starts again from page 1.
+-    setPageSize: (nextSize) => update({ page: 1, pageSize: nextSize }),
++    setPageSize: (pageSize) => go({ ...query, page: 1, pageSize }),
++    setFilters: (change, { replace } = {}) => go({ ...query, ...change, page: 1 }, replace),
++    clearFilters: () => go({ ...employeeListQuerySchema.parse({}), pageSize: query.pageSize }),
+   };
+ }
+diff --git a/apps/web/src/features/employees/useReference.ts b/apps/web/src/features/employees/useReference.ts
+new file mode 100644
+index 0000000..21b58e3
+--- /dev/null
++++ b/apps/web/src/features/employees/useReference.ts
+@@ -0,0 +1,11 @@
++import { referenceResponseSchema } from '@acme/shared';
++import { useQuery } from '@tanstack/react-query';
++import { apiFetch } from '../../api/client.ts';
++
++/** R1 reference data (04 section 5.3); it only changes with a release, so it is fetched once. */
++export const useReference = () =>
++  useQuery({
++    queryKey: ['reference'],
++    queryFn: () => apiFetch('/api/reference', { schema: referenceResponseSchema }),
++    staleTime: Infinity,
++  });
+diff --git a/apps/web/test/fixtures/reference.ts b/apps/web/test/fixtures/reference.ts
+new file mode 100644
+index 0000000..69e33a7
+--- /dev/null
++++ b/apps/web/test/fixtures/reference.ts
+@@ -0,0 +1,34 @@
++import { referenceResponseSchema, type ReferenceResponse } from '@acme/shared';
++
++// Fixture builders parse with the shared response schema (D-050).
++export const aReferenceResponse = (overrides: Partial<ReferenceResponse> = {}): ReferenceResponse =>
++  referenceResponseSchema.parse({
++    countries: [
++      { code: 'IN', name: 'India', currency: 'INR' },
++      { code: 'US', name: 'United States', currency: 'USD' },
++      { code: 'DE', name: 'Germany', currency: 'EUR' },
++    ],
++    departments: [
++      { id: 1, name: 'Engineering' },
++      { id: 2, name: 'Design' },
++    ],
++    jobTitles: [
++      { id: 1, name: 'Software Engineer', departmentId: 1 },
++      { id: 2, name: 'Data Engineer', departmentId: 1 },
++      { id: 3, name: 'Product Designer', departmentId: 2 },
++    ],
++    levels: [
++      { code: 'L2', name: 'Mid', rank: 2 },
++      { code: 'L3', name: 'Senior', rank: 3 },
++      { code: 'L4', name: 'Staff', rank: 4 },
++    ],
++    genders: [
++      { code: 'female', name: 'Female' },
++      { code: 'male', name: 'Male' },
++      { code: 'non_binary', name: 'Non-binary' },
++      { code: 'not_disclosed', name: 'Not disclosed' },
++    ],
++    salaryChangeReasons: [{ code: 'merit', name: 'Merit' }],
++    fx: { asOfDate: '2026-09-30', rates: [{ currency: 'INR', usdPerUnit: '0.011500' }] },
++    ...overrides,
++  });
+diff --git a/apps/web/test/server.ts b/apps/web/test/server.ts
+index 3e58be8..07064ea 100644
+--- a/apps/web/test/server.ts
++++ b/apps/web/test/server.ts
+@@ -1,4 +1,9 @@
++import { http, HttpResponse } from 'msw';
+ import { setupServer } from 'msw/node';
++import { aReferenceResponse } from './fixtures/reference.ts';
+ 
+-// Tests add handlers with server.use(...); anything unhandled fails the test (D-051).
+-export const server = setupServer();
++// Tests add handlers with server.use(...); anything unhandled fails the test (D-051). Reference
++// data is the one default: every list page reads it for its filter options.
++export const server = setupServer(
++  http.get('/api/reference', () => HttpResponse.json(aReferenceResponse())),
++);
+diff --git a/apps/web/test/setup.ts b/apps/web/test/setup.ts
+index 71e4d50..9622e5c 100644
+--- a/apps/web/test/setup.ts
++++ b/apps/web/test/setup.ts
+@@ -1,4 +1,4 @@
+ import '@testing-library/jest-dom/vitest';
+-import { cleanup } from '@testing-library/react';
++import { cleanup, configure } from '@testing-library/react';
+ import { afterAll, afterEach, beforeAll } from 'vitest';
+ import { server } from './server.ts';
+@@ -28,4 +28,8 @@ class ResizeObserver {
+ window.ResizeObserver = ResizeObserver;
+ 
++// The list page renders a filter bar of Mantine selects; a cold first render takes over the
++// default 1 s that findBy and waitFor wait.
++configure({ asyncUtilTimeout: 5000 });
++
+ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+ afterEach(() => {
+diff --git a/packages/shared/src/schemas/employee.test.ts b/packages/shared/src/schemas/employee.test.ts
+index b8fbe9e..0c364e1 100644
+--- a/packages/shared/src/schemas/employee.test.ts
++++ b/packages/shared/src/schemas/employee.test.ts
+@@ -1,4 +1,4 @@
+ import { describe, expect, it } from 'vitest';
+-import { employeeListQuerySchema } from './employee.ts';
++import { employeeListQuerySchema, serializeEmployeeListQuery } from './employee.ts';
+ 
+ describe('employeeListQuerySchema', () => {
+@@ -21,5 +21,5 @@ describe('employeeListQuerySchema', () => {
+ 
+   it('rejects unknown params', () => {
+-    const result = employeeListQuerySchema.safeParse({ q: 'nair' });
++    const result = employeeListQuerySchema.safeParse({ nope: 'nair' });
+ 
+     expect(result.success).toBe(false);
+@@ -41,3 +41,101 @@ describe('employeeListQuerySchema', () => {
+     expect(employeeListQuerySchema.safeParse({ status: 'gone' }).success).toBe(false);
+   });
++
++  it('splits, trims and de-duplicates comma lists, dropping empty values', () => {
++    const result = employeeListQuerySchema.safeParse({
++      country: 'IN, US,,IN,',
++      department: ',',
++      jobTitle: '3,4',
++      level: 'L3',
++      gender: 'female,male',
++    });
++
++    expect(result.data).toEqual({
++      page: 1,
++      pageSize: 50,
++      status: 'active',
++      country: ['IN', 'US'],
++      department: [],
++      jobTitle: ['3', '4'],
++      level: ['L3'],
++      gender: ['female', 'male'],
++    });
++  });
++
++  it('trims q and accepts 1 to 100 characters', () => {
++    expect(employeeListQuerySchema.safeParse({ q: '  nair ' }).data?.q).toBe('nair');
++    expect(employeeListQuerySchema.safeParse({ q: 'a'.repeat(100) }).success).toBe(true);
++  });
++
++  it.each(['', '   ', 'a'.repeat(101)])('rejects q %j', (q) => {
++    expect(employeeListQuerySchema.safeParse({ q }).success).toBe(false);
++  });
++
++  it.each(['below', 'above', 'outside', 'inside'])('accepts band %s', (band) => {
++    expect(employeeListQuerySchema.safeParse({ band }).data).toMatchObject({ band });
++  });
++
++  it.each([
++    { band: 'under' },
++    { sort: 'salary' },
++    { order: 'up' },
++    { salaryUnchangedSince: '2026-13-01' },
++    { salaryUnchangedSince: 'yesterday' },
++  ])('rejects %j', (bad) => {
++    expect(employeeListQuerySchema.safeParse(bad).success).toBe(false);
++  });
++
++  it('accepts sort, order and a salaryUnchangedSince date', () => {
++    const result = employeeListQuerySchema.safeParse({
++      sort: 'salaryUsd',
++      order: 'desc',
++      salaryUnchangedSince: '2025-10-09',
++    });
++
++    expect(result.data).toMatchObject({
++      sort: 'salaryUsd',
++      order: 'desc',
++      salaryUnchangedSince: '2025-10-09',
++    });
++  });
++});
++
++describe('serializeEmployeeListQuery', () => {
++  const parse = (raw: Record<string, string>) => employeeListQuerySchema.safeParse(raw);
++
++  it('round-trips every filter through the URL serializer', () => {
++    const first = parse({
++      page: '3',
++      pageSize: '25',
++      status: 'all',
++      q: 'mü ller',
++      country: 'IN,US',
++      department: '2,5',
++      jobTitle: '7',
++      level: 'L3,L4',
++      gender: 'non_binary',
++      band: 'outside',
++      salaryUnchangedSince: '2025-10-09',
++      sort: 'hireDate',
++      order: 'desc',
++    });
++    expect(first.success).toBe(true);
++
++    const search = serializeEmployeeListQuery(first.data!);
++    const second = parse(Object.fromEntries(new URLSearchParams(search)));
++
++    expect(second.data).toEqual(first.data);
++  });
++
++  it('leaves defaults and empty lists out of the URL', () => {
++    const parsed = parse({ country: ',', status: 'active', page: '1', pageSize: '50' });
++
++    expect(serializeEmployeeListQuery(parsed.data!)).toBe('');
++  });
++
++  it('writes lists comma-separated without spaces', () => {
++    const parsed = parse({ country: 'IN,US', level: 'L3,L4' });
++
++    expect(serializeEmployeeListQuery(parsed.data!)).toBe('country=IN,US&level=L3,L4');
++  });
+ });
+diff --git a/packages/shared/src/schemas/employee.ts b/packages/shared/src/schemas/employee.ts
+index 32c093f..691203d 100644
+--- a/packages/shared/src/schemas/employee.ts
++++ b/packages/shared/src/schemas/employee.ts
+@@ -2,5 +2,22 @@ import { z } from 'zod';
+ import { isoDateSchema } from './common.ts';
+ 
+-// 04 section 5.4 E1 query, S3 subset. Strict: S4 adds the filters, sort and `q`.
++// 04 section 4.6: a list is one comma-separated param; trim, drop empties, de-duplicate.
++// Shape only: whether a country or level exists is checked against the reference tables.
++const commaList = z.preprocess(
++  (value) =>
++    typeof value === 'string'
++      ? [
++          ...new Set(
++            value
++              .split(',')
++              .map((item) => item.trim())
++              .filter((item) => item !== ''),
++          ),
++        ]
++      : value,
++  z.array(z.string()),
++);
++
++// 04 section 5.4 E1 query.
+ export const employeeListQuerySchema = z.strictObject({
+   page: z.coerce.number().int().min(1).default(1),
+@@ -10,8 +27,48 @@ export const employeeListQuerySchema = z.strictObject({
+     .default(50),
+   status: z.enum(['active', 'terminated', 'all']).default('active'),
++  q: z.string().trim().min(1).max(100).optional(),
++  country: commaList.optional(),
++  department: commaList.optional(),
++  jobTitle: commaList.optional(),
++  level: commaList.optional(),
++  gender: commaList.optional(),
++  band: z.enum(['below', 'above', 'outside', 'inside']).optional(),
++  salaryUnchangedSince: isoDateSchema.optional(),
++  sort: z.enum(['name', 'salaryUsd', 'hireDate']).optional(),
++  order: z.enum(['asc', 'desc']).optional(),
+ });
+ 
+ export type EmployeeListQuery = z.infer<typeof employeeListQuerySchema>;
+ 
++// 04 section 5.7 X1 takes the list filters and sort, but no paging.
++export const employeeExportQuerySchema = employeeListQuerySchema.omit({
++  page: true,
++  pageSize: true,
++});
++
++export type EmployeeExportQuery = z.infer<typeof employeeExportQuerySchema>;
++
++const LIST_KEYS = ['country', 'department', 'jobTitle', 'level', 'gender'] as const;
++const SCALAR_KEYS = ['q', 'band', 'salaryUnchangedSince', 'sort', 'order'] as const;
++
++/** Query string (no leading `?`) for a parsed query; defaults and empty lists are left out. */
++export function serializeEmployeeListQuery(query: EmployeeListQuery): string {
++  const parts: string[] = [];
++  if (query.page !== 1) parts.push(`page=${query.page}`);
++  if (query.pageSize !== 50) parts.push(`pageSize=${query.pageSize}`);
++  if (query.status !== 'active') parts.push(`status=${query.status}`);
++  for (const key of SCALAR_KEYS) {
++    const value = query[key];
++    if (value !== undefined) parts.push(`${key}=${encodeURIComponent(value)}`);
++  }
++  for (const key of LIST_KEYS) {
++    const values = query[key];
++    if (values !== undefined && values.length > 0) {
++      parts.push(`${key}=${values.map(encodeURIComponent).join(',')}`);
++    }
++  }
++  return parts.join('&');
++}
++
+ const codeName = z.object({ code: z.string(), name: z.string() });
+ const idName = z.object({ id: z.number().int(), name: z.string() });

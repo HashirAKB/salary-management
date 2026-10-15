@@ -1,0 +1,2732 @@
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+index 94eb30c..86277d8 100644
+--- a/apps/api/src/http/access-matrix.test.ts
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -15,5 +15,10 @@ const EXPECTED_ACCESS: Record<string, RouteAccess> = {
+   'GET /api/auth/me': 'authenticated',
+   'GET /api/reference': 'reference.read',
++  'GET /api/pay-bands/:countryCode/:jobTitleId/:levelCode': 'reference.read',
+   'GET /api/employees': 'employee.read',
++  'GET /api/employees/:id': 'employee.read',
++  'POST /api/employees': 'employee.write',
++  'PATCH /api/employees/:id': 'employee.write',
++  'POST /api/employees/:id/termination': 'employee.write',
+   'GET /api/exports/employees.csv': 'export.employees',
+ };
+diff --git a/apps/api/src/modules/employees/routes.test.ts b/apps/api/src/modules/employees/routes.test.ts
+index b2c4354..bf8d84f 100644
+--- a/apps/api/src/modules/employees/routes.test.ts
++++ b/apps/api/src/modules/employees/routes.test.ts
+@@ -2,5 +2,5 @@ import { compaRatio, employeeListResponseSchema, toUsdMinor } from '@acme/shared
+ import type { FastifyInstance } from 'fastify';
+ import { afterEach, describe, expect, it } from 'vitest';
+-import { anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
++import { aReferenceSet, anEmployee, loggedInAs, merit } from '../../../test/builders/index.ts';
+ import { testApp, testDb } from '../../../test/helpers.ts';
+ import type { Db } from '../../db/client.ts';
+@@ -413,2 +413,483 @@ describe('GET /api/employees (E1)', () => {
+   });
+ });
++
++const INR_MICROS = 11_500;
++
++describe('GET /api/employees/:id (E2)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<number | void>) {
++    const db = await testDb();
++    const id = await seed(db);
++    const { cookie } = await loggedInAs(db, 'hr_viewer');
++    app = testApp({ db });
++    return {
++      id,
++      get: (path: string | number | void = id) =>
++        app!.inject({ method: 'GET', url: `/api/employees/${path}`, headers: { cookie } }),
++    };
++  }
++
++  it('returns one employee with band min, mid and max, compa-ratio and timestamps', async () => {
++    const band = generateBands().find(
++      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
++    )!;
++    const { get } = await setup(async (db) => (await anEmployee().insert(db)).id);
++
++    const response = await get();
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toEqual({
++      id: 1,
++      employeeCode: 'E000001',
++      firstName: 'Asha',
++      lastName: 'Rao',
++      gender: 'female',
++      country: { code: 'IN', name: 'India' },
++      department: { id: expect.any(Number), name: 'Engineering' },
++      jobTitle: { id: SOFTWARE_ENGINEER, name: 'Software Engineer' },
++      level: { code: 'L3', name: 'Senior' },
++      status: 'active',
++      hireDate: '2022-01-10',
++      terminationDate: null,
++      salary: { amountMinor: band.midMinor, currency: 'INR' },
++      salaryUsd: { amountMinor: toUsdMinor(band.midMinor, INR_MICROS), currency: 'USD' },
++      salaryEffectiveDate: '2022-01-10',
++      compaRatio: 1,
++      bandPosition: 'inside',
++      band: {
++        min: { amountMinor: band.minMinor, currency: 'INR' },
++        mid: { amountMinor: band.midMinor, currency: 'INR' },
++        max: { amountMinor: band.maxMinor, currency: 'INR' },
++      },
++      createdAt: '2022-01-10T00:00:00.000Z',
++      updatedAt: '2022-01-10T00:00:00.000Z',
++    });
++  });
++
++  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown id and 400 for a non-integer id', async () => {
++    const { get } = await setup(async (db) => (await anEmployee().insert(db)).id);
++
++    const missing = await get(999);
++    const malformed = await get('abc');
++    const zero = await get(0);
++
++    expect(missing.statusCode).toBe(404);
++    expect(missing.json()).toMatchObject({ code: 'EMPLOYEE_NOT_FOUND' });
++    expect(malformed.statusCode).toBe(400);
++    expect(malformed.json()).toMatchObject({ code: 'VALIDATION_FAILED' });
++    expect(zero.statusCode).toBe(400);
++  });
++});
++
++describe('POST /api/employees (E3)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  const bandMid = generateBands().find(
++    (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
++  )!.midMinor;
++  const validBody = {
++    firstName: 'Meera',
++    lastName: 'Iyer',
++    gender: 'female',
++    countryCode: 'IN',
++    jobTitleId: SOFTWARE_ENGINEER,
++    levelCode: 'L3',
++    hireDate: '2026-10-01',
++    startingSalary: { amountMinor: bandMid, currency: 'INR' },
++  };
++
++  async function setup(
++    seed: (db: Db) => Promise<void> = async () => {},
++    reference = aReferenceSet(),
++  ) {
++    const db = await testDb(reference);
++    await seed(db);
++    const { cookie, user } = await loggedInAs(db, 'hr_admin');
++    app = testApp({ db });
++    return {
++      db,
++      user,
++      post: (body: object = validBody) =>
++        app!.inject({ method: 'POST', url: '/api/employees', headers: { cookie }, payload: body }),
++    };
++  }
++
++  const rows = async (db: Db, sql: string) =>
++    (await db.$client.execute(sql)).rows.map((row) => ({ ...row }));
++
++  it('creating an employee returns 201 with Location, the next employee code, and a hire history row on the hire date', async () => {
++    const { db, user, post } = await setup(async (db) => {
++      await anEmployee().insert(db);
++      await anEmployee().insert(db);
++    });
++
++    const response = await post();
++
++    expect(response.statusCode).toBe(201);
++    expect(response.headers.location).toBe('/api/employees/3');
++    expect(response.json()).toMatchObject({
++      id: 3,
++      employeeCode: 'E000003',
++      firstName: 'Meera',
++      lastName: 'Iyer',
++      status: 'active',
++      terminationDate: null,
++      hireDate: '2026-10-01',
++      salary: { amountMinor: bandMid, currency: 'INR' },
++      salaryEffectiveDate: '2026-10-01',
++      compaRatio: 1,
++      bandPosition: 'inside',
++    });
++    expect(
++      await rows(
++        db,
++        'SELECT effective_date, amount_minor, currency_code, job_title_id, level_code, reason, changed_by_user_id FROM salary_changes WHERE employee_id = 3',
++      ),
++    ).toEqual([
++      {
++        effective_date: '2026-10-01',
++        amount_minor: bandMid,
++        currency_code: 'INR',
++        job_title_id: SOFTWARE_ENGINEER,
++        level_code: 'L3',
++        reason: 'hire',
++        changed_by_user_id: user.id,
++      },
++    ]);
++  });
++
++  it("the new employee's current-salary columns equal the hire row", async () => {
++    const { db, post } = await setup();
++
++    await post({ ...validBody, startingSalary: { amountMinor: bandMid + 777, currency: 'INR' } });
++
++    expect(
++      await rows(
++        db,
++        `SELECT e.salary_minor, e.salary_currency, e.salary_effective_date, e.name_search
++         FROM employees e JOIN salary_changes s ON s.employee_id = e.id
++         WHERE s.reason = 'hire' AND e.salary_minor = s.amount_minor
++           AND e.salary_currency = s.currency_code AND e.salary_effective_date = s.effective_date`,
++      ),
++    ).toEqual([
++      {
++        salary_minor: bandMid + 777,
++        salary_currency: 'INR',
++        salary_effective_date: '2026-10-01',
++        name_search: 'meera iyer',
++      },
++    ]);
++  });
++
++  describe('rules', () => {
++    const problemOf = (response: { statusCode: number; json: () => unknown }) => ({
++      status: response.statusCode,
++      code: (response.json() as { code: string }).code,
++    });
++    const employeeCount = async (db: Db) =>
++      (await rows(db, 'SELECT count(*) AS n FROM employees'))[0]?.n;
++
++    it('rejects a hire date after today with 422 DATE_IN_FUTURE', async () => {
++      const { db, post } = await setup();
++
++      const response = await post({ ...validBody, hireDate: '2026-10-10' });
++
++      expect(problemOf(response)).toEqual({ status: 422, code: 'DATE_IN_FUTURE' });
++      expect(await employeeCount(db)).toBe(0);
++    });
++
++    it('accepts a hire date of today', async () => {
++      const { post } = await setup();
++
++      const response = await post({ ...validBody, hireDate: '2026-10-09' });
++
++      expect(response.statusCode).toBe(201);
++    });
++
++    it('rejects a salary in the wrong currency with 422 SALARY_CURRENCY_MISMATCH', async () => {
++      const { db, post } = await setup();
++
++      const response = await post({
++        ...validBody,
++        startingSalary: { amountMinor: bandMid, currency: 'USD' },
++      });
++
++      expect(problemOf(response)).toEqual({ status: 422, code: 'SALARY_CURRENCY_MISMATCH' });
++      expect(await employeeCount(db)).toBe(0);
++    });
++
++    it('rejects a position with no band with 422 NO_PAY_BAND', async () => {
++      const { db, post } = await setup(
++        async () => {},
++        aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L3'),
++      );
++
++      const response = await post();
++
++      expect(problemOf(response)).toEqual({ status: 422, code: 'NO_PAY_BAND' });
++      expect(await employeeCount(db)).toBe(0);
++    });
++
++    it('checks the create rules in order: future date, then currency, then band', async () => {
++      const { post } = await setup(
++        async () => {},
++        aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L3'),
++      );
++      const wrongCurrency = { amountMinor: bandMid, currency: 'USD' };
++
++      const allThree = await post({
++        ...validBody,
++        hireDate: '2026-10-10',
++        startingSalary: wrongCurrency,
++      });
++      const currencyAndBand = await post({ ...validBody, startingSalary: wrongCurrency });
++
++      expect(problemOf(allThree).code).toBe('DATE_IN_FUTURE');
++      expect(problemOf(currencyAndBand).code).toBe('SALARY_CURRENCY_MISMATCH');
++    });
++
++    it('allows a starting salary outside the band', async () => {
++      const { post } = await setup();
++
++      const response = await post({
++        ...validBody,
++        startingSalary: { amountMinor: 1, currency: 'INR' },
++      });
++
++      expect(response.statusCode).toBe(201);
++      expect(response.json()).toMatchObject({ bandPosition: 'below' });
++    });
++  });
++});
++
++describe('PATCH /api/employees/:id (E4)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
++    const db = await testDb();
++    await seed(db);
++    const { cookie } = await loggedInAs(db, 'hr_admin');
++    app = testApp({ db });
++    return {
++      db,
++      patch: (body: object, id: number | string = 1) =>
++        app!.inject({
++          method: 'PATCH',
++          url: `/api/employees/${id}`,
++          headers: { cookie },
++          payload: body,
++        }),
++      search: async (q: string) =>
++        (
++          await app!.inject({
++            method: 'GET',
++            url: `/api/employees?q=${encodeURIComponent(q)}`,
++            headers: { cookie },
++          })
++        ).json().items as { id: number }[],
++    };
++  }
++
++  it('editing the last name updates name_search, so a search finds the new name', async () => {
++    const { patch, search } = await setup(async (db) => {
++      await anEmployee().named('Asha', 'Rao').insert(db);
++    });
++
++    const response = await patch({ lastName: 'Müller' });
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toMatchObject({
++      id: 1,
++      firstName: 'Asha',
++      lastName: 'Müller',
++      updatedAt: '2026-10-09T09:00:00.000Z',
++    });
++    expect((await search('muller')).map((item) => item.id)).toEqual([1]);
++    expect(await search('rao')).toEqual([]);
++  });
++
++  it('changes gender without touching the names', async () => {
++    const { patch } = await setup(async (db) => {
++      await anEmployee().insert(db);
++    });
++
++    const response = await patch({ gender: 'not_disclosed' });
++
++    expect(response.json()).toMatchObject({
++      firstName: 'Asha',
++      lastName: 'Rao',
++      gender: 'not_disclosed',
++    });
++  });
++
++  it.each(['jobTitleId', 'levelCode', 'countryCode'])(
++    'rejects a PATCH containing %s with 400 naming the key',
++    async (key) => {
++      const { patch, db } = await setup(async (db) => {
++        await anEmployee().insert(db);
++      });
++
++      const response = await patch({ lastName: 'Changed', [key]: 'L4' });
++
++      expect(response.statusCode).toBe(400);
++      expect(response.json().code).toBe('VALIDATION_FAILED');
++      expect(JSON.stringify(response.json().errors)).toContain(key);
++      expect(
++        (await db.$client.execute('SELECT last_name FROM employees WHERE id = 1')).rows[0]
++          ?.last_name,
++      ).toBe('Rao');
++    },
++  );
++
++  it('rejects an empty body and a formula-leading name with 400', async () => {
++    const { patch } = await setup(async (db) => {
++      await anEmployee().insert(db);
++    });
++
++    const empty = await patch({});
++    const formula = await patch({ firstName: '=cmd' });
++
++    expect(empty.statusCode).toBe(400);
++    expect(formula.statusCode).toBe(400);
++    expect(formula.json().errors[0].path).toBe('firstName');
++  });
++
++  it('returns 404 EMPLOYEE_NOT_FOUND for an unknown id', async () => {
++    const { patch } = await setup();
++
++    const response = await patch({ lastName: 'Rao' }, 999);
++
++    expect(response.statusCode).toBe(404);
++    expect(response.json().code).toBe('EMPLOYEE_NOT_FOUND');
++  });
++
++  it("edits a terminated employee's details", async () => {
++    const { patch } = await setup(async (db) => {
++      await anEmployee().terminatedOn('2025-01-31').insert(db);
++    });
++
++    const response = await patch({ firstName: 'Ashaa' });
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toMatchObject({
++      firstName: 'Ashaa',
++      status: 'terminated',
++      terminationDate: '2025-01-31',
++    });
++  });
++});
++
++describe('POST /api/employees/:id/termination (E5)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function setup(seed: (db: Db) => Promise<void> = async () => {}) {
++    const db = await testDb();
++    await seed(db);
++    const { cookie } = await loggedInAs(db, 'hr_admin');
++    app = testApp({ db });
++    const inject = (method: 'GET' | 'POST', url: string, payload?: object) =>
++      app!.inject({ method, url, headers: { cookie }, ...(payload && { payload }) });
++    return {
++      terminate: (terminationDate: string, id: number | string = 1) =>
++        inject('POST', `/api/employees/${id}/termination`, { terminationDate }),
++      list: async (query = '') =>
++        ((await inject('GET', `/api/employees${query}`)).json().items as { id: number }[]).map(
++          (item) => item.id,
++        ),
++    };
++  }
++
++  const problemOf = (response: { statusCode: number; json: () => unknown }) => ({
++    status: response.statusCode,
++    code: (response.json() as { code: string }).code,
++  });
++
++  it('terminating sets status and date and removes the employee from the default list', async () => {
++    const { terminate, list } = await setup(async (db) => {
++      await anEmployee().insert(db);
++      await anEmployee().insert(db);
++    });
++
++    const response = await terminate('2026-10-05');
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toMatchObject({
++      id: 1,
++      status: 'terminated',
++      terminationDate: '2026-10-05',
++      updatedAt: '2026-10-09T09:00:00.000Z',
++    });
++    expect(await list()).toEqual([2]);
++    expect(await list('?status=terminated')).toEqual([1]);
++  });
++
++  it('accepts today and the hire date as the termination date', async () => {
++    const { terminate } = await setup(async (db) => {
++      await anEmployee().hiredOn('2026-09-01').insert(db);
++      await anEmployee().hiredOn('2026-09-01').insert(db);
++    });
++
++    const today = await terminate('2026-10-09', 1);
++    const hireDay = await terminate('2026-09-01', 2);
++
++    expect([today.statusCode, hireDay.statusCode]).toEqual([200, 200]);
++  });
++
++  it('rejects terminating twice, before the hire date, or after today, each with its code', async () => {
++    const { terminate } = await setup(async (db) => {
++      await anEmployee().insert(db);
++      await anEmployee().terminatedOn('2025-01-31').insert(db);
++    });
++
++    const twice = await terminate('2026-10-05', 2);
++    const future = await terminate('2026-10-10', 1);
++    const beforeHire = await terminate('2022-01-09', 1);
++
++    expect(problemOf(twice)).toEqual({ status: 422, code: 'EMPLOYEE_ALREADY_TERMINATED' });
++    expect(problemOf(future)).toEqual({ status: 422, code: 'DATE_IN_FUTURE' });
++    expect(problemOf(beforeHire)).toEqual({ status: 422, code: 'TERMINATION_BEFORE_HIRE' });
++  });
++
++  it('leaves the employee active after a rejected termination', async () => {
++    const { terminate, list } = await setup(async (db) => {
++      await anEmployee().insert(db);
++    });
++
++    await terminate('2026-10-10');
++
++    expect(await list()).toEqual([1]);
++  });
++
++  it('returns 404 for an unknown id and 400 for a malformed date', async () => {
++    const { terminate } = await setup(async (db) => {
++      await anEmployee().insert(db);
++    });
++
++    const missing = await terminate('2026-10-05', 999);
++    const malformed = await terminate('05/10/2026');
++
++    expect(problemOf(missing)).toEqual({ status: 404, code: 'EMPLOYEE_NOT_FOUND' });
++    expect(problemOf(malformed)).toEqual({ status: 400, code: 'VALIDATION_FAILED' });
++  });
++});
+diff --git a/apps/api/src/modules/employees/routes.ts b/apps/api/src/modules/employees/routes.ts
+index babb004..6ead3ac 100644
+--- a/apps/api/src/modules/employees/routes.ts
++++ b/apps/api/src/modules/employees/routes.ts
+@@ -1,8 +1,16 @@
+ import {
+   employeeExportQuerySchema,
++  createEmployeeBodySchema,
++  employeeIdParamsSchema,
+   employeeListQuerySchema,
++  terminateBodySchema,
++  updateEmployeeBodySchema,
++  type CreateEmployeeBody,
++  type EmployeeDetail,
+   type EmployeeExportQuery,
+   type EmployeeListQuery,
+   type EmployeeListResponse,
++  type TerminateBody,
++  type UpdateEmployeeBody,
+ } from '@acme/shared';
+ import type { FastifyInstance } from 'fastify';
+@@ -10,5 +18,12 @@ import type { Db } from '../../db/client.ts';
+ import type { Clock } from '../../domain/clock.ts';
+ import { requires } from '../../http/guard.ts';
+-import { exportEmployees, listEmployees } from './service.ts';
++import {
++  createEmployee,
++  exportEmployees,
++  getEmployee,
++  listEmployees,
++  terminateEmployee,
++  updateEmployee,
++} from './service.ts';
+ 
+ // E1 (04 section 5.4).
+@@ -21,4 +36,58 @@ export function employeeRoutes(app: FastifyInstance, deps: { db: Db; clock: Cloc
+   );
+ 
++  // E2 (04 section 5.4).
++  app.get(
++    '/api/employees/:id',
++    { onRequest: requires('employee.read'), schema: { params: employeeIdParamsSchema } },
++    async (request): Promise<EmployeeDetail> =>
++      getEmployee(deps.db, (request.params as { id: number }).id),
++  );
++
++  // E3 (04 section 5.4).
++  app.post(
++    '/api/employees',
++    { onRequest: requires('employee.write'), schema: { body: createEmployeeBodySchema } },
++    async (request, reply): Promise<EmployeeDetail> => {
++      const created = await createEmployee(deps.db, request.body as CreateEmployeeBody, {
++        today: deps.clock.today(),
++        now: deps.clock.now().toISOString(),
++        userId: request.viewer!.id,
++      });
++      return reply.code(201).header('Location', `/api/employees/${created.id}`).send(created);
++    },
++  );
++
++  // E4 (04 section 5.4).
++  app.patch(
++    '/api/employees/:id',
++    {
++      onRequest: requires('employee.write'),
++      schema: { params: employeeIdParamsSchema, body: updateEmployeeBodySchema },
++    },
++    async (request): Promise<EmployeeDetail> =>
++      updateEmployee(
++        deps.db,
++        (request.params as { id: number }).id,
++        request.body as UpdateEmployeeBody,
++        deps.clock.now().toISOString(),
++      ),
++  );
++
++  // E5 (04 section 5.4).
++  app.post(
++    '/api/employees/:id/termination',
++    {
++      onRequest: requires('employee.write'),
++      schema: { params: employeeIdParamsSchema, body: terminateBodySchema },
++    },
++    async (request): Promise<EmployeeDetail> =>
++      terminateEmployee(
++        deps.db,
++        (request.params as { id: number }).id,
++        request.body as TerminateBody,
++        { today: deps.clock.today(), now: deps.clock.now().toISOString() },
++      ),
++  );
++
+   // X1 (04 section 5.7).
+   app.get(
+diff --git a/apps/api/src/modules/employees/service.ts b/apps/api/src/modules/employees/service.ts
+index 814d70d..ff54cb2 100644
+--- a/apps/api/src/modules/employees/service.ts
++++ b/apps/api/src/modules/employees/service.ts
+@@ -1,8 +1,12 @@
+ import {
+   compaRatio,
++  type CreateEmployeeBody,
++  type EmployeeDetail,
+   type EmployeeExportQuery,
+   type EmployeeListItem,
+   type EmployeeListQuery,
+   type EmployeeListResponse,
++  type TerminateBody,
++  type UpdateEmployeeBody,
+ } from '@acme/shared';
+ import {
+@@ -17,4 +21,5 @@ import {
+   lt,
+   lte,
++  max,
+   or,
+   sql,
+@@ -34,5 +39,7 @@ import {
+   levels,
+   payBands,
++  salaryChanges,
+ } from '../../db/schema.ts';
++import { nameSearch } from '../../domain/name-search.ts';
+ import { parseSearch } from '../../domain/employee-search.ts';
+ import { AppError, type ProblemFieldError } from '../../http/problem.ts';
+@@ -152,11 +159,9 @@ const bandJoin = and(
+ );
+ 
+-// Rows in the query's sort order; a limit pages them, no limit returns all of them.
+-async function selectItems(
+-  db: Db,
+-  query: EmployeeListQuery,
+-  paging?: { limit: number; offset: number },
+-): Promise<EmployeeListItem[]> {
+-  const select = db
++type EmployeeRow = Awaited<ReturnType<typeof selectEmployeeRows>>[number];
++
++// An employee with everything its list item and detail need, before any filter.
++function selectEmployeeRows(db: Db) {
++  return db
+     .select({
+       employee: employees,
+@@ -174,36 +179,52 @@ async function selectItems(
+     .innerJoin(levels, eq(levels.code, employees.levelCode))
+     .innerJoin(fxRates, eq(fxRates.currencyCode, employees.salaryCurrency))
+-    .innerJoin(payBands, bandJoin)
++    .innerJoin(payBands, bandJoin);
++}
++
++// The fields the list and the detail share.
++function toListItem({
++  employee: e,
++  country,
++  jobTitle,
++  department,
++  level,
++  band,
++  salaryUsdMinor,
++}: EmployeeRow): EmployeeListItem {
++  return {
++    id: e.id,
++    employeeCode: e.employeeCode,
++    firstName: e.firstName,
++    lastName: e.lastName,
++    gender: e.gender,
++    country: { code: country.code, name: country.name },
++    department: { id: department.id, name: department.name },
++    jobTitle: { id: jobTitle.id, name: jobTitle.name },
++    level: { code: level.code, name: level.name },
++    status: e.status,
++    hireDate: e.hireDate,
++    terminationDate: e.terminationDate,
++    salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
++    salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
++    salaryEffectiveDate: e.salaryEffectiveDate,
++    compaRatio: compaRatio(e.salaryMinor, band.midMinor),
++    // Equal to min or max is inside (02 section 4).
++    bandPosition:
++      e.salaryMinor < band.minMinor ? 'below' : e.salaryMinor > band.maxMinor ? 'above' : 'inside',
++  };
++}
++
++// Rows in the query's sort order; a limit pages them, no limit returns all of them.
++async function selectItems(
++  db: Db,
++  query: EmployeeListQuery,
++  paging?: { limit: number; offset: number },
++): Promise<EmployeeListItem[]> {
++  const select = selectEmployeeRows(db)
+     .where(filterConditions(db, query))
+     .orderBy(...orderBy(query))
+     .$dynamic();
+   const rows = await (paging ? select.limit(paging.limit).offset(paging.offset) : select);
+-  return rows.map(
+-    ({ employee: e, country, jobTitle, department, level, band, salaryUsdMinor }) => ({
+-      id: e.id,
+-      employeeCode: e.employeeCode,
+-      firstName: e.firstName,
+-      lastName: e.lastName,
+-      gender: e.gender,
+-      country: { code: country.code, name: country.name },
+-      department: { id: department.id, name: department.name },
+-      jobTitle: { id: jobTitle.id, name: jobTitle.name },
+-      level: { code: level.code, name: level.name },
+-      status: e.status,
+-      hireDate: e.hireDate,
+-      terminationDate: e.terminationDate,
+-      salary: { amountMinor: e.salaryMinor, currency: e.salaryCurrency },
+-      salaryUsd: { amountMinor: salaryUsdMinor, currency: 'USD' },
+-      salaryEffectiveDate: e.salaryEffectiveDate,
+-      compaRatio: compaRatio(e.salaryMinor, band.midMinor),
+-      // Equal to min or max is inside (02 section 4).
+-      bandPosition:
+-        e.salaryMinor < band.minMinor
+-          ? 'below'
+-          : e.salaryMinor > band.maxMinor
+-            ? 'above'
+-            : 'inside',
+-    }),
+-  );
++  return rows.map(toListItem);
+ }
+ 
+@@ -235,2 +256,161 @@ export async function exportEmployees(db: Db, query: EmployeeExportQuery): Promi
+   return buildEmployeesCsv(items, asOf);
+ }
++
++// E2 (04 section 5.4): one employee with its pay band.
++export async function getEmployee(db: Db, id: number): Promise<EmployeeDetail> {
++  const [row] = await selectEmployeeRows(db).where(eq(employees.id, id));
++  if (!row) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
++  const { employee: e, band } = row;
++  const money = (amountMinor: number) => ({ amountMinor, currency: e.salaryCurrency });
++  return {
++    ...toListItem(row),
++    band: { min: money(band.minMinor), mid: money(band.midMinor), max: money(band.maxMinor) },
++    createdAt: e.createdAt,
++    updatedAt: e.updatedAt,
++  };
++}
++
++// E3 rules, in the order 04 section 5.4 lists them. An unknown country, title or level has no
++// band, so it ends as NO_PAY_BAND. A starting salary outside the band is allowed.
++async function checkCreateRules(db: Db, body: CreateEmployeeBody, today: string): Promise<void> {
++  if (body.hireDate > today) {
++    throw new AppError(422, 'DATE_IN_FUTURE', "Hire date can't be in the future.");
++  }
++  const [band] = await db
++    .select({ currency: payBands.currencyCode })
++    .from(payBands)
++    .where(
++      and(
++        eq(payBands.countryCode, body.countryCode),
++        eq(payBands.jobTitleId, body.jobTitleId),
++        eq(payBands.levelCode, body.levelCode),
++      ),
++    );
++  const [country] = await db
++    .select({ currency: countries.currencyCode })
++    .from(countries)
++    .where(eq(countries.code, body.countryCode));
++  if (country && country.currency !== body.startingSalary.currency) {
++    throw new AppError(
++      422,
++      'SALARY_CURRENCY_MISMATCH',
++      `Salary must be in ${country.currency} for this country.`,
++    );
++  }
++  if (!band) {
++    throw new AppError(
++      422,
++      'NO_PAY_BAND',
++      "There's no pay band for this country, job title and level.",
++    );
++  }
++}
++
++// E3 (04 section 5.4): one write transaction inserts the employee and its hire history row.
++export async function createEmployee(
++  db: Db,
++  body: CreateEmployeeBody,
++  context: { today: string; now: string; userId: number },
++): Promise<EmployeeDetail> {
++  const { startingSalary: salary } = body;
++  await checkCreateRules(db, body, context.today);
++  const id = await db.transaction(async (tx) => {
++    const [maxes] = await tx
++      .select({
++        employee: max(employees.id),
++        change: sql<number>`(SELECT max(id) FROM ${salaryChanges})`,
++      })
++      .from(employees);
++    const id = (maxes?.employee ?? 0) + 1;
++    await tx.insert(employees).values({
++      id,
++      employeeCode: `E${String(id).padStart(6, '0')}`,
++      firstName: body.firstName,
++      lastName: body.lastName,
++      nameSearch: nameSearch(body.firstName, body.lastName),
++      gender: body.gender,
++      countryCode: body.countryCode,
++      jobTitleId: body.jobTitleId,
++      levelCode: body.levelCode,
++      hireDate: body.hireDate,
++      status: 'active',
++      terminationDate: null,
++      salaryMinor: salary.amountMinor,
++      salaryCurrency: salary.currency,
++      salaryEffectiveDate: body.hireDate,
++      createdAt: context.now,
++      updatedAt: context.now,
++    });
++    await tx.insert(salaryChanges).values({
++      id: (maxes?.change ?? 0) + 1,
++      employeeId: id,
++      effectiveDate: body.hireDate,
++      amountMinor: salary.amountMinor,
++      currencyCode: salary.currency,
++      jobTitleId: body.jobTitleId,
++      levelCode: body.levelCode,
++      reason: 'hire',
++      changedByUserId: context.userId,
++      createdAt: context.now,
++    });
++    return id;
++  });
++  return getEmployee(db, id);
++}
++
++// E4 (04 section 5.4): names and gender only; allowed on terminated employees.
++export async function updateEmployee(
++  db: Db,
++  id: number,
++  body: UpdateEmployeeBody,
++  now: string,
++): Promise<EmployeeDetail> {
++  const [current] = await db.select().from(employees).where(eq(employees.id, id));
++  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
++  const firstName = body.firstName ?? current.firstName;
++  const lastName = body.lastName ?? current.lastName;
++  await db
++    .update(employees)
++    .set({
++      firstName,
++      lastName,
++      gender: body.gender ?? current.gender,
++      nameSearch: nameSearch(firstName, lastName),
++      updatedAt: now,
++    })
++    .where(eq(employees.id, id));
++  return getEmployee(db, id);
++}
++
++// E5 (04 section 5.4): the employee leaves current lists; the record and history stay.
++export async function terminateEmployee(
++  db: Db,
++  id: number,
++  body: TerminateBody,
++  context: { today: string; now: string },
++): Promise<EmployeeDetail> {
++  const [current] = await db.select().from(employees).where(eq(employees.id, id));
++  if (!current) throw new AppError(404, 'EMPLOYEE_NOT_FOUND', 'Employee not found.');
++  if (current.status === 'terminated') {
++    throw new AppError(
++      422,
++      'EMPLOYEE_ALREADY_TERMINATED',
++      `${current.firstName} ${current.lastName} is already terminated.`,
++    );
++  }
++  if (body.terminationDate > context.today) {
++    throw new AppError(422, 'DATE_IN_FUTURE', "Termination date can't be in the future.");
++  }
++  if (body.terminationDate < current.hireDate) {
++    throw new AppError(
++      422,
++      'TERMINATION_BEFORE_HIRE',
++      "Termination date can't be before the hire date.",
++    );
++  }
++  await db
++    .update(employees)
++    .set({ status: 'terminated', terminationDate: body.terminationDate, updatedAt: context.now })
++    .where(eq(employees.id, id));
++  return getEmployee(db, id);
++}
+diff --git a/apps/api/src/modules/reference/routes.test.ts b/apps/api/src/modules/reference/routes.test.ts
+index 5720c57..f618c72 100644
+--- a/apps/api/src/modules/reference/routes.test.ts
++++ b/apps/api/src/modules/reference/routes.test.ts
+@@ -4,4 +4,5 @@ import { afterEach, describe, expect, it } from 'vitest';
+ import { loggedInAs } from '../../../test/builders/index.ts';
+ import { testApp, testDb } from '../../../test/helpers.ts';
++import { generateBands, SOFTWARE_ENGINEER } from '../../seed/reference.ts';
+ 
+ describe('GET /api/reference (R1)', () => {
+@@ -83,2 +84,47 @@ describe('GET /api/reference (R1)', () => {
+   });
+ });
++
++describe('GET /api/pay-bands/:countryCode/:jobTitleId/:levelCode (R2)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function getBand(path: string, role: 'hr_admin' | 'hr_viewer' | 'finance' = 'finance') {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, role);
++    app = testApp({ db });
++    return app.inject({ method: 'GET', url: `/api/pay-bands/${path}`, headers: { cookie } });
++  }
++
++  it('returns the pay band for a country, job title and level', async () => {
++    const band = generateBands().find(
++      (b) => b.countryCode === 'IN' && b.jobTitleId === SOFTWARE_ENGINEER && b.levelCode === 'L3',
++    )!;
++
++    const response = await getBand(`IN/${SOFTWARE_ENGINEER}/L3`);
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toEqual({
++      countryCode: 'IN',
++      jobTitleId: SOFTWARE_ENGINEER,
++      levelCode: 'L3',
++      min: { amountMinor: band.minMinor, currency: 'INR' },
++      mid: { amountMinor: band.midMinor, currency: 'INR' },
++      max: { amountMinor: band.maxMinor, currency: 'INR' },
++    });
++  });
++
++  it('returns 404 PAY_BAND_NOT_FOUND for a combination with no band and 400 for bad params', async () => {
++    const missing = await getBand(`IN/${SOFTWARE_ENGINEER + 1000}/L3`);
++    const badTitle = await getBand('IN/abc/L3');
++    const badLevel = await getBand(`IN/${SOFTWARE_ENGINEER}/L9`);
++
++    expect(missing.statusCode).toBe(404);
++    expect(missing.json()).toMatchObject({ code: 'PAY_BAND_NOT_FOUND' });
++    expect(badTitle.statusCode).toBe(400);
++    expect(badLevel.statusCode).toBe(400);
++  });
++});
+diff --git a/apps/api/src/modules/reference/routes.ts b/apps/api/src/modules/reference/routes.ts
+index 36555f9..2f28023 100644
+--- a/apps/api/src/modules/reference/routes.ts
++++ b/apps/api/src/modules/reference/routes.ts
+@@ -1,9 +1,18 @@
+-import type { ReferenceResponse } from '@acme/shared';
+-import { asc } from 'drizzle-orm';
++import { payBandParamsSchema, type PayBandResponse, type ReferenceResponse } from '@acme/shared';
++import { and, asc, eq } from 'drizzle-orm';
+ import type { FastifyInstance } from 'fastify';
+ import type { Db } from '../../db/client.ts';
+-import { countries, departments, fxRates, jobTitles, levels } from '../../db/schema.ts';
++import {
++  type LevelCode,
++  countries,
++  departments,
++  fxRates,
++  jobTitles,
++  levels,
++  payBands,
++} from '../../db/schema.ts';
+ import { GENDERS } from '../../domain/genders.ts';
+ import { requires } from '../../http/guard.ts';
++import { AppError } from '../../http/problem.ts';
+ import { fxAsOf } from '../auth/sessions.ts';
+ 
+@@ -55,3 +64,42 @@ export function referenceRoutes(app: FastifyInstance, deps: { db: Db }) {
+     },
+   );
++
++  // R2 (04 section 5.3).
++  app.get(
++    '/api/pay-bands/:countryCode/:jobTitleId/:levelCode',
++    { onRequest: requires('reference.read'), schema: { params: payBandParamsSchema } },
++    async (request): Promise<PayBandResponse> => {
++      const { countryCode, jobTitleId, levelCode } = request.params as {
++        countryCode: string;
++        jobTitleId: number;
++        levelCode: LevelCode;
++      };
++      const [band] = await deps.db
++        .select()
++        .from(payBands)
++        .where(
++          and(
++            eq(payBands.countryCode, countryCode),
++            eq(payBands.jobTitleId, jobTitleId),
++            eq(payBands.levelCode, levelCode),
++          ),
++        );
++      if (!band) {
++        throw new AppError(
++          404,
++          'PAY_BAND_NOT_FOUND',
++          "There's no pay band for this country, job title and level.",
++        );
++      }
++      const money = (amountMinor: number) => ({ amountMinor, currency: band.currencyCode });
++      return {
++        countryCode,
++        jobTitleId,
++        levelCode,
++        min: money(band.minMinor),
++        mid: money(band.midMinor),
++        max: money(band.maxMinor),
++      };
++    },
++  );
+ }
+diff --git a/apps/web/src/AppRoutes.tsx b/apps/web/src/AppRoutes.tsx
+index a32a5aa..772dfdd 100644
+--- a/apps/web/src/AppRoutes.tsx
++++ b/apps/web/src/AppRoutes.tsx
+@@ -5,4 +5,6 @@ import { PlaceholderPage } from './components/PlaceholderPage.tsx';
+ import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
+ import { Shell, useViewer } from './components/Shell.tsx';
++import { EmployeeDetailPage } from './features/employees/EmployeeDetailPage.tsx';
++import { NewEmployeePage } from './features/employees/NewEmployeePage.tsx';
+ import { EmployeeListPage } from './features/employees/EmployeeListPage.tsx';
+ import { LoginPage } from './features/auth/LoginPage.tsx';
+@@ -11,5 +13,9 @@ import { ROUTES } from './routes.ts';
+ 
+ // Screens built so far, by path; every other route shows a placeholder.
+-const SCREENS: Record<string, ComponentType> = { '/employees': EmployeeListPage };
++const SCREENS: Record<string, ComponentType> = {
++  '/employees': EmployeeListPage,
++  '/employees/new': NewEmployeePage,
++  '/employees/:id': EmployeeDetailPage,
++};
+ 
+ function Gated({
+diff --git a/apps/web/src/components/Shell.tsx b/apps/web/src/components/Shell.tsx
+index a2a8591..7409e7b 100644
+--- a/apps/web/src/components/Shell.tsx
++++ b/apps/web/src/components/Shell.tsx
+@@ -25,4 +25,5 @@ import {
+ import { onUnauthenticated } from '../api/client.ts';
+ import { ME_KEY, useLogout, useMe } from '../features/auth/useSession.ts';
++import { ToastProvider } from './Toasts.tsx';
+ 
+ const NAV: { to: string; label: string; action: Action }[] = [
+@@ -154,5 +155,7 @@ export function Shell(): ReactElement {
+       </AppShell.Header>
+       <AppShell.Main>
+-        <Outlet context={me.data} />
++        <ToastProvider>
++          <Outlet context={me.data} />
++        </ToastProvider>
+       </AppShell.Main>
+     </AppShell>
+diff --git a/apps/web/src/components/Toasts.tsx b/apps/web/src/components/Toasts.tsx
+new file mode 100644
+index 0000000..d04373a
+--- /dev/null
++++ b/apps/web/src/components/Toasts.tsx
+@@ -0,0 +1,61 @@
++import { Alert, Stack } from '@mantine/core';
++import {
++  createContext,
++  useCallback,
++  useContext,
++  useEffect,
++  useRef,
++  useMemo,
++  useState,
++  type ReactElement,
++  type ReactNode,
++} from 'react';
++import { useLocation, useNavigate } from 'react-router';
++
++type Toast = { id: number; message: string };
++
++const ToastContext = createContext<(message: string) => void>(() => {});
++
++/** Shows `message` for a few seconds; screens call it instead of a toast library (no dependency). */
++export const useToast = () => useContext(ToastContext);
++
++const DURATION_MS = 5000;
++let nextId = 1;
++
++export function ToastProvider({ children }: { children: ReactNode }): ReactElement {
++  const [toasts, setToasts] = useState<Toast[]>([]);
++  const show = useCallback((message: string) => {
++    const id = nextId++;
++    setToasts((current) => [...current, { id, message }]);
++    setTimeout(
++      () => setToasts((current) => current.filter((toast) => toast.id !== id)),
++      DURATION_MS,
++    );
++  }, []);
++  const value = useMemo(() => show, [show]);
++
++  // A toast sent with a navigation (`navigate(path, { state: { toast } })`) shows once the new
++  // page is in place, then leaves the history entry clean.
++  const location = useLocation();
++  const navigate = useNavigate();
++  const shownFor = useRef<string>(undefined);
++  useEffect(() => {
++    const message = (location.state as { toast?: string } | null)?.toast;
++    if (!message || shownFor.current === location.key) return;
++    shownFor.current = location.key;
++    show(message);
++    void navigate(location.pathname + location.search, { replace: true, state: null });
++  }, [location, navigate, show]);
++  return (
++    <ToastContext.Provider value={value}>
++      {children}
++      <Stack pos="fixed" bottom={16} right={16} style={{ zIndex: 1000 }} role="status">
++        {toasts.map((toast) => (
++          <Alert key={toast.id} color="green" withCloseButton={false}>
++            {toast.message}
++          </Alert>
++        ))}
++      </Stack>
++    </ToastContext.Provider>
++  );
++}
+diff --git a/apps/web/src/features/employees/EditEmployeeModal.tsx b/apps/web/src/features/employees/EditEmployeeModal.tsx
+new file mode 100644
+index 0000000..aa7e6cf
+--- /dev/null
++++ b/apps/web/src/features/employees/EditEmployeeModal.tsx
+@@ -0,0 +1,136 @@
++import {
++  employeeDetailSchema,
++  updateEmployeeBodySchema,
++  type EmployeeDetail,
++  type UpdateEmployeeBody,
++} from '@acme/shared';
++import { Alert, Button, Group, Modal, Select, Stack, Text, TextInput } from '@mantine/core';
++import { useMutation, useQueryClient } from '@tanstack/react-query';
++import { useState, type FormEvent, type ReactElement } from 'react';
++import { ApiError, apiFetch } from '../../api/client.ts';
++import { useToast } from '../../components/Toasts.tsx';
++import { useReference } from './useReference.ts';
++
++const FIELDS = ['firstName', 'lastName', 'gender'] as const;
++type Field = (typeof FIELDS)[number];
++type Errors = Partial<Record<Field, string>>;
++
++const fieldOf = (path: string): Field | undefined =>
++  FIELDS.find((field) => field === path.split('.')[0]);
++
++type Props = { employee: EmployeeDetail; opened: boolean; onClose: () => void };
++
++function EditForm({ employee, onClose }: Omit<Props, 'opened'>): ReactElement {
++  const queryClient = useQueryClient();
++  const toast = useToast();
++  const reference = useReference().data;
++  const [values, setValues] = useState<Record<Field, string>>({
++    firstName: employee.firstName,
++    lastName: employee.lastName,
++    gender: employee.gender,
++  });
++  const [errors, setErrors] = useState<Errors>({});
++  const [formError, setFormError] = useState<string>();
++
++  const changed = Object.fromEntries(
++    FIELDS.filter((f) => values[f] !== employee[f]).map((f) => [f, values[f]]),
++  );
++  const dirty = Object.keys(changed).length > 0;
++
++  const save = useMutation({
++    mutationFn: (body: UpdateEmployeeBody) =>
++      apiFetch(`/api/employees/${employee.id}`, {
++        method: 'PATCH',
++        body,
++        schema: employeeDetailSchema,
++      }),
++    onSuccess: (updated) => {
++      queryClient.setQueryData(['employee', String(employee.id)], updated);
++      void queryClient.invalidateQueries({ queryKey: ['employees'] });
++      toast('Details updated.');
++      onClose();
++    },
++    onError: (error) => {
++      if (error instanceof ApiError && error.code === 'VALIDATION_FAILED') {
++        const byField: Errors = {};
++        const unmatched: string[] = [];
++        for (const { path, message } of error.errors) {
++          const field = fieldOf(path);
++          if (field) byField[field] ??= message;
++          else unmatched.push(message);
++        }
++        setErrors(byField);
++        setFormError(unmatched[0]);
++      } else {
++        setFormError(error.message);
++      }
++    },
++  });
++
++  const onSubmit = (event: FormEvent) => {
++    event.preventDefault();
++    setErrors({});
++    setFormError(undefined);
++    const parsed = updateEmployeeBodySchema.safeParse(changed);
++    if (!parsed.success) {
++      const found: Errors = {};
++      for (const issue of parsed.error.issues) {
++        const field = fieldOf(issue.path.join('.'));
++        if (field) found[field] ??= issue.message;
++      }
++      return setErrors(found);
++    }
++    save.mutate(parsed.data);
++  };
++
++  const set = (field: Field) => (value: string | null) =>
++    setValues((current) => ({ ...current, [field]: value ?? '' }));
++
++  return (
++    <form onSubmit={onSubmit} noValidate>
++      <Stack>
++        {formError && <Alert color="red">{formError}</Alert>}
++        <TextInput
++          label="First name"
++          value={values.firstName}
++          onChange={(event) => set('firstName')(event.currentTarget.value)}
++          error={errors.firstName}
++        />
++        <TextInput
++          label="Last name"
++          value={values.lastName}
++          onChange={(event) => set('lastName')(event.currentTarget.value)}
++          error={errors.lastName}
++        />
++        <Select
++          label="Gender"
++          data={reference?.genders.map((g) => ({ value: g.code, label: g.name })) ?? []}
++          value={values.gender}
++          onChange={set('gender')}
++          error={errors.gender}
++          allowDeselect={false}
++        />
++        <Text size="sm" c="dimmed">
++          Change title or level by recording a salary change.
++        </Text>
++        <Group justify="flex-end">
++          <Button variant="default" onClick={onClose}>
++            Cancel
++          </Button>
++          <Button type="submit" disabled={!dirty} loading={save.isPending}>
++            Save
++          </Button>
++        </Group>
++      </Stack>
++    </form>
++  );
++}
++
++/** S-5 (04 section 8.5): name and gender; title, level and country are read-only. */
++export function EditEmployeeModal({ employee, opened, onClose }: Props): ReactElement {
++  return (
++    <Modal opened={opened} onClose={onClose} title="Edit details">
++      <EditForm employee={employee} onClose={onClose} />
++    </Modal>
++  );
++}
+diff --git a/apps/web/src/features/employees/EmployeeDetailPage.test.tsx b/apps/web/src/features/employees/EmployeeDetailPage.test.tsx
+new file mode 100644
+index 0000000..21e5b01
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeDetailPage.test.tsx
+@@ -0,0 +1,132 @@
++import type { Role } from '@acme/shared';
++import { screen, within } from '@testing-library/react';
++import { delay, http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const loggedInAs = (role: Role) =>
++  server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))));
++
++const servesEmployee = (employee = anEmployeeDetail()) =>
++  server.use(http.get('/api/employees/4217', () => HttpResponse.json(employee)));
++
++const renderDetail = () => render(<AppRoutes />, { route: '/employees/4217' });
++
++describe('employee detail page (04 section 8.5 S-3)', () => {
++  it('shows the header, salary card with band bar and compa-ratio, and details card', async () => {
++    loggedInAs('hr_viewer');
++    server.use(
++      http.get('/api/employees/4217', async () => {
++        await delay(50);
++        return HttpResponse.json(anEmployeeDetail());
++      }),
++    );
++    renderDetail();
++
++    expect(await screen.findByLabelText('Loading employee')).toBeVisible();
++    expect(await screen.findByRole('heading', { level: 1, name: 'Priya Nair' })).toBeVisible();
++    expect(screen.getByText('E004217')).toBeVisible();
++    expect(screen.getByText('Active')).toBeVisible();
++    expect(screen.getByText('Software Engineer, L3 Senior, India')).toBeVisible();
++    expect(screen.getByText('Hired 12 Jul 2021')).toBeVisible();
++
++    const salary = screen.getByRole('region', { name: 'Salary' });
++    expect(within(salary).getByText('INR 19,80,000')).toBeVisible();
++    expect(within(salary).getByText('USD 22,770')).toBeVisible();
++    expect(within(salary).getByText('Effective 1 Apr 2026')).toBeVisible();
++    const band = within(salary).getByRole('group', { name: 'Pay band' });
++    expect(within(band).getByText('INR 16,00,000')).toBeVisible();
++    expect(within(band).getByText('INR 20,40,000')).toBeVisible();
++    expect(within(band).getByText('INR 25,00,000')).toBeVisible();
++    expect(within(salary).getByText('Compa-ratio 0.97')).toBeVisible();
++    expect(within(salary).queryByText(/(below|above) band/i)).toBeNull();
++
++    const details = screen.getByRole('region', { name: 'Details' });
++    expect(within(details).getByText('Priya')).toBeVisible();
++    expect(within(details).getByText('Nair')).toBeVisible();
++    expect(within(details).getByText('Female')).toBeVisible();
++    expect(within(details).getByText('India')).toBeVisible();
++    expect(within(details).getByText('Engineering')).toBeVisible();
++  });
++
++  it('says "Below band" outside the band', async () => {
++    loggedInAs('hr_viewer');
++    servesEmployee(anEmployeeDetail({ bandPosition: 'below', compaRatio: 0.7 }));
++    renderDetail();
++
++    const salary = await screen.findByRole('region', { name: 'Salary' });
++    expect(within(salary).getByText('Below band')).toBeVisible();
++  });
++
++  it('shows Edit details and Terminate to HR Admin and no actions to HR Viewer', async () => {
++    loggedInAs('hr_admin');
++    servesEmployee();
++    const admin = renderDetail();
++
++    expect(await screen.findByRole('button', { name: 'Edit details' })).toBeVisible();
++    expect(screen.getByRole('button', { name: 'Terminate' })).toBeVisible();
++    expect(screen.queryByRole('button', { name: /salary change/i })).toBeNull();
++    admin.unmount();
++
++    loggedInAs('hr_viewer');
++    renderDetail();
++    await screen.findByRole('heading', { level: 1, name: 'Priya Nair' });
++    expect(screen.queryByRole('button', { name: 'Edit details' })).toBeNull();
++    expect(screen.queryByRole('button', { name: 'Terminate' })).toBeNull();
++  });
++
++  it('shows "Employee not found." for an unknown id', async () => {
++    loggedInAs('hr_admin');
++    server.use(
++      http.get('/api/employees/4217', () =>
++        HttpResponse.json(aProblem({ status: 404, code: 'EMPLOYEE_NOT_FOUND' }), {
++          status: 404,
++          headers: { 'content-type': 'application/problem+json' },
++        }),
++      ),
++    );
++    renderDetail();
++
++    expect(await screen.findByText('Employee not found.')).toBeVisible();
++    expect(screen.getByRole('link', { name: 'Back to employees' })).toHaveAttribute(
++      'href',
++      '/employees',
++    );
++  });
++
++  it('shows the error alert with "Retry" on a 500 problem', async () => {
++    loggedInAs('hr_admin');
++    server.use(
++      http.get('/api/employees/4217', () =>
++        HttpResponse.json(
++          aProblem({ status: 500, code: 'INTERNAL', detail: 'The server hit a snag.' }),
++          { status: 500, headers: { 'content-type': 'application/problem+json' } },
++        ),
++      ),
++    );
++    renderDetail();
++
++    expect(await screen.findByText('The server hit a snag.')).toBeVisible();
++    expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible();
++  });
++
++  it('a terminated employee\'s page shows the banner and only "Edit details"', async () => {
++    loggedInAs('hr_admin');
++    servesEmployee(anEmployeeDetail({ status: 'terminated', terminationDate: '2026-10-09' }));
++    renderDetail();
++
++    expect(
++      await screen.findByText(
++        'Terminated on 9 Oct 2026. Excluded from current insights. History is kept.',
++      ),
++    ).toBeVisible();
++    expect(screen.getByText('Terminated')).toBeVisible();
++    expect(screen.getByRole('button', { name: 'Edit details' })).toBeVisible();
++    expect(screen.queryByRole('button', { name: 'Terminate' })).toBeNull();
++  });
++});
+diff --git a/apps/web/src/features/employees/EmployeeDetailPage.tsx b/apps/web/src/features/employees/EmployeeDetailPage.tsx
+new file mode 100644
+index 0000000..2161616
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeDetailPage.tsx
+@@ -0,0 +1,184 @@
++import { employeeDetailSchema, type EmployeeDetail } from '@acme/shared';
++import { Alert, Badge, Button, Group, Paper, Skeleton, Stack, Text, Title } from '@mantine/core';
++import { useQuery } from '@tanstack/react-query';
++import { useState, type ReactElement } from 'react';
++import { Link, useParams } from 'react-router';
++import { ApiError, apiFetch } from '../../api/client.ts';
++import { Money } from '../../components/Money.tsx';
++import { useViewer } from '../../components/Shell.tsx';
++import { formatCompaRatio, formatDate } from '../../format.ts';
++import { EditEmployeeModal } from './EditEmployeeModal.tsx';
++import { TerminateModal } from './TerminateModal.tsx';
++
++const BAND_TEXT = { below: 'Below band', above: 'Above band' } as const;
++const GENDERS = {
++  female: 'Female',
++  male: 'Male',
++  non_binary: 'Non-binary',
++  not_disclosed: 'Not disclosed',
++} as const;
++
++function Card({ title, children }: { title: string; children: ReactElement | ReactElement[] }) {
++  const id = `card-${title.toLowerCase()}`;
++  return (
++    <Paper component="section" aria-labelledby={id} withBorder p="md">
++      <Stack>
++        <Title order={2} size="h4" id={id}>
++          {title}
++        </Title>
++        {children}
++      </Stack>
++    </Paper>
++  );
++}
++
++function Field({ label, value }: { label: string; value: string }): ReactElement {
++  return (
++    <div>
++      <Text size="xs" c="dimmed">
++        {label}
++      </Text>
++      <Text>{value}</Text>
++    </div>
++  );
++}
++
++function SalaryCard({ employee }: { employee: EmployeeDetail }): ReactElement {
++  const { band, bandPosition } = employee;
++  return (
++    <Card title="Salary">
++      <Group align="baseline">
++        <Money value={employee.salary} size="xl" fw={600} />
++        <Money value={employee.salaryUsd} c="dimmed" />
++      </Group>
++      <Text size="sm">{`Effective ${formatDate(employee.salaryEffectiveDate)}`}</Text>
++      <Group role="group" aria-label="Pay band" justify="space-between">
++        {(['min', 'mid', 'max'] as const).map((point) => (
++          <div key={point}>
++            <Text size="xs" c="dimmed" tt="capitalize">
++              {point}
++            </Text>
++            <Money value={band[point]} />
++          </div>
++        ))}
++      </Group>
++      <Group>
++        <Text>{`Compa-ratio ${formatCompaRatio(employee.compaRatio)}`}</Text>
++        {bandPosition !== 'inside' && (
++          <Badge color={bandPosition === 'below' ? 'orange' : 'blue'} variant="light">
++            {BAND_TEXT[bandPosition]}
++          </Badge>
++        )}
++      </Group>
++    </Card>
++  );
++}
++
++function DetailsCard({ employee }: { employee: EmployeeDetail }): ReactElement {
++  return (
++    <Card title="Details">
++      <Field label="First name" value={employee.firstName} />
++      <Field label="Last name" value={employee.lastName} />
++      <Field label="Gender" value={GENDERS[employee.gender]} />
++      <Field label="Country" value={employee.country.name} />
++      <Field label="Department" value={employee.department.name} />
++    </Card>
++  );
++}
++
++/** S-3 (04 section 8.5): one employee, with actions for HR Admin. */
++export function EmployeeDetailPage(): ReactElement {
++  const me = useViewer();
++  const { id } = useParams();
++  const [modal, setModal] = useState<'edit' | 'terminate'>();
++  const employee = useQuery({
++    queryKey: ['employee', id],
++    queryFn: () => apiFetch(`/api/employees/${id}`, { schema: employeeDetailSchema }),
++  });
++
++  if (employee.isError) {
++    const notFound =
++      employee.error instanceof ApiError && employee.error.code === 'EMPLOYEE_NOT_FOUND';
++    return notFound ? (
++      <Stack align="flex-start">
++        <Text>Employee not found.</Text>
++        <Button component={Link} to="/employees" variant="light">
++          Back to employees
++        </Button>
++      </Stack>
++    ) : (
++      <Alert color="red">
++        <Group justify="space-between">
++          <Text>{employee.error.message}</Text>
++          <Button variant="light" onClick={() => void employee.refetch()}>
++            Retry
++          </Button>
++        </Group>
++      </Alert>
++    );
++  }
++
++  if (!employee.data) {
++    return (
++      <Stack aria-label="Loading employee">
++        <Skeleton height={32} width="40%" />
++        <Skeleton height={160} />
++        <Skeleton height={200} />
++      </Stack>
++    );
++  }
++
++  const data = employee.data;
++  const terminated = data.status === 'terminated';
++  const canWrite = me.permissions.includes('employee.write');
++  return (
++    <Stack>
++      <Group justify="space-between" align="flex-start">
++        <Stack gap={4}>
++          <Group>
++            <Title order={1}>{`${data.firstName} ${data.lastName}`}</Title>
++            <Badge color={terminated ? 'gray' : 'green'} variant="light">
++              {terminated ? 'Terminated' : 'Active'}
++            </Badge>
++          </Group>
++          <Text c="dimmed">{data.employeeCode}</Text>
++          <Text>{`${data.jobTitle.name}, ${data.level.code} ${data.level.name}, ${data.country.name}`}</Text>
++          <Text>{`Hired ${formatDate(data.hireDate)}`}</Text>
++        </Stack>
++        {canWrite && (
++          <Group>
++            <Button variant="default" onClick={() => setModal('edit')}>
++              Edit details
++            </Button>
++            {!terminated && (
++              <Button color="red" onClick={() => setModal('terminate')}>
++                Terminate
++              </Button>
++            )}
++          </Group>
++        )}
++      </Group>
++      {terminated && data.terminationDate && (
++        <Alert color="gray">
++          {`Terminated on ${formatDate(data.terminationDate)}. Excluded from current insights. History is kept.`}
++        </Alert>
++      )}
++      <SalaryCard employee={data} />
++      <DetailsCard employee={data} />
++      {canWrite && (
++        <>
++          <EditEmployeeModal
++            employee={data}
++            opened={modal === 'edit'}
++            onClose={() => setModal(undefined)}
++          />
++          <TerminateModal
++            employee={data}
++            opened={modal === 'terminate'}
++            onClose={() => setModal(undefined)}
++          />
++        </>
++      )}
++    </Stack>
++  );
++}
+diff --git a/apps/web/src/features/employees/EmployeeListPage.tsx b/apps/web/src/features/employees/EmployeeListPage.tsx
+index 065ca35..725c8b3 100644
+--- a/apps/web/src/features/employees/EmployeeListPage.tsx
++++ b/apps/web/src/features/employees/EmployeeListPage.tsx
+@@ -19,5 +19,5 @@ import {
+ import { keepPreviousData, useQuery } from '@tanstack/react-query';
+ import { useState, type ReactElement } from 'react';
+-import { Link } from 'react-router';
++import { Link, useLocation } from 'react-router';
+ import { ApiError, apiDownload, apiFetch } from '../../api/client.ts';
+ import { FxAsOf } from '../../components/FxAsOf.tsx';
+@@ -116,4 +116,5 @@ export function EmployeeListPage(): ReactElement {
+   const showTable = !empty && (data !== undefined || !employees.isError);
+   const permissions = useViewer().permissions;
++  const { search } = useLocation();
+   const canAdd = permissions.includes('employee.write');
+   const canExport = permissions.includes('export.employees');
+@@ -143,5 +144,5 @@ export function EmployeeListPage(): ReactElement {
+   };
+   const addButton = (
+-    <Button component={Link} to="/employees/new">
++    <Button component={Link} to="/employees/new" state={{ from: search }}>
+       Add employee
+     </Button>
+diff --git a/apps/web/src/features/employees/EmployeeModals.test.tsx b/apps/web/src/features/employees/EmployeeModals.test.tsx
+new file mode 100644
+index 0000000..5c67e8e
+--- /dev/null
++++ b/apps/web/src/features/employees/EmployeeModals.test.tsx
+@@ -0,0 +1,166 @@
++import type { EmployeeDetail } from '@acme/shared';
++import { fireEvent, screen, waitFor, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const problem = (status: number, body: Parameters<typeof aProblem>[0]) =>
++  HttpResponse.json(aProblem(body), {
++    status,
++    headers: { 'content-type': 'application/problem+json' },
++  });
++
++/** Serves the employee and lets a write replace what the next GET returns. */
++function servesEmployee(initial: EmployeeDetail = anEmployeeDetail()) {
++  const state = { current: initial };
++  server.use(
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))),
++    http.get('/api/employees/4217', () => HttpResponse.json(state.current)),
++  );
++  return state;
++}
++
++const renderDetail = () => render(<AppRoutes />, { route: '/employees/4217' });
++
++const openEdit = async (user: ReturnType<typeof userEvent.setup>) => {
++  await user.click(await screen.findByRole('button', { name: 'Edit details' }));
++  return screen.findByRole('dialog', { name: 'Edit details' });
++};
++
++const openTerminate = async (user: ReturnType<typeof userEvent.setup>) => {
++  await user.click(await screen.findByRole('button', { name: 'Terminate' }));
++  return screen.findByRole('dialog', { name: 'Terminate employee' });
++};
++
++describe('edit details modal (04 section 8.5 S-5)', () => {
++  it('keeps Save disabled until a field changes', async () => {
++    servesEmployee();
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openEdit(user);
++    const save = within(dialog).getByRole('button', { name: 'Save' });
++    expect(within(dialog).getByLabelText('First name')).toHaveValue('Priya');
++    expect(within(dialog).getByLabelText('Last name')).toHaveValue('Nair');
++    expect(
++      within(dialog).getByText('Change title or level by recording a salary change.'),
++    ).toBeVisible();
++    expect(save).toBeDisabled();
++
++    await user.type(within(dialog).getByLabelText('Last name'), 'x');
++    expect(save).toBeEnabled();
++
++    await user.type(within(dialog).getByLabelText('Last name'), '{Backspace}');
++    expect(save).toBeDisabled();
++  });
++
++  it('saving the edit modal updates the page and shows "Details updated."', async () => {
++    const state = servesEmployee();
++    const bodies: unknown[] = [];
++    server.use(
++      http.patch('/api/employees/4217', async ({ request }) => {
++        bodies.push(await request.json());
++        state.current = anEmployeeDetail({ lastName: 'Rao' });
++        return HttpResponse.json(state.current);
++      }),
++    );
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openEdit(user);
++    const last = within(dialog).getByLabelText('Last name');
++    await user.clear(last);
++    await user.type(last, 'Rao');
++    await user.click(within(dialog).getByRole('button', { name: 'Save' }));
++
++    expect(await screen.findByRole('heading', { level: 1, name: 'Priya Rao' })).toBeVisible();
++    expect(await screen.findByText('Details updated.')).toBeVisible();
++    expect(bodies).toEqual([{ lastName: 'Rao' }]);
++    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
++  });
++});
++
++describe('terminate modal (04 section 8.5 S-7)', () => {
++  it('terminating from the modal shows the terminated banner', async () => {
++    const state = servesEmployee();
++    const bodies: unknown[] = [];
++    server.use(
++      http.post('/api/employees/4217/termination', async ({ request }) => {
++        bodies.push(await request.json());
++        state.current = anEmployeeDetail({ status: 'terminated', terminationDate: '2026-10-09' });
++        return HttpResponse.json(state.current);
++      }),
++    );
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openTerminate(user);
++    expect(
++      within(dialog).getByText(
++        "Terminating removes Priya Nair from current insights. Their record and salary history are kept. This can't be undone in this version.",
++      ),
++    ).toBeVisible();
++    const date = within(dialog).getByLabelText('Termination date');
++    expect(date).toHaveValue('2026-10-09');
++    expect(date).toHaveAttribute('max', '2026-10-09');
++    expect(date).toHaveAttribute('min', '2021-07-12');
++    await user.click(within(dialog).getByRole('button', { name: 'Terminate' }));
++
++    expect(
++      await screen.findByText(
++        'Terminated on 9 Oct 2026. Excluded from current insights. History is kept.',
++      ),
++    ).toBeVisible();
++    expect(bodies).toEqual([{ terminationDate: '2026-10-09' }]);
++    expect(screen.queryByRole('button', { name: 'Terminate' })).toBeNull();
++  });
++
++  it('shows TERMINATION_BEFORE_HIRE under the date and closes on EMPLOYEE_ALREADY_TERMINATED with a toast', async () => {
++    const state = servesEmployee();
++    let code: 'TERMINATION_BEFORE_HIRE' | 'EMPLOYEE_ALREADY_TERMINATED' = 'TERMINATION_BEFORE_HIRE';
++    server.use(
++      http.post('/api/employees/4217/termination', () =>
++        code === 'TERMINATION_BEFORE_HIRE'
++          ? problem(422, {
++              status: 422,
++              code,
++              detail: "The termination date can't be before the hire date.",
++            })
++          : problem(422, {
++              status: 422,
++              code,
++              detail: 'This employee is already terminated.',
++            }),
++      ),
++    );
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openTerminate(user);
++    fireEvent.change(within(dialog).getByLabelText('Termination date'), {
++      target: { value: '2021-01-01' },
++    });
++    await user.click(within(dialog).getByRole('button', { name: 'Terminate' }));
++    expect(
++      await within(dialog).findByText("The termination date can't be before the hire date."),
++    ).toBeVisible();
++
++    code = 'EMPLOYEE_ALREADY_TERMINATED';
++    state.current = anEmployeeDetail({ status: 'terminated', terminationDate: '2026-10-08' });
++    await user.click(within(dialog).getByRole('button', { name: 'Terminate' }));
++
++    expect(await screen.findByText('This employee is already terminated.')).toBeVisible();
++    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
++    expect(
++      await screen.findByText(
++        'Terminated on 8 Oct 2026. Excluded from current insights. History is kept.',
++      ),
++    ).toBeVisible();
++  });
++});
+diff --git a/apps/web/src/features/employees/NewEmployeePage.test.tsx b/apps/web/src/features/employees/NewEmployeePage.test.tsx
+new file mode 100644
+index 0000000..aad12c0
+--- /dev/null
++++ b/apps/web/src/features/employees/NewEmployeePage.test.tsx
+@@ -0,0 +1,260 @@
++import { fireEvent, screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { useLocation } from 'react-router';
++import { describe, expect, it } from 'vitest';
++import { anEmployeeDetail, anEmployeeListResponse } from '../../../test/fixtures/employees.ts';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const Location = () => {
++  const { pathname, search } = useLocation();
++  return <output aria-label="location">{pathname + search}</output>;
++};
++
++const renderPage = (route = '/employees/new') =>
++  render(
++    <>
++      <AppRoutes />
++      <Location />
++    </>,
++    { route },
++  );
++
++const asAdmin = () =>
++  server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse('hr_admin'))));
++
++const servesBand = () =>
++  server.use(
++    http.get('/api/pay-bands/IN/1/L3', () =>
++      HttpResponse.json({
++        countryCode: 'IN',
++        jobTitleId: 1,
++        levelCode: 'L3',
++        min: { amountMinor: 160000000, currency: 'INR' },
++        mid: { amountMinor: 204000000, currency: 'INR' },
++        max: { amountMinor: 250000000, currency: 'INR' },
++      }),
++    ),
++  );
++
++const created = () => anEmployeeDetail({ id: 10251, employeeCode: 'E010251' });
++
++/** Answers the POST with 201 and records its body. */
++function servesCreate(bodies: unknown[] = []) {
++  server.use(
++    http.post('/api/employees', async ({ request }) => {
++      bodies.push(await request.json());
++      return HttpResponse.json(created(), {
++        status: 201,
++        headers: { Location: '/api/employees/10251' },
++      });
++    }),
++    http.get('/api/employees/10251', () => HttpResponse.json(created())),
++  );
++}
++
++const problem = (status: number, body: Parameters<typeof aProblem>[0]) =>
++  HttpResponse.json(aProblem(body), {
++    status,
++    headers: { 'content-type': 'application/problem+json' },
++  });
++
++type User = ReturnType<typeof userEvent.setup>;
++
++async function choose(user: User, label: string, option: string) {
++  await user.click(await screen.findByRole('combobox', { name: label }));
++  await user.click(await screen.findByRole('option', { name: option }));
++}
++
++async function fillForm(user: User, salary = '1980000') {
++  await user.type(await screen.findByLabelText('First name'), 'Asha');
++  await user.type(screen.getByLabelText('Last name'), 'Rao');
++  await choose(user, 'Gender', 'Female');
++  await choose(user, 'Country', 'India');
++  await choose(user, 'Job title', 'Software Engineer');
++  await choose(user, 'Level', 'L3 Senior');
++  fireEvent.change(screen.getByLabelText('Hire date'), { target: { value: '2026-01-15' } });
++  await user.type(screen.getByLabelText('Starting salary'), salary);
++}
++
++const submit = (user: User) => user.click(screen.getByRole('button', { name: 'Add employee' }));
++
++describe('add employee page (04 section 8.5 S-4)', () => {
++  it('shows the band and a "below the band minimum" warning without blocking submit', async () => {
++    asAdmin();
++    servesBand();
++    const bodies: unknown[] = [];
++    servesCreate(bodies);
++    const user = userEvent.setup();
++    renderPage();
++
++    await fillForm(user, '1500000');
++
++    const band = await screen.findByRole('group', { name: 'Pay band' });
++    expect(within(band).getByText('INR 16,00,000')).toBeVisible();
++    expect(within(band).getByText('INR 20,40,000')).toBeVisible();
++    expect(within(band).getByText('INR 25,00,000')).toBeVisible();
++    expect(screen.getByText('Compa-ratio 0.74')).toBeVisible();
++    expect(screen.getByText('This is below the band minimum.')).toBeVisible();
++
++    await submit(user);
++    expect(await screen.findByRole('heading', { level: 1, name: 'Priya Nair' })).toBeVisible();
++    expect(bodies).toEqual([
++      {
++        firstName: 'Asha',
++        lastName: 'Rao',
++        gender: 'female',
++        countryCode: 'IN',
++        jobTitleId: 1,
++        levelCode: 'L3',
++        hireDate: '2026-01-15',
++        startingSalary: { amountMinor: 150000000, currency: 'INR' },
++      },
++    ]);
++  });
++
++  it('shows no warning inside the band', async () => {
++    asAdmin();
++    servesBand();
++    const user = userEvent.setup();
++    renderPage();
++
++    await fillForm(user, '2000000');
++
++    expect(await screen.findByText('Compa-ratio 0.98')).toBeVisible();
++    expect(screen.queryByText(/below the band minimum|above the band maximum/)).toBeNull();
++  });
++
++  it('checks required fields on the client before sending anything', async () => {
++    asAdmin();
++    let posted = false;
++    server.use(
++      http.post('/api/employees', () => {
++        posted = true;
++        return HttpResponse.json(created(), { status: 201 });
++      }),
++    );
++    const user = userEvent.setup();
++    renderPage();
++
++    await user.click(await screen.findByRole('button', { name: 'Add employee' }));
++
++    expect(await screen.findByLabelText('First name')).toBeInvalid();
++    expect(screen.getByLabelText('Starting salary')).toBeInvalid();
++    expect(screen.getByLabelText('Hire date')).toBeInvalid();
++    expect(posted).toBe(false);
++  });
++
++  it('maps errors[] from a 400 onto the matching fields', async () => {
++    asAdmin();
++    servesBand();
++    server.use(
++      http.post('/api/employees', () =>
++        problem(400, {
++          status: 400,
++          code: 'VALIDATION_FAILED',
++          errors: [
++            { path: 'lastName', message: 'Last name is not allowed.' },
++            { path: 'startingSalary.amountMinor', message: 'Enter a smaller amount.' },
++            { path: 'unknownKey', message: 'Something else was wrong.' },
++          ],
++        }),
++      ),
++    );
++    const user = userEvent.setup();
++    renderPage();
++
++    await fillForm(user);
++    await submit(user);
++
++    expect(await screen.findByText('Last name is not allowed.')).toBeVisible();
++    expect(screen.getByLabelText('Last name')).toBeInvalid();
++    expect(screen.getByText('Enter a smaller amount.')).toBeVisible();
++    expect(screen.getByLabelText('Starting salary')).toBeInvalid();
++    expect(within(screen.getByRole('alert')).getByText('Something else was wrong.')).toBeVisible();
++  });
++
++  it('shows NO_PAY_BAND as a form alert and DATE_IN_FUTURE under the hire date', async () => {
++    asAdmin();
++    servesBand();
++    server.use(
++      http.post('/api/employees', () => problem(422, { status: 422, code: 'NO_PAY_BAND' })),
++    );
++    const user = userEvent.setup();
++    renderPage();
++
++    await fillForm(user);
++    await submit(user);
++    expect(
++      await within(await screen.findByRole('alert')).findByText(
++        "There's no pay band for this country, job title and level.",
++      ),
++    ).toBeVisible();
++
++    server.use(
++      http.post('/api/employees', () =>
++        problem(422, {
++          status: 422,
++          code: 'DATE_IN_FUTURE',
++          detail: 'The hire date can’t be after today.',
++        }),
++      ),
++    );
++    await submit(user);
++    expect(await screen.findByText('The hire date can’t be after today.')).toBeVisible();
++    expect(screen.getByLabelText('Hire date')).toBeInvalid();
++  });
++
++  it('shows SALARY_CURRENCY_MISMATCH under the starting salary', async () => {
++    asAdmin();
++    server.use(
++      http.post('/api/employees', () =>
++        problem(422, {
++          status: 422,
++          code: 'SALARY_CURRENCY_MISMATCH',
++          detail: 'The salary must be in INR.',
++        }),
++      ),
++    );
++    const user = userEvent.setup();
++    renderPage();
++
++    await fillForm(user);
++    await submit(user);
++
++    expect(await screen.findByText('The salary must be in INR.')).toBeVisible();
++    expect(screen.getByLabelText('Starting salary')).toBeInvalid();
++  });
++
++  it('after adding, opens the new employee\'s page with the "Employee E010251 added." toast', async () => {
++    asAdmin();
++    servesCreate();
++    const user = userEvent.setup();
++    const { queryClient } = renderPage();
++    queryClient.setQueryData(['employees', {}], anEmployeeListResponse());
++
++    await fillForm(user);
++    await submit(user);
++
++    expect(await screen.findByText('Employee E010251 added.')).toBeVisible();
++    expect(screen.getByLabelText('location')).toHaveTextContent('/employees/10251');
++    expect(queryClient.getQueryState(['employees', {}])?.isInvalidated).toBe(true);
++  });
++
++  it('Cancel returns to the list with its URL filters', async () => {
++    asAdmin();
++    server.use(http.get('/api/employees', () => HttpResponse.json(anEmployeeListResponse())));
++    const user = userEvent.setup();
++    renderPage('/employees?country=IN');
++
++    await user.click(await screen.findByRole('link', { name: 'Add employee' }));
++    await user.click(await screen.findByRole('button', { name: 'Cancel' }));
++
++    expect(await screen.findByRole('heading', { level: 1, name: 'Employees' })).toBeVisible();
++    expect(screen.getByLabelText('location')).toHaveTextContent('/employees?country=IN');
++  });
++});
+diff --git a/apps/web/src/features/employees/NewEmployeePage.tsx b/apps/web/src/features/employees/NewEmployeePage.tsx
+new file mode 100644
+index 0000000..1ea9736
+--- /dev/null
++++ b/apps/web/src/features/employees/NewEmployeePage.tsx
+@@ -0,0 +1,254 @@
++import {
++  createEmployeeBodySchema,
++  employeeDetailSchema,
++  payBandResponseSchema,
++  type CreateEmployeeBody,
++} from '@acme/shared';
++import { Alert, Button, Group, Select, Stack, Text, TextInput, Title } from '@mantine/core';
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
++import { useState, type FormEvent, type ReactElement } from 'react';
++import { useLocation, useNavigate } from 'react-router';
++import { ApiError, apiFetch } from '../../api/client.ts';
++import { Money } from '../../components/Money.tsx';
++import { useViewer } from '../../components/Shell.tsx';
++import { formatCompaRatio, parseMajorToMinor } from '../../format.ts';
++import { useReference } from './useReference.ts';
++
++const FIELDS = [
++  'firstName',
++  'lastName',
++  'gender',
++  'countryCode',
++  'jobTitleId',
++  'levelCode',
++  'hireDate',
++  'startingSalary',
++] as const;
++type Field = (typeof FIELDS)[number];
++type Errors = Partial<Record<Field, string>>;
++
++type Values = Record<Field, string>;
++const EMPTY: Values = Object.fromEntries(FIELDS.map((field) => [field, ''])) as Values;
++
++const REQUIRED: Record<Field, string> = {
++  firstName: 'Enter a first name.',
++  lastName: 'Enter a last name.',
++  gender: 'Choose a gender.',
++  countryCode: 'Choose a country.',
++  jobTitleId: 'Choose a job title.',
++  levelCode: 'Choose a level.',
++  hireDate: 'Enter a hire date.',
++  startingSalary: 'Enter a starting salary.',
++};
++
++/** The form field an `errors[]` path belongs to; the salary's parts all show under the amount. */
++function fieldOf(path: string): Field | undefined {
++  const root = path.split('.')[0];
++  return FIELDS.find((field) => field === root);
++}
++
++/** Server validation messages by field, plus the ones that match no field. */
++function sortServerErrors(errors: { path: string; message: string }[]) {
++  const byField: Errors = {};
++  const unmatched: string[] = [];
++  for (const { path, message } of errors) {
++    const field = fieldOf(path);
++    if (field) byField[field] ??= message;
++    else unmatched.push(message);
++  }
++  return { byField, unmatched };
++}
++
++/** S-4 (04 section 8.5): add an employee. */
++export function NewEmployeePage(): ReactElement {
++  const me = useViewer();
++  const navigate = useNavigate();
++  const location = useLocation();
++  const queryClient = useQueryClient();
++  const reference = useReference().data;
++  const [values, setValues] = useState<Values>(EMPTY);
++  const [errors, setErrors] = useState<Errors>({});
++  const [formErrors, setFormErrors] = useState<string[]>([]);
++  const set = (field: Field) => (value: string | null) =>
++    setValues((current) => ({ ...current, [field]: value ?? '' }));
++
++  const currency = reference?.countries.find((c) => c.code === values.countryCode)?.currency;
++  const amountMinor = parseMajorToMinor(values.startingSalary);
++  const chosen = values.countryCode && values.jobTitleId && values.levelCode;
++  const band = useQuery({
++    queryKey: ['payBand', values.countryCode, values.jobTitleId, values.levelCode],
++    queryFn: () =>
++      apiFetch(`/api/pay-bands/${values.countryCode}/${values.jobTitleId}/${values.levelCode}`, {
++        schema: payBandResponseSchema,
++      }),
++    enabled: Boolean(chosen),
++  }).data;
++  const outside =
++    band && amountMinor !== null
++      ? amountMinor < band.min.amountMinor
++        ? 'This is below the band minimum.'
++        : amountMinor > band.max.amountMinor
++          ? 'This is above the band maximum.'
++          : undefined
++      : undefined;
++
++  const create = useMutation({
++    mutationFn: (body: CreateEmployeeBody) =>
++      apiFetch('/api/employees', { method: 'POST', body, schema: employeeDetailSchema }),
++    onSuccess: (employee) => {
++      void queryClient.invalidateQueries({ queryKey: ['employees'] });
++      void navigate(`/employees/${employee.id}`, {
++        state: { toast: `Employee ${employee.employeeCode} added.` },
++      });
++    },
++    onError: (error) => {
++      if (!(error instanceof ApiError)) return setFormErrors([error.message]);
++      if (error.code === 'VALIDATION_FAILED') {
++        const { byField, unmatched } = sortServerErrors(error.errors);
++        setErrors(byField);
++        setFormErrors(unmatched);
++      } else if (error.code === 'NO_PAY_BAND') {
++        setFormErrors(["There's no pay band for this country, job title and level."]);
++      } else if (error.code === 'SALARY_CURRENCY_MISMATCH') {
++        setErrors({ startingSalary: error.message });
++      } else if (error.code === 'DATE_IN_FUTURE') {
++        setErrors({ hireDate: error.message });
++      } else {
++        setFormErrors([error.message]);
++      }
++    },
++  });
++
++  const onSubmit = (event: FormEvent) => {
++    event.preventDefault();
++    setErrors({});
++    setFormErrors([]);
++    const missing: Errors = {};
++    for (const field of FIELDS) if (!values[field].trim()) missing[field] = REQUIRED[field];
++    if (Object.keys(missing).length > 0) return setErrors(missing);
++    if (amountMinor === null || !currency)
++      return setErrors({ startingSalary: 'Enter an amount like 20480.50.' });
++
++    const parsed = createEmployeeBodySchema.safeParse({
++      firstName: values.firstName,
++      lastName: values.lastName,
++      gender: values.gender,
++      countryCode: values.countryCode,
++      jobTitleId: Number(values.jobTitleId),
++      levelCode: values.levelCode,
++      hireDate: values.hireDate,
++      startingSalary: { amountMinor, currency },
++    });
++    if (!parsed.success) {
++      const found: Errors = {};
++      for (const issue of parsed.error.issues) {
++        const field = fieldOf(issue.path.join('.'));
++        if (field) found[field] ??= issue.message;
++      }
++      return setErrors(found);
++    }
++    create.mutate(parsed.data);
++  };
++
++  const goBack = () =>
++    void navigate(`/employees${(location.state as { from?: string } | null)?.from ?? ''}`);
++
++  return (
++    <form onSubmit={onSubmit} noValidate>
++      <Stack maw={560}>
++        <Title order={1}>Add employee</Title>
++        {formErrors.length > 0 && (
++          <Alert color="red">
++            {formErrors.map((message) => (
++              <Text key={message}>{message}</Text>
++            ))}
++          </Alert>
++        )}
++        <TextInput
++          label="First name"
++          value={values.firstName}
++          onChange={(event) => set('firstName')(event.currentTarget.value)}
++          error={errors.firstName}
++        />
++        <TextInput
++          label="Last name"
++          value={values.lastName}
++          onChange={(event) => set('lastName')(event.currentTarget.value)}
++          error={errors.lastName}
++        />
++        <Select
++          label="Gender"
++          data={reference?.genders.map((g) => ({ value: g.code, label: g.name })) ?? []}
++          value={values.gender || null}
++          onChange={set('gender')}
++          error={errors.gender}
++        />
++        <Select
++          label="Country"
++          data={reference?.countries.map((c) => ({ value: c.code, label: c.name })) ?? []}
++          value={values.countryCode || null}
++          onChange={set('countryCode')}
++          error={errors.countryCode}
++        />
++        <Select
++          label="Job title"
++          data={reference?.jobTitles.map((t) => ({ value: String(t.id), label: t.name })) ?? []}
++          value={values.jobTitleId || null}
++          onChange={set('jobTitleId')}
++          error={errors.jobTitleId}
++        />
++        <Select
++          label="Level"
++          data={
++            reference?.levels.map((l) => ({ value: l.code, label: `${l.code} ${l.name}` })) ?? []
++          }
++          value={values.levelCode || null}
++          onChange={set('levelCode')}
++          error={errors.levelCode}
++        />
++        <TextInput
++          label="Hire date"
++          type="date"
++          max={me.today}
++          value={values.hireDate}
++          onChange={(event) => set('hireDate')(event.currentTarget.value)}
++          error={errors.hireDate}
++        />
++        <TextInput
++          label="Starting salary"
++          value={values.startingSalary}
++          onChange={(event) => set('startingSalary')(event.currentTarget.value)}
++          rightSection={currency && <Text size="sm">{currency}</Text>}
++          rightSectionWidth={56}
++          error={errors.startingSalary}
++        />
++        {band && (
++          <Stack gap="xs">
++            <Group role="group" aria-label="Pay band" justify="space-between">
++              {(['min', 'mid', 'max'] as const).map((point) => (
++                <div key={point}>
++                  <Text size="xs" c="dimmed" tt="capitalize">
++                    {point}
++                  </Text>
++                  <Money value={band[point]} />
++                </div>
++              ))}
++            </Group>
++            {amountMinor !== null && (
++              <Text>{`Compa-ratio ${formatCompaRatio(amountMinor / band.mid.amountMinor)}`}</Text>
++            )}
++            {outside && <Alert color="yellow">{outside}</Alert>}
++          </Stack>
++        )}
++        <Group>
++          <Button type="submit" loading={create.isPending}>
++            Add employee
++          </Button>
++          <Button variant="default" onClick={goBack}>
++            Cancel
++          </Button>
++        </Group>
++      </Stack>
++    </form>
++  );
++}
+diff --git a/apps/web/src/features/employees/TerminateModal.tsx b/apps/web/src/features/employees/TerminateModal.tsx
+new file mode 100644
+index 0000000..fc48a12
+--- /dev/null
++++ b/apps/web/src/features/employees/TerminateModal.tsx
+@@ -0,0 +1,95 @@
++import { employeeDetailSchema, terminateBodySchema, type EmployeeDetail } from '@acme/shared';
++import { Alert, Button, Group, Modal, Stack, Text, TextInput } from '@mantine/core';
++import { useMutation, useQueryClient } from '@tanstack/react-query';
++import { useState, type FormEvent, type ReactElement } from 'react';
++import { ApiError, apiFetch } from '../../api/client.ts';
++import { useViewer } from '../../components/Shell.tsx';
++import { useToast } from '../../components/Toasts.tsx';
++
++type Props = { employee: EmployeeDetail; opened: boolean; onClose: () => void };
++
++const DATE_CODES = ['VALIDATION_FAILED', 'DATE_IN_FUTURE', 'TERMINATION_BEFORE_HIRE'];
++
++function TerminateForm({ employee, onClose }: Omit<Props, 'opened'>): ReactElement {
++  const me = useViewer();
++  const queryClient = useQueryClient();
++  const toast = useToast();
++  const [date, setDate] = useState(me.today);
++  const [dateError, setDateError] = useState<string>();
++  const [formError, setFormError] = useState<string>();
++
++  const terminate = useMutation({
++    mutationFn: (terminationDate: string) =>
++      apiFetch(`/api/employees/${employee.id}/termination`, {
++        method: 'POST',
++        body: { terminationDate },
++        schema: employeeDetailSchema,
++      }),
++    onSuccess: (updated) => {
++      queryClient.setQueryData(['employee', String(employee.id)], updated);
++      void queryClient.invalidateQueries({ queryKey: ['employees'] });
++      onClose();
++    },
++    onError: (error) => {
++      if (error instanceof ApiError && DATE_CODES.includes(error.code)) {
++        setDateError(error.errors[0]?.message ?? error.message);
++      } else if (error instanceof ApiError && error.code === 'EMPLOYEE_ALREADY_TERMINATED') {
++        void queryClient.invalidateQueries({ queryKey: ['employee', String(employee.id)] });
++        void queryClient.invalidateQueries({ queryKey: ['employees'] });
++        toast(error.message);
++        onClose();
++      } else if (error instanceof ApiError && error.code === 'EMPLOYEE_NOT_FOUND') {
++        void queryClient.invalidateQueries({ queryKey: ['employee', String(employee.id)] });
++        onClose();
++      } else {
++        setFormError(error.message);
++      }
++    },
++  });
++
++  const onSubmit = (event: FormEvent) => {
++    event.preventDefault();
++    setDateError(undefined);
++    setFormError(undefined);
++    const parsed = terminateBodySchema.safeParse({ terminationDate: date });
++    if (!parsed.success) return setDateError('Enter a termination date.');
++    terminate.mutate(parsed.data.terminationDate);
++  };
++
++  return (
++    <form onSubmit={onSubmit} noValidate>
++      <Stack>
++        {formError && <Alert color="red">{formError}</Alert>}
++        <Text>
++          {`Terminating removes ${employee.firstName} ${employee.lastName} from current insights. Their record and salary history are kept. This can't be undone in this version.`}
++        </Text>
++        <TextInput
++          label="Termination date"
++          type="date"
++          value={date}
++          min={employee.hireDate}
++          max={me.today}
++          onChange={(event) => setDate(event.currentTarget.value)}
++          error={dateError}
++        />
++        <Group justify="flex-end">
++          <Button variant="default" onClick={onClose}>
++            Cancel
++          </Button>
++          <Button type="submit" color="red" loading={terminate.isPending}>
++            Terminate
++          </Button>
++        </Group>
++      </Stack>
++    </form>
++  );
++}
++
++/** S-7 (04 section 8.5): end an employee's employment. */
++export function TerminateModal({ employee, opened, onClose }: Props): ReactElement {
++  return (
++    <Modal opened={opened} onClose={onClose} title="Terminate employee">
++      <TerminateForm employee={employee} onClose={onClose} />
++    </Modal>
++  );
++}
+diff --git a/apps/web/test/fixtures/employees.ts b/apps/web/test/fixtures/employees.ts
+index 72b601f..390643b 100644
+--- a/apps/web/test/fixtures/employees.ts
++++ b/apps/web/test/fixtures/employees.ts
+@@ -1,5 +1,7 @@
+ import {
++  employeeDetailSchema,
+   employeeListItemSchema,
+   employeeListResponseSchema,
++  type EmployeeDetail,
+   type EmployeeListItem,
+   type EmployeeListResponse,
+@@ -52,2 +54,15 @@ export const someEmployees = (count: number, firstId = 1): EmployeeListItem[] =>
+     }),
+   );
++
++export const anEmployeeDetail = (overrides: Partial<EmployeeDetail> = {}): EmployeeDetail =>
++  employeeDetailSchema.parse({
++    ...anEmployeeListItem(),
++    band: {
++      min: { amountMinor: 160000000, currency: 'INR' },
++      mid: { amountMinor: 204000000, currency: 'INR' },
++      max: { amountMinor: 250000000, currency: 'INR' },
++    },
++    createdAt: '2021-07-12T09:00:00.000Z',
++    updatedAt: '2026-04-01T09:00:00.000Z',
++    ...overrides,
++  });
+diff --git a/apps/web/test/setup.ts b/apps/web/test/setup.ts
+index 9622e5c..323e3d6 100644
+--- a/apps/web/test/setup.ts
++++ b/apps/web/test/setup.ts
+@@ -29,6 +29,6 @@ window.ResizeObserver = ResizeObserver;
+ 
+ // The list page renders a filter bar of Mantine selects; a cold first render takes over the
+-// default 1 s that findBy and waitFor wait.
+-configure({ asyncUtilTimeout: 5000 });
++// default 1 s that findBy and waitFor wait; under a full parallel run it can pass 5 s.
++configure({ asyncUtilTimeout: 10_000 });
+ 
+ beforeAll(() => server.listen({ onUnhandledRequest: 'error' }));
+diff --git a/packages/shared/src/schemas/common.test.ts b/packages/shared/src/schemas/common.test.ts
+new file mode 100644
+index 0000000..7ec5c47
+--- /dev/null
++++ b/packages/shared/src/schemas/common.test.ts
+@@ -0,0 +1,38 @@
++import { describe, expect, it } from 'vitest';
++import { personNameSchema } from './common.ts';
++
++describe('PersonName', () => {
++  it('accepts an ordinary name and trims it', () => {
++    expect(personNameSchema.parse('  Asha ')).toBe('Asha');
++  });
++
++  it('accepts 100 characters', () => {
++    expect(personNameSchema.safeParse('a'.repeat(100)).success).toBe(true);
++  });
++
++  it.each(['', '   '])('rejects an empty name %j', (name) => {
++    expect(personNameSchema.safeParse(name).success).toBe(false);
++  });
++
++  it('rejects a name over 100 characters', () => {
++    expect(personNameSchema.safeParse('a'.repeat(101)).success).toBe(false);
++  });
++
++  it.each(['=cmd', '+1', '-1', '@sum', '\tTab'])(
++    'rejects %j, which starts with a formula character',
++    (name) => {
++      expect(personNameSchema.safeParse(name).success).toBe(false);
++    },
++  );
++
++  it.each(['  =cmd', ' +1', '\t -1', '\r@sum'])(
++    'rejects %j, which starts with a formula character once trimmed',
++    (name) => {
++      expect(personNameSchema.safeParse(name).success).toBe(false);
++    },
++  );
++
++  it('accepts a formula character that is not leading', () => {
++    expect(personNameSchema.safeParse("Anne-Marie O'Neil").success).toBe(true);
++  });
++});
+diff --git a/packages/shared/src/schemas/common.ts b/packages/shared/src/schemas/common.ts
+index a9d6b8e..1ffec91 100644
+--- a/packages/shared/src/schemas/common.ts
++++ b/packages/shared/src/schemas/common.ts
+@@ -10,2 +10,13 @@ export const isoDateSchema = z.iso.date();
+ 
+ export type IsoDate = z.infer<typeof isoDateSchema>;
++
++// 04 section 4.7: trimmed, 1 to 100 characters, no leading formula character. The formula check
++// runs on the raw value, so a leading tab is caught before trim removes it.
++export const personNameSchema = z
++  .string()
++  .refine((value) => !/^\s*[=+\-@]|^[\t\r]/.test(value), {
++    message: "Name can't start with =, +, -, @ or a tab.",
++  })
++  .trim()
++  .min(1, 'Name is required.')
++  .max(100, 'Name must be 100 characters or fewer.');
+diff --git a/packages/shared/src/schemas/employee.test.ts b/packages/shared/src/schemas/employee.test.ts
+index 0c364e1..13740c7 100644
+--- a/packages/shared/src/schemas/employee.test.ts
++++ b/packages/shared/src/schemas/employee.test.ts
+@@ -1,4 +1,10 @@
+ import { describe, expect, it } from 'vitest';
+-import { employeeListQuerySchema, serializeEmployeeListQuery } from './employee.ts';
++import {
++  createEmployeeBodySchema,
++  employeeListQuerySchema,
++  serializeEmployeeListQuery,
++  terminateBodySchema,
++  updateEmployeeBodySchema,
++} from './employee.ts';
+ 
+ describe('employeeListQuerySchema', () => {
+@@ -140,2 +146,83 @@ describe('serializeEmployeeListQuery', () => {
+   });
+ });
++
++describe('CreateEmployeeBody', () => {
++  const valid = {
++    firstName: 'Asha',
++    lastName: 'Rao',
++    gender: 'female',
++    countryCode: 'IN',
++    jobTitleId: 1,
++    levelCode: 'L3',
++    hireDate: '2026-10-01',
++    startingSalary: { amountMinor: 120_000_000, currency: 'INR' },
++  };
++  const paths = (input: unknown) =>
++    createEmployeeBodySchema.safeParse(input).error?.issues.map((issue) => issue.path.join('.'));
++
++  it('accepts a complete body', () => {
++    expect(createEmployeeBodySchema.safeParse(valid).success).toBe(true);
++  });
++
++  it('rejects unknown keys', () => {
++    expect(paths({ ...valid, status: 'active' })).toEqual(['']);
++  });
++
++  it('rejects a missing field, naming it', () => {
++    const rest: Partial<typeof valid> = { ...valid };
++    delete rest.hireDate;
++
++    expect(paths(rest)).toEqual(['hireDate']);
++  });
++
++  it('rejects a hire date before 1990-01-01 and accepts that day', () => {
++    expect(paths({ ...valid, hireDate: '1989-12-31' })).toEqual(['hireDate']);
++    expect(createEmployeeBodySchema.safeParse({ ...valid, hireDate: '1990-01-01' }).success).toBe(
++      true,
++    );
++  });
++
++  it.each([0, -5, 1.5, 1_000_000_000_001])('rejects an amount of %s', (amountMinor) => {
++    expect(paths({ ...valid, startingSalary: { amountMinor, currency: 'INR' } })).toEqual([
++      'startingSalary.amountMinor',
++    ]);
++  });
++
++  it.each([1, 1_000_000_000_000])('accepts an amount of %s', (amountMinor) => {
++    const body = { ...valid, startingSalary: { amountMinor, currency: 'INR' } };
++
++    expect(createEmployeeBodySchema.safeParse(body).success).toBe(true);
++  });
++
++  it('reports a bad name under its own field', () => {
++    expect(paths({ ...valid, lastName: '=SUM(A1)' })).toEqual(['lastName']);
++  });
++});
++
++describe('UpdateEmployeeBody', () => {
++  it('rejects an empty object', () => {
++    expect(updateEmployeeBodySchema.safeParse({}).success).toBe(false);
++  });
++
++  it('accepts any non-empty subset of the three fields', () => {
++    expect(updateEmployeeBodySchema.safeParse({ gender: 'male' }).success).toBe(true);
++    expect(updateEmployeeBodySchema.safeParse({ firstName: 'A', lastName: 'B' }).success).toBe(
++      true,
++    );
++  });
++
++  it.each(['jobTitleId', 'levelCode', 'countryCode', 'salary'])('rejects %s', (key) => {
++    const result = updateEmployeeBodySchema.safeParse({ firstName: 'A', [key]: 'x' });
++
++    expect(result.success).toBe(false);
++    expect(JSON.stringify(result.error?.issues)).toContain(key);
++  });
++});
++
++describe('TerminateBody', () => {
++  it('requires a valid ISO date', () => {
++    expect(terminateBodySchema.safeParse({ terminationDate: '2026-10-09' }).success).toBe(true);
++    expect(terminateBodySchema.safeParse({ terminationDate: '9 Oct' }).success).toBe(false);
++    expect(terminateBodySchema.safeParse({}).success).toBe(false);
++  });
++});
+diff --git a/packages/shared/src/schemas/employee.ts b/packages/shared/src/schemas/employee.ts
+index 691203d..d015b4d 100644
+--- a/packages/shared/src/schemas/employee.ts
++++ b/packages/shared/src/schemas/employee.ts
+@@ -1,4 +1,4 @@
+ import { z } from 'zod';
+-import { isoDateSchema } from './common.ts';
++import { isoDateSchema, personNameSchema } from './common.ts';
+ 
+ // 04 section 4.6: a list is one comma-separated param; trim, drop empties, de-duplicate.
+@@ -76,4 +76,6 @@ const idName = z.object({ id: z.number().int(), name: z.string() });
+ export const moneySchema = z.object({ amountMinor: z.number().int(), currency: z.string() });
+ 
++const genderSchema = z.enum(['female', 'male', 'non_binary', 'not_disclosed']);
++
+ export const bandPositionSchema = z.enum(['below', 'inside', 'above']);
+ 
+@@ -84,5 +86,5 @@ export const employeeListItemSchema = z.object({
+   firstName: z.string(),
+   lastName: z.string(),
+-  gender: z.enum(['female', 'male', 'non_binary', 'not_disclosed']),
++  gender: genderSchema,
+   country: codeName,
+   department: idName,
+@@ -110,2 +112,50 @@ export const employeeListResponseSchema = z.object({
+ export type EmployeeListItem = z.infer<typeof employeeListItemSchema>;
+ export type EmployeeListResponse = z.infer<typeof employeeListResponseSchema>;
++
++// 04 section 5.4 E2: the list item plus the band and timestamps.
++export const employeeDetailSchema = employeeListItemSchema.extend({
++  band: z.object({ min: moneySchema, mid: moneySchema, max: moneySchema }),
++  createdAt: z.string(),
++  updatedAt: z.string(),
++});
++
++export type EmployeeDetail = z.infer<typeof employeeDetailSchema>;
++
++// 04 section 5.4 E2 to E5 path.
++export const employeeIdParamsSchema = z.strictObject({
++  id: z.coerce.number().int().min(1),
++});
++
++// 04 section 5.4 E3 to E5 bodies.
++export const createEmployeeBodySchema = z.strictObject({
++  firstName: personNameSchema,
++  lastName: personNameSchema,
++  gender: genderSchema,
++  countryCode: z.string().regex(/^[A-Z]{2}$/, 'Country is required.'),
++  jobTitleId: z.number().int().min(1),
++  levelCode: z.enum(['L1', 'L2', 'L3', 'L4', 'L5']),
++  hireDate: isoDateSchema.refine((date) => date >= '1990-01-01', {
++    message: "Hire date can't be before 1990-01-01.",
++  }),
++  startingSalary: z.strictObject({
++    amountMinor: z.number().int().min(1).max(1_000_000_000_000),
++    currency: z.string().regex(/^[A-Z]{3}$/),
++  }),
++});
++
++export type CreateEmployeeBody = z.infer<typeof createEmployeeBodySchema>;
++
++export const updateEmployeeBodySchema = z
++  .strictObject({
++    firstName: personNameSchema,
++    lastName: personNameSchema,
++    gender: genderSchema,
++  })
++  .partial()
++  .refine((body) => Object.keys(body).length > 0, { message: 'Change at least one field.' });
++
++export type UpdateEmployeeBody = z.infer<typeof updateEmployeeBodySchema>;
++
++export const terminateBodySchema = z.strictObject({ terminationDate: isoDateSchema });
++
++export type TerminateBody = z.infer<typeof terminateBodySchema>;
+diff --git a/packages/shared/src/schemas/reference.ts b/packages/shared/src/schemas/reference.ts
+index f8cd734..de7fbcb 100644
+--- a/packages/shared/src/schemas/reference.ts
++++ b/packages/shared/src/schemas/reference.ts
+@@ -1,4 +1,5 @@
+ import { z } from 'zod';
+ import { isoDateSchema } from './common.ts';
++import { moneySchema } from './employee.ts';
+ 
+ const codeName = z.object({ code: z.string(), name: z.string() });
+@@ -22,2 +23,20 @@ export const referenceResponseSchema = z.object({
+ 
+ export type ReferenceResponse = z.infer<typeof referenceResponseSchema>;
++
++// R2 (04 section 5.3).
++export const payBandParamsSchema = z.strictObject({
++  countryCode: z.string().regex(/^[A-Z]{2}$/),
++  jobTitleId: z.coerce.number().int().min(1),
++  levelCode: z.enum(['L1', 'L2', 'L3', 'L4', 'L5']),
++});
++
++export const payBandResponseSchema = z.object({
++  countryCode: z.string(),
++  jobTitleId: z.number().int(),
++  levelCode: z.string(),
++  min: moneySchema,
++  mid: moneySchema,
++  max: moneySchema,
++});
++
++export type PayBandResponse = z.infer<typeof payBandResponseSchema>;

@@ -1,0 +1,26 @@
+0038996 docs(docs): name the supporting packages s0 needs
+5ee9ebf chore: ignore sqlite files, e2e data and vitest cache
+6c7dc46 chore: scaffold npm workspaces and TypeScript project references
+5d4ff98 chore: add ESLint, Prettier and determinism lint rules
+28c03d2 chore: add Vitest 5 projects and coverage floor
+31ea887 chore: add husky, lint-staged, commitlint and commit-shape hooks
+f563b83 chore: allow underscore-prefixed unused parameters in stubs
+b723ddf test(api): reject invalid configuration with a list of problems
+16bfb10 feat(api): validate environment with zod
+887aacd test(api): give fixed and system clocks
+15f13fd feat(api): add fixed and system clocks
+7306dd1 test(api): build problem details and validation error lists
+b11fe5b feat(api): add problem details builder
+6a17b91 test(api): return problem details for unknown api routes and errors
+4a76179 feat(api): add problem-details error handler and 404 handler
+e91da95 test(api): report health when the database answers
+9bb7333 feat(api): add buildApp composition root and health route
+4a48a21 test(web): render the app shell placeholder through the test wrapper
+894e7c9 feat(web): add Vite, React and Mantine placeholder page
+0678d38 test(api): keep unknown api paths as problems when serving the web
+4caca0b test(api): serve index.html for non-api paths
+30fc1f7 feat(api): serve the web build with an spa fallback
+b14f15a chore(api): add server entry point
+4c80a98 chore: add env example and pull request template
+db55e2a ci: run lint, typecheck, tests and build on pull requests and main
+3d73221 build(deploy): add render.yaml for one free web service

@@ -1,0 +1,2541 @@
+diff --git a/apps/api/package.json b/apps/api/package.json
+index 274b963..7dccaba 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -9,6 +9,7 @@
+   "dependencies": {
+     "@acme/shared": "0.0.0",
+     "@faker-js/faker": "10.6.0",
++    "@fastify/rate-limit": "11.2.0",
+     "@fastify/static": "10.1.6",
+     "@libsql/client": "0.18.0",
+     "drizzle-orm": "0.45.4",
+diff --git a/apps/api/src/app.ts b/apps/api/src/app.ts
+index 1818973..88c622b 100644
+--- a/apps/api/src/app.ts
++++ b/apps/api/src/app.ts
+@@ -1,9 +1,14 @@
+ import Fastify, { type FastifyInstance } from 'fastify';
++import { validatorCompiler } from 'fastify-type-provider-zod';
+ import type { Config } from './config.ts';
+ import type { Db } from './db/client.ts';
+ import type { Clock } from './domain/clock.ts';
+ import { registerErrorHandling } from './http/error-handler.ts';
++import { loggerOptions } from './http/logger.ts';
++import { registerRouteCatalog } from './http/route-catalog.ts';
+ import { registerStatic } from './http/static.ts';
++import { registerAuth } from './modules/auth/plugin.ts';
++import { authRoutes } from './modules/auth/routes.ts';
+ import { healthRoutes } from './modules/health/routes.ts';
+ 
+ export type AppDeps = {
+@@ -12,13 +17,26 @@ export type AppDeps = {
+   config: Config;
+   /** Folder with the web build; static serving with an SPA fallback is on when set. */
+   staticRoot?: string;
++  /** Where log lines go; stdout when absent. Tests capture it (05 section 5.0). */
++  logStream?: { write(line: string): void };
+ };
+ 
+ // The composition root used by main.ts and every test (03 section 6, rule 1).
+ export function buildApp(deps: AppDeps): FastifyInstance {
+-  const app = Fastify({ logger: { level: deps.config.logLevel }, trustProxy: true });
++  const app = Fastify({
++    logger: loggerOptions(deps.config, deps.logStream),
++    // Trust only the immediate peer, Render's proxy (the service has no other way in), so
++    // request.ip is the address it appends and a client can't spoof X-Forwarded-For to get round
++    // the login rate limit. 04 section 4.1 says `true`; changed after the S2 review.
++    trustProxy: (_address, hop) => hop === 0,
++  });
++  // Step 5 of the request pipeline (04 section 4.3): zod validation of params, query and body.
++  app.setValidatorCompiler(validatorCompiler);
++  registerRouteCatalog(app);
+   if (deps.staticRoot) registerStatic(app, deps.staticRoot);
+   registerErrorHandling(app, { spaFallback: Boolean(deps.staticRoot) });
++  registerAuth(app, deps);
+   healthRoutes(app, { db: deps.db });
++  authRoutes(app, deps);
+   return app;
+ }
+diff --git a/apps/api/src/config.test.ts b/apps/api/src/config.test.ts
+index e218e7b..7f587a8 100644
+--- a/apps/api/src/config.test.ts
++++ b/apps/api/src/config.test.ts
+@@ -1,5 +1,6 @@
+ import { describe, expect, it } from 'vitest';
+ import { ConfigError, loadConfig } from './config.ts';
++import { PRODUCTION_SCRYPT } from './modules/auth/password.ts';
+ 
+ function invalidVariables(env: Record<string, string | undefined>): string[] {
+   try {
+@@ -19,7 +20,7 @@ describe('config', () => {
+     expect(variables).toEqual(expect.arrayContaining(['DATABASE_URL', 'PORT', 'LOG_LEVEL']));
+   });
+ 
+-  it('applies the documented defaults when optional variables are absent or empty', () => {
++  it('applies the documented defaults, including the production scrypt cost, when optional variables are absent or empty', () => {
+     const config = loadConfig({
+       DATABASE_URL: 'file:./data/dev.db',
+       ANTHROPIC_API_KEY: '',
+@@ -36,6 +37,7 @@ describe('config', () => {
+       askUserDailyLimit: 30,
+       askGlobalDailyLimit: 300,
+       logLevel: 'info',
++      scrypt: PRODUCTION_SCRYPT,
+     });
+   });
+ 
+diff --git a/apps/api/src/config.ts b/apps/api/src/config.ts
+index ff35ed7..d60f93e 100644
+--- a/apps/api/src/config.ts
++++ b/apps/api/src/config.ts
+@@ -1,4 +1,5 @@
+ import { z } from 'zod';
++import { PRODUCTION_SCRYPT, type ScryptParams } from './modules/auth/password.ts';
+ 
+ export type Config = {
+   nodeEnv: 'development' | 'production' | 'test';
+@@ -10,6 +11,8 @@ export type Config = {
+   askUserDailyLimit: number;
+   askGlobalDailyLimit: number;
+   logLevel: 'fatal' | 'error' | 'warn' | 'info' | 'debug' | 'trace' | 'silent';
++  /** Password hashing cost (03 section 7); not an env variable. */
++  scrypt: ScryptParams;
+ };
+ 
+ export type ConfigProblem = { variable: string; message: string };
+@@ -78,5 +81,6 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
+     askUserDailyLimit: e.ASK_USER_DAILY_LIMIT,
+     askGlobalDailyLimit: e.ASK_GLOBAL_DAILY_LIMIT,
+     logLevel: e.LOG_LEVEL,
++    scrypt: PRODUCTION_SCRYPT,
+   };
+ }
+diff --git a/apps/api/src/domain/permissions.test.ts b/apps/api/src/domain/permissions.test.ts
+new file mode 100644
+index 0000000..8f7dd75
+--- /dev/null
++++ b/apps/api/src/domain/permissions.test.ts
+@@ -0,0 +1,45 @@
++import { actionSchema, type Action, type Role } from '@acme/shared';
++import { describe, expect, it } from 'vitest';
++import { aggregateMinGroupSize, can, permissionsFor } from './permissions.ts';
++
++// 04 section 4.5, copied row by row: action, HR Admin, HR Viewer, Finance.
++const TABLE: [Action, boolean, boolean, boolean][] = [
++  ['reference.read', true, true, true],
++  ['employee.read', true, true, false],
++  ['employee.write', true, false, false],
++  ['salary.read', true, true, false],
++  ['salary.write', true, false, false],
++  ['export.employees', true, true, false],
++  ['insights.read', true, true, true],
++  ['ask.use', true, true, true],
++];
++
++const ROLES: Role[] = ['hr_admin', 'hr_viewer', 'finance'];
++
++const cases = TABLE.flatMap(([action, ...allowed]) =>
++  ROLES.map((role, i) => ({ action, role, allowed: allowed[i] })),
++);
++
++describe('permissions (04 section 4.5)', () => {
++  it('covers every action in the shared Action enum', () => {
++    expect(TABLE.map(([action]) => action)).toEqual(actionSchema.options);
++  });
++
++  it.each(cases)(
++    'the permissions table matches 04 section 4.5: $role may $action is $allowed',
++    ({ role, action, allowed }) => {
++      expect(can(role, action)).toBe(allowed);
++      expect(permissionsFor(role).includes(action)).toBe(allowed);
++    },
++  );
++
++  it("lists a role's actions in table order", () => {
++    expect(permissionsFor('finance')).toEqual(['reference.read', 'insights.read', 'ask.use']);
++  });
++
++  it('aggregateMinGroupSize is 5 for Finance and 1 for the HR roles', () => {
++    expect(aggregateMinGroupSize('finance')).toBe(5);
++    expect(aggregateMinGroupSize('hr_admin')).toBe(1);
++    expect(aggregateMinGroupSize('hr_viewer')).toBe(1);
++  });
++});
+diff --git a/apps/api/src/domain/permissions.ts b/apps/api/src/domain/permissions.ts
+new file mode 100644
+index 0000000..2c12db8
+--- /dev/null
++++ b/apps/api/src/domain/permissions.ts
+@@ -0,0 +1,29 @@
++import { actionSchema, type Action, type Role } from '@acme/shared';
++
++// 04 section 4.5, exactly. /api/auth/me returns the viewer's row as `permissions`.
++const ALLOWED: Record<Role, ReadonlySet<Action>> = {
++  hr_admin: new Set(actionSchema.options),
++  hr_viewer: new Set<Action>([
++    'reference.read',
++    'employee.read',
++    'salary.read',
++    'export.employees',
++    'insights.read',
++    'ask.use',
++  ]),
++  finance: new Set<Action>(['reference.read', 'insights.read', 'ask.use']),
++};
++
++/** The actions a role may perform, in 04 section 4.5 order. */
++export function permissionsFor(role: Role): Action[] {
++  return actionSchema.options.filter((action) => ALLOWED[role].has(action));
++}
++
++export function can(role: Role, action: Action): boolean {
++  return ALLOWED[role].has(action);
++}
++
++/** The smallest group the pay engine reports for this role (04 section 6). */
++export function aggregateMinGroupSize(role: Role): number {
++  return role === 'finance' ? 5 : 1;
++}
+diff --git a/apps/api/src/http/access-matrix.test.ts b/apps/api/src/http/access-matrix.test.ts
+new file mode 100644
+index 0000000..795e33f
+--- /dev/null
++++ b/apps/api/src/http/access-matrix.test.ts
+@@ -0,0 +1,111 @@
++import type { Role } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { aSessionFor, aUser } from '../../test/builders/index.ts';
++import { testApp, testDb } from '../../test/helpers.ts';
++import { can } from '../domain/permissions.ts';
++import type { RouteAccess } from './guard.ts';
++import { routeCatalog, type CatalogEntry } from './route-catalog.ts';
++
++// D-054: every route and what it needs. A new route fails the last test until it gets a row here.
++const EXPECTED_ACCESS: Record<string, RouteAccess> = {
++  'GET /api/health': 'public',
++  'POST /api/auth/login': 'public',
++  'POST /api/auth/logout': 'public',
++  'GET /api/auth/me': 'authenticated',
++};
++
++const ROLES: Role[] = ['hr_admin', 'hr_viewer', 'finance'];
++const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
++
++const key = (entry: CatalogEntry) => `${entry.method} ${entry.url}`;
++// Path parameters get a sample value; the guard runs before any lookup.
++const sampleUrl = (url: string) => url.replace(/:[A-Za-z]+/g, '1');
++
++function call(app: FastifyInstance, entry: CatalogEntry, cookie?: string, payload: object = {}) {
++  return app.inject({
++    method: entry.method as 'GET' | 'POST',
++    url: sampleUrl(entry.url),
++    headers: cookie ? { cookie } : {},
++    ...(WRITE_METHODS.has(entry.method) ? { payload } : {}),
++  });
++}
++
++const deniedTo = (role: Role, access: RouteAccess | undefined) =>
++  access !== undefined && access !== 'public' && access !== 'authenticated' && !can(role, access);
++
++describe('access matrix (D-054)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  // Each call gets its own session, so a route that ends one (logout) can't affect the next call.
++  async function appWithRoles() {
++    const db = await testDb();
++    const userIds = {} as Record<Role, number>;
++    for (const role of ROLES) userIds[role] = (await aUser(role).insert(db)).id;
++    app = testApp({ db });
++    await app.ready();
++    const sessionAs = (role: Role) => aSessionFor(db, userIds[role]);
++    return { app, sessionAs };
++  }
++
++  it('every route, called logged out, returns 401 except the public ones', async () => {
++    const { app } = await appWithRoles();
++
++    for (const entry of routeCatalog(app)) {
++      const response = await call(app, entry);
++      const isPublic = EXPECTED_ACCESS[key(entry)] === 'public';
++      expect({ route: key(entry), unauthorized: response.statusCode === 401 }).toEqual({
++        route: key(entry),
++        unauthorized: !isPublic,
++      });
++    }
++  });
++
++  it('every route, called as each role, returns 403 exactly when 04 section 4.5 says the role lacks the action', async () => {
++    const { app, sessionAs } = await appWithRoles();
++
++    for (const entry of routeCatalog(app)) {
++      for (const role of ROLES) {
++        const response = await call(app, entry, await sessionAs(role));
++        expect({ route: key(entry), role, status: response.statusCode }).toEqual({
++          route: key(entry),
++          role,
++          status: deniedTo(role, EXPECTED_ACCESS[key(entry)])
++            ? 403
++            : expect.not.toBeOneOf([401, 403]),
++        });
++      }
++    }
++  });
++
++  // No write route Finance may not use exists until S5; the guard test covers the rule meanwhile.
++  it('Finance gets 403, not 400, on every write route it may not use', async () => {
++    const { app, sessionAs } = await appWithRoles();
++    const writes = routeCatalog(app).filter(
++      (entry) => WRITE_METHODS.has(entry.method) && deniedTo('finance', entry.access),
++    );
++
++    for (const entry of writes) {
++      const response = await call(app, entry, await sessionAs('finance'), { unknownField: '' });
++      expect({ route: key(entry), status: response.statusCode }).toEqual({
++        route: key(entry),
++        status: 403,
++      });
++    }
++  });
++
++  it('every registered route appears in the expected-access table', async () => {
++    const { app } = await appWithRoles();
++
++    const registered = Object.fromEntries(
++      routeCatalog(app).map((entry) => [key(entry), entry.access]),
++    );
++
++    expect(registered).toEqual(EXPECTED_ACCESS);
++  });
++});
+diff --git a/apps/api/src/http/error-handler.ts b/apps/api/src/http/error-handler.ts
+index c8120ee..9ba5c93 100644
+--- a/apps/api/src/http/error-handler.ts
++++ b/apps/api/src/http/error-handler.ts
+@@ -1,4 +1,5 @@
+ import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
++import { hasZodFastifySchemaValidationErrors } from 'fastify-type-provider-zod';
+ import { AppError, problem, type ProblemInput } from './problem.ts';
+ 
+ const pathOf = (request: FastifyRequest): string => request.url.split('?', 1)[0] ?? request.url;
+@@ -38,6 +39,20 @@ export function registerErrorHandling(
+         instance: pathOf(request),
+       });
+     }
++    if (hasZodFastifySchemaValidationErrors(error)) {
++      const errors = error.validation.map((issue) => ({
++        path: issue.instancePath.slice(1).replaceAll('/', '.'),
++        message: issue.message ?? 'Invalid value.',
++      }));
++      return sendProblem(reply, {
++        status: 400,
++        code: 'VALIDATION_FAILED',
++        detail:
++          errors.length === 1 ? '1 field is invalid.' : `${errors.length} fields are invalid.`,
++        instance: pathOf(request),
++        errors,
++      });
++    }
+     if (error.code === 'FST_ERR_CTP_INVALID_MEDIA_TYPE') {
+       return sendProblem(reply, {
+         status: 415,
+diff --git a/apps/api/src/http/guard.test.ts b/apps/api/src/http/guard.test.ts
+new file mode 100644
+index 0000000..208cb0b
+--- /dev/null
++++ b/apps/api/src/http/guard.test.ts
+@@ -0,0 +1,118 @@
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { z } from 'zod';
++import { loggedInAs } from '../../test/builders/index.ts';
++import { testApp, testDb } from '../../test/helpers.ts';
++import type { Db } from '../db/client.ts';
++import { requires } from './guard.ts';
++
++// Test-only routes: S2 has no production route that needs an action yet (04 section 4.3).
++function withTestRoutes(app: FastifyInstance) {
++  app.get('/api/__test/read', { onRequest: requires('employee.read') }, async () => ({ ok: true }));
++  app.post(
++    '/api/__test/write',
++    {
++      onRequest: requires('employee.write'),
++      schema: { body: z.object({ firstName: z.string().min(1) }) },
++    },
++    async () => ({ ok: true }),
++  );
++  app.get('/api/__test/public', { onRequest: requires('public') }, async () => ({ ok: true }));
++  app.get('/api/__test/session', { onRequest: requires('authenticated') }, async () => ({
++    ok: true,
++  }));
++  return app;
++}
++
++describe('requires(action) guard (D-043)', () => {
++  let app: FastifyInstance | undefined;
++  let db: Db;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  it('a guarded route returns 401 UNAUTHENTICATED when logged out', async () => {
++    app = withTestRoutes(testApp());
++
++    const response = await app.inject({ method: 'GET', url: '/api/__test/read' });
++
++    expect(response.statusCode).toBe(401);
++    expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
++    expect(response.json()).toMatchObject({
++      status: 401,
++      code: 'UNAUTHENTICATED',
++      instance: '/api/__test/read',
++    });
++  });
++
++  it('a guarded route returns 403 FORBIDDEN when the role lacks the action', async () => {
++    db = await testDb();
++    const finance = await loggedInAs(db, 'finance');
++    const viewer = await loggedInAs(db, 'hr_viewer');
++    app = withTestRoutes(testApp({ db }));
++
++    const forbidden = await app.inject({
++      method: 'GET',
++      url: '/api/__test/read',
++      headers: { cookie: finance.cookie },
++    });
++    const allowed = await app.inject({
++      method: 'GET',
++      url: '/api/__test/read',
++      headers: { cookie: viewer.cookie },
++    });
++
++    expect(forbidden.statusCode).toBe(403);
++    expect(forbidden.json()).toMatchObject({ title: 'Forbidden', status: 403, code: 'FORBIDDEN' });
++    expect(allowed.statusCode).toBe(200);
++  });
++
++  it('a Finance user sending an invalid body to a write route gets 403, not 400', async () => {
++    db = await testDb();
++    const finance = await loggedInAs(db, 'finance');
++    const admin = await loggedInAs(db, 'hr_admin');
++    app = withTestRoutes(testApp({ db }));
++    const invalid = { firstName: '', unknown: 1 };
++
++    const asFinance = await app.inject({
++      method: 'POST',
++      url: '/api/__test/write',
++      headers: { cookie: finance.cookie },
++      payload: invalid,
++    });
++    const asAdmin = await app.inject({
++      method: 'POST',
++      url: '/api/__test/write',
++      headers: { cookie: admin.cookie },
++      payload: invalid,
++    });
++
++    expect(asFinance.statusCode).toBe(403);
++    expect(asFinance.json()).toMatchObject({ code: 'FORBIDDEN' });
++    expect(asAdmin.statusCode).toBe(400);
++    expect(asAdmin.json()).toMatchObject({
++      code: 'VALIDATION_FAILED',
++      errors: [expect.objectContaining({ path: 'firstName' })],
++    });
++  });
++
++  it("'public' always passes, and 'authenticated' needs a session but no action", async () => {
++    db = await testDb();
++    const finance = await loggedInAs(db, 'finance');
++    app = withTestRoutes(testApp({ db }));
++
++    const publicLoggedOut = await app.inject({ method: 'GET', url: '/api/__test/public' });
++    const sessionLoggedOut = await app.inject({ method: 'GET', url: '/api/__test/session' });
++    const sessionAsFinance = await app.inject({
++      method: 'GET',
++      url: '/api/__test/session',
++      headers: { cookie: finance.cookie },
++    });
++
++    expect(publicLoggedOut.statusCode).toBe(200);
++    expect(sessionLoggedOut.statusCode).toBe(401);
++    expect(sessionAsFinance.statusCode).toBe(200);
++  });
++});
+diff --git a/apps/api/src/http/guard.ts b/apps/api/src/http/guard.ts
+new file mode 100644
+index 0000000..80d9433
+--- /dev/null
++++ b/apps/api/src/http/guard.ts
+@@ -0,0 +1,23 @@
++import type { Action } from '@acme/shared';
++import type { onRequestHookHandler } from 'fastify';
++import { can } from '../domain/permissions.ts';
++import { AppError } from './problem.ts';
++
++/** What a route needs: an action from 04 section 4.5, any session, or nothing. */
++export type RouteAccess = Action | 'authenticated' | 'public';
++
++/**
++ * Step 2 of the request pipeline (04 section 4.3), declared per route as `onRequest`, so a role
++ * without the action gets 403 before its body is validated (D-043).
++ */
++export function requires(access: RouteAccess): onRequestHookHandler & { access: RouteAccess } {
++  const hook: onRequestHookHandler = async (request) => {
++    if (access === 'public') return;
++    if (!request.viewer) throw new AppError(401, 'UNAUTHENTICATED', 'Log in to continue.');
++    if (access !== 'authenticated' && !can(request.viewer.role, access)) {
++      throw new AppError(403, 'FORBIDDEN', "You don't have access to this.");
++    }
++  };
++  // The route catalog reads this back (D-054).
++  return Object.assign(hook, { access });
++}
+diff --git a/apps/api/src/http/logger.test.ts b/apps/api/src/http/logger.test.ts
+new file mode 100644
+index 0000000..751dd18
+--- /dev/null
++++ b/apps/api/src/http/logger.test.ts
+@@ -0,0 +1,62 @@
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { loggedInAs } from '../../test/builders/index.ts';
++import { testApp, testConfig, testDb } from '../../test/helpers.ts';
++
++describe('logging and caching (05 section 5.0)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  it('authenticated responses carry Cache-Control: no-store', async () => {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, 'hr_viewer');
++    app = testApp({ db });
++
++    const response = await app.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } });
++
++    expect(response.statusCode).toBe(200);
++    expect(response.headers['cache-control']).toBe('no-store');
++  });
++
++  it('logs redact the cookie header, password and any *Minor field', async () => {
++    const lines: string[] = [];
++    app = testApp({
++      config: { ...testConfig, logLevel: 'info' },
++      logStream: { write: (line) => void lines.push(line) },
++    });
++    app.post('/api/__test/log', async (request) => {
++      request.log.info({ headers: request.headers, body: request.body }, 'echo');
++      return {};
++    });
++
++    await app.inject({
++      method: 'POST',
++      url: '/api/__test/log',
++      headers: { cookie: 'sid=secret-session-token' },
++      payload: {
++        email: 'hr.admin@acme.test',
++        password: 'hunter2-secret',
++        salary: { amountMinor: 4242424, currency: 'INR' },
++        nested: [{ midMinor: 7373737 }],
++      },
++    });
++    const output = lines.join('');
++    const echo = lines.map((line) => JSON.parse(line)).find((entry) => entry.msg === 'echo');
++
++    expect(echo).toBeDefined();
++    expect(echo.body.email).toBe('hr.admin@acme.test');
++    expect(echo.body.salary.currency).toBe('INR');
++    expect(echo.headers.cookie).toBe('[Redacted]');
++    expect(echo.body.password).toBe('[Redacted]');
++    expect(echo.body.salary.amountMinor).toBe('[Redacted]');
++    expect(echo.body.nested[0].midMinor).toBe('[Redacted]');
++    expect(output).not.toContain('secret-session-token');
++    expect(output).not.toContain('hunter2-secret');
++    expect(output).not.toContain('4242424');
++    expect(output).not.toContain('7373737');
++  });
++});
+diff --git a/apps/api/src/http/logger.ts b/apps/api/src/http/logger.ts
+new file mode 100644
+index 0000000..070f7ef
+--- /dev/null
++++ b/apps/api/src/http/logger.ts
+@@ -0,0 +1,29 @@
++import type { FastifyServerOptions } from 'fastify';
++import type { Config } from '../config.ts';
++
++const REDACTED = '[Redacted]';
++const SECRET_KEYS = new Set(['cookie', 'set-cookie', 'password']);
++
++// Salary amounts (`*Minor`), passwords and the session cookie never reach the logs, at any depth
++// (05 section 5.0).
++function redact(value: unknown): unknown {
++  if (Array.isArray(value)) return value.map(redact);
++  if (value === null || typeof value !== 'object') return value;
++  return Object.fromEntries(
++    Object.entries(value).map(([key, inner]) => [
++      key,
++      SECRET_KEYS.has(key.toLowerCase()) || key.endsWith('Minor') ? REDACTED : redact(inner),
++    ]),
++  );
++}
++
++export function loggerOptions(
++  config: Config,
++  stream?: { write(line: string): void },
++): FastifyServerOptions['logger'] {
++  return {
++    level: config.logLevel,
++    formatters: { log: (entry) => redact(entry) as Record<string, unknown> },
++    ...(stream ? { stream } : {}),
++  };
++}
+diff --git a/apps/api/src/http/route-catalog.ts b/apps/api/src/http/route-catalog.ts
+new file mode 100644
+index 0000000..895a9cd
+--- /dev/null
++++ b/apps/api/src/http/route-catalog.ts
+@@ -0,0 +1,35 @@
++import type { FastifyInstance } from 'fastify';
++import type { RouteAccess } from './guard.ts';
++
++export type CatalogEntry = {
++  method: string;
++  url: string;
++  /** The route's `requires(...)`, or undefined when it declares none. */
++  access: RouteAccess | undefined;
++};
++
++const catalogs = new WeakMap<FastifyInstance, CatalogEntry[]>();
++
++const accessOf = (hooks: unknown): RouteAccess | undefined =>
++  [hooks]
++    .flat()
++    .map((hook) => (hook as { access?: RouteAccess } | undefined)?.access)
++    .find(Boolean);
++
++/** Records every /api route and its access as it is added; call before any route (D-054). */
++export function registerRouteCatalog(app: FastifyInstance) {
++  const entries: CatalogEntry[] = [];
++  catalogs.set(app, entries);
++  app.addHook('onRoute', (route) => {
++    if (!route.url.startsWith('/api/')) return;
++    for (const method of [route.method].flat()) {
++      if (method === 'HEAD') continue;
++      entries.push({ method, url: route.url, access: accessOf(route.onRequest) });
++    }
++  });
++}
++
++/** Every route buildApp registered, with its access (D-054). HEAD twins of GET are left out. */
++export function routeCatalog(app: FastifyInstance): CatalogEntry[] {
++  return [...(catalogs.get(app) ?? [])];
++}
+diff --git a/apps/api/src/modules/auth/cookie.ts b/apps/api/src/modules/auth/cookie.ts
+new file mode 100644
+index 0000000..2c50e37
+--- /dev/null
++++ b/apps/api/src/modules/auth/cookie.ts
+@@ -0,0 +1,25 @@
++// The session cookie `sid` (ADR 0006). Hand-rolled: no cookie plugin is named in the docs.
++export const SESSION_COOKIE = 'sid';
++export const SESSION_SECONDS = 8 * 60 * 60;
++
++export function sessionCookie(token: string, { secure }: { secure: boolean }): string {
++  const attributes = ['HttpOnly', 'SameSite=Lax', 'Path=/', `Max-Age=${SESSION_SECONDS}`];
++  if (secure) attributes.push('Secure');
++  return [`${SESSION_COOKIE}=${token}`, ...attributes].join('; ');
++}
++
++/** Clears `sid` on logout. */
++export function clearedSessionCookie({ secure }: { secure: boolean }): string {
++  const attributes = ['HttpOnly', 'SameSite=Lax', 'Path=/', 'Max-Age=0'];
++  if (secure) attributes.push('Secure');
++  return [`${SESSION_COOKIE}=`, ...attributes].join('; ');
++}
++
++/** The `sid` value from a Cookie request header, if present. */
++export function readSid(header: string | undefined): string | undefined {
++  for (const pair of (header ?? '').split(';')) {
++    const [name, ...value] = pair.trim().split('=');
++    if (name === SESSION_COOKIE) return value.join('=') || undefined;
++  }
++  return undefined;
++}
+diff --git a/apps/api/src/modules/auth/plugin.ts b/apps/api/src/modules/auth/plugin.ts
+new file mode 100644
+index 0000000..2f27143
+--- /dev/null
++++ b/apps/api/src/modules/auth/plugin.ts
+@@ -0,0 +1,32 @@
++import type { Role } from '@acme/shared';
++import type { FastifyInstance } from 'fastify';
++import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
++import { readSid } from './cookie.ts';
++import { hashToken } from './service.ts';
++import { findSessionUser } from './sessions.ts';
++
++export type Viewer = { id: number; email: string; displayName: string; role: Role };
++
++declare module 'fastify' {
++  interface FastifyRequest {
++    viewer: Viewer | null;
++  }
++}
++
++// Step 1 of the request pipeline (04 section 4.3): resolve the `sid` cookie to the viewer.
++export function registerAuth(app: FastifyInstance, { db, clock }: { db: Db; clock: Clock }) {
++  app.decorateRequest('viewer', null);
++  app.addHook('onRequest', async (request) => {
++    const token = readSid(request.headers.cookie);
++    const user = token ? await findSessionUser(db, hashToken(token), clock.now()) : undefined;
++    request.viewer = user
++      ? { id: user.id, email: user.email, displayName: user.displayName, role: user.role }
++      : null;
++  });
++
++  // Salary data must not sit in shared or disk caches (04 section 4.1).
++  app.addHook('onSend', async (request, reply) => {
++    if (request.viewer) reply.header('cache-control', 'no-store');
++  });
++}
+diff --git a/apps/api/src/modules/auth/routes.test.ts b/apps/api/src/modules/auth/routes.test.ts
+new file mode 100644
+index 0000000..51a3b98
+--- /dev/null
++++ b/apps/api/src/modules/auth/routes.test.ts
+@@ -0,0 +1,318 @@
++import { createHash } from 'node:crypto';
++import type { FastifyInstance } from 'fastify';
++import { afterEach, describe, expect, it } from 'vitest';
++import { aUser, loggedInAs } from '../../../test/builders/index.ts';
++import { testApp, testConfig, testDb } from '../../../test/helpers.ts';
++import type { Db } from '../../db/client.ts';
++import { fixedClock } from '../../domain/clock.ts';
++
++const sha256 = (value: string) => createHash('sha256').update(value).digest('hex');
++
++function sidFrom(setCookie: string | string[] | undefined): string {
++  const header = Array.isArray(setCookie) ? setCookie[0] : setCookie;
++  const match = /^sid=([^;]+)/.exec(header ?? '');
++  if (!match?.[1]) throw new Error(`no sid cookie in ${String(header)}`);
++  return match[1];
++}
++
++describe('POST /api/auth/login (A2)', () => {
++  let app: FastifyInstance | undefined;
++  let db: Db;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  async function login(email: string, password: string) {
++    return app!.inject({
++      method: 'POST',
++      url: '/api/auth/login',
++      payload: { email, password },
++    });
++  }
++
++  it('logging in with correct details returns the me body and sets an HttpOnly, SameSite=Lax cookie', async () => {
++    db = await testDb();
++    const user = await aUser('hr_viewer').withEmail('viewer@test.local').insert(db);
++    app = testApp({ db });
++
++    const response = await login('viewer@test.local', user.password);
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toEqual({
++      user: {
++        id: user.id,
++        email: 'viewer@test.local',
++        displayName: 'HR Viewer (test)',
++        role: 'hr_viewer',
++      },
++      permissions: [
++        'reference.read',
++        'employee.read',
++        'salary.read',
++        'export.employees',
++        'insights.read',
++        'ask.use',
++      ],
++      askEnabled: false,
++      today: '2026-10-09',
++      fxAsOf: '2026-09-30',
++    });
++    const cookie = String(response.headers['set-cookie']);
++    expect(cookie).toMatch(/^sid=[A-Za-z0-9_-]{43};/);
++    expect(cookie).toContain('; HttpOnly');
++    expect(cookie).toContain('; SameSite=Lax');
++    expect(cookie).toContain('; Path=/');
++    expect(cookie).toContain('; Max-Age=28800');
++    expect(cookie).not.toContain('Secure');
++  });
++
++  it.each([
++    ['password', { email: 'viewer@test.local' }],
++    ['email', { email: 'not-an-email', password: 'test-password-123' }],
++  ])('returns 400 VALIDATION_FAILED for a malformed login body (%s)', async (path, payload) => {
++    app = testApp();
++
++    const response = await app.inject({ method: 'POST', url: '/api/auth/login', payload });
++
++    expect(response.statusCode).toBe(400);
++    expect(response.json()).toMatchObject({
++      code: 'VALIDATION_FAILED',
++      errors: [expect.objectContaining({ path })],
++    });
++  });
++
++  it('matches the email after trimming and lower-casing it', async () => {
++    db = await testDb();
++    const user = await aUser('finance').withEmail('finance@test.local').insert(db);
++    app = testApp({ db });
++
++    const response = await login('  Finance@Test.Local ', user.password);
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toMatchObject({ user: { id: user.id, role: 'finance' } });
++  });
++
++  it('the cookie is Secure when NODE_ENV is production', async () => {
++    db = await testDb();
++    const user = await aUser('hr_admin').insert(db);
++    app = testApp({ db, config: { ...testConfig, nodeEnv: 'production' } });
++
++    const response = await login(user.email, user.password);
++
++    expect(response.statusCode).toBe(200);
++    expect(String(response.headers['set-cookie'])).toContain('; Secure');
++  });
++
++  it("the session table stores the token's hash, not the token", async () => {
++    db = await testDb();
++    const user = await aUser('hr_admin').insert(db);
++    app = testApp({ db });
++
++    const response = await login(user.email, user.password);
++    expect(response.statusCode).toBe(200);
++    const token = sidFrom(response.headers['set-cookie']);
++    const rows = await db.all<{
++      token_hash: string;
++      user_id: number;
++      created_at: string;
++      expires_at: string;
++    }>('SELECT token_hash, user_id, created_at, expires_at FROM sessions');
++
++    expect(rows).toEqual([
++      {
++        token_hash: sha256(token),
++        user_id: user.id,
++        created_at: '2026-10-09T09:00:00.000Z',
++        expires_at: '2026-10-09T17:00:00.000Z',
++      },
++    ]);
++    expect(rows[0]?.token_hash).not.toContain(token);
++  });
++
++  it('a wrong password and an unknown email return the same 401 body', async () => {
++    db = await testDb();
++    const user = await aUser('hr_admin').insert(db);
++    app = testApp({ db });
++
++    const wrongPassword = await login(user.email, 'not-the-password');
++    const unknownEmail = await login('nobody@test.local', user.password);
++
++    expect(wrongPassword.statusCode).toBe(401);
++    expect(unknownEmail.statusCode).toBe(401);
++    expect(wrongPassword.headers['content-type']).toMatch(/^application\/problem\+json/);
++    expect(wrongPassword.json()).toEqual({
++      type: 'about:blank',
++      title: 'Unauthorized',
++      status: 401,
++      detail: 'Email or password is incorrect.',
++      code: 'INVALID_CREDENTIALS',
++      instance: '/api/auth/login',
++    });
++    expect(unknownEmail.json()).toEqual(wrongPassword.json());
++    expect(wrongPassword.headers['set-cookie']).toBeUndefined();
++    expect(await db.all('SELECT * FROM sessions')).toEqual([]);
++  });
++
++  describe('rate limit', () => {
++    const attemptFrom = (ip: string) =>
++      app!.inject({
++        method: 'POST',
++        url: '/api/auth/login',
++        headers: { 'x-forwarded-for': ip },
++        payload: { email: 'nobody@test.local', password: 'wrong-password' },
++      });
++
++    it('the 11th login attempt in a minute from one IP returns 429 with Retry-After', async () => {
++      app = testApp();
++
++      for (let i = 0; i < 10; i++) {
++        expect((await attemptFrom('203.0.113.7')).statusCode).toBe(401);
++      }
++      const response = await attemptFrom('203.0.113.7');
++
++      expect(response.statusCode).toBe(429);
++      expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
++      expect(response.json()).toMatchObject({
++        type: 'about:blank',
++        title: 'Too Many Requests',
++        status: 429,
++        code: 'RATE_LIMITED',
++        instance: '/api/auth/login',
++      });
++      const retryAfter = Number(response.headers['retry-after']);
++      expect(Number.isInteger(retryAfter)).toBe(true);
++      expect(retryAfter).toBeGreaterThan(0);
++      expect(retryAfter).toBeLessThanOrEqual(60);
++    });
++
++    it('ignores X-Forwarded-For entries the client added before the proxy', async () => {
++      app = testApp();
++
++      // Render appends the real client address; anything to its left came from the client.
++      for (let i = 0; i < 10; i++) await attemptFrom(`10.0.0.${i}, 203.0.113.7`);
++      const response = await attemptFrom('10.0.0.99, 203.0.113.7');
++
++      expect(response.statusCode).toBe(429);
++    });
++
++    it('counts login attempts per client IP taken from X-Forwarded-For', async () => {
++      app = testApp();
++
++      for (let i = 0; i < 11; i++) await attemptFrom('203.0.113.7');
++      const otherClient = await attemptFrom('198.51.100.9');
++
++      expect(otherClient.statusCode).toBe(401);
++    });
++  });
++});
++
++describe('GET /api/auth/me (A4)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  const me = (cookie?: string) =>
++    app!.inject({ method: 'GET', url: '/api/auth/me', headers: cookie ? { cookie } : {} });
++
++  it("me returns the role's permissions, today from the clock, and askEnabled false without an API key", async () => {
++    const db = await testDb();
++    const { cookie, user } = await loggedInAs(db, 'finance');
++    app = testApp({ db });
++
++    const response = await me(cookie);
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toEqual({
++      user: { id: user.id, email: user.email, displayName: 'Finance (test)', role: 'finance' },
++      permissions: ['reference.read', 'insights.read', 'ask.use'],
++      askEnabled: false,
++      today: '2026-10-09',
++      fxAsOf: '2026-09-30',
++    });
++  });
++
++  it('me returns askEnabled true when an API key is set', async () => {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, 'hr_viewer');
++    app = testApp({ db, config: { ...testConfig, anthropicApiKey: 'sk-test' } });
++
++    const response = await me(cookie);
++
++    expect(response.statusCode).toBe(200);
++    expect(response.json()).toMatchObject({ askEnabled: true });
++  });
++
++  it('me without a session returns 401 UNAUTHENTICATED', async () => {
++    app = testApp();
++
++    const response = await me();
++
++    expect(response.statusCode).toBe(401);
++    expect(response.headers['content-type']).toMatch(/^application\/problem\+json/);
++    expect(response.json()).toMatchObject({
++      title: 'Unauthorized',
++      status: 401,
++      code: 'UNAUTHENTICATED',
++      instance: '/api/auth/me',
++    });
++  });
++});
++
++describe('session expiry and POST /api/auth/logout (A3)', () => {
++  let app: FastifyInstance | undefined;
++
++  afterEach(async () => {
++    await app?.close();
++    app = undefined;
++  });
++
++  const me = (cookie: string) =>
++    app!.inject({ method: 'GET', url: '/api/auth/me', headers: { cookie } });
++
++  it('a session older than 8 hours returns 401', async () => {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, 'hr_admin');
++    const clock = fixedClock('2026-10-09T09:00:00.000Z');
++    app = testApp({ db, clock });
++
++    clock.advance(8 * 60 * 60 * 1000 - 1);
++    const lastMoment = await me(cookie);
++    clock.advance(1);
++    const expired = await me(cookie);
++
++    expect(lastMoment.statusCode).toBe(200);
++    expect(expired.statusCode).toBe(401);
++    expect(expired.json()).toMatchObject({ code: 'UNAUTHENTICATED' });
++  });
++
++  it('logout deletes the session, and the old cookie then returns 401', async () => {
++    const db = await testDb();
++    const { cookie } = await loggedInAs(db, 'hr_viewer');
++    app = testApp({ db });
++
++    const response = await app.inject({
++      method: 'POST',
++      url: '/api/auth/logout',
++      headers: { cookie },
++      payload: {},
++    });
++
++    expect(response.statusCode).toBe(204);
++    expect(String(response.headers['set-cookie'])).toMatch(/^sid=; .*Max-Age=0/);
++    expect(await db.all('SELECT * FROM sessions')).toEqual([]);
++    expect((await me(cookie)).statusCode).toBe(401);
++  });
++
++  it('logout without a session returns 204', async () => {
++    app = testApp();
++
++    const response = await app.inject({ method: 'POST', url: '/api/auth/logout' });
++
++    expect(response.statusCode).toBe(204);
++  });
++});
+diff --git a/apps/api/src/modules/auth/routes.ts b/apps/api/src/modules/auth/routes.ts
+new file mode 100644
+index 0000000..e998586
+--- /dev/null
++++ b/apps/api/src/modules/auth/routes.ts
+@@ -0,0 +1,57 @@
++import { loginBodySchema, type LoginBody, type MeResponse } from '@acme/shared';
++import rateLimit from '@fastify/rate-limit';
++import type { FastifyInstance } from 'fastify';
++import { requires } from '../../http/guard.ts';
++import { AppError } from '../../http/problem.ts';
++import { clearedSessionCookie, readSid, sessionCookie } from './cookie.ts';
++import { hashToken, login, meFor, type AuthDeps } from './service.ts';
++import { deleteSession } from './sessions.ts';
++
++// 10 attempts per minute per client IP; request.ip is the address the proxy appends (app.ts).
++const LOGIN_RATE_LIMIT = { max: 10, timeWindow: '1 minute' };
++
++// A2 to A4 (04 section 5.2).
++export function authRoutes(app: FastifyInstance, deps: AuthDeps) {
++  const secure = deps.config.nodeEnv === 'production';
++
++  app.register(async (scope) => {
++    await scope.register(rateLimit, {
++      global: false,
++      errorResponseBuilder: (_request, context) =>
++        new AppError(
++          429,
++          'RATE_LIMITED',
++          `Too many login attempts. Try again in ${Math.ceil(context.ttl / 1000)} seconds.`,
++        ),
++    });
++
++    scope.post(
++      '/api/auth/login',
++      {
++        onRequest: requires('public'),
++        schema: { body: loginBodySchema },
++        config: { rateLimit: LOGIN_RATE_LIMIT },
++      },
++      async (request, reply): Promise<MeResponse> => {
++        const body = request.body as LoginBody;
++        const { token, me } = await login(deps, body.email, body.password);
++        reply.header('set-cookie', sessionCookie(token, { secure }));
++        return me;
++      },
++    );
++  });
++
++  // Always 204, with or without a session (A3).
++  app.post('/api/auth/logout', { onRequest: requires('public') }, async (request, reply) => {
++    const token = readSid(request.headers.cookie);
++    if (token) await deleteSession(deps.db, hashToken(token));
++    reply.header('set-cookie', clearedSessionCookie({ secure }));
++    return reply.status(204).send();
++  });
++
++  app.get(
++    '/api/auth/me',
++    { onRequest: requires('authenticated') },
++    async (request): Promise<MeResponse> => meFor(deps, request.viewer!),
++  );
++}
+diff --git a/apps/api/src/modules/auth/service.ts b/apps/api/src/modules/auth/service.ts
+new file mode 100644
+index 0000000..df4dfaa
+--- /dev/null
++++ b/apps/api/src/modules/auth/service.ts
+@@ -0,0 +1,65 @@
++import type { MeResponse } from '@acme/shared';
++import { createHash, randomBytes } from 'node:crypto';
++import type { Config } from '../../config.ts';
++import type { Db } from '../../db/client.ts';
++import type { Clock } from '../../domain/clock.ts';
++import { can, permissionsFor } from '../../domain/permissions.ts';
++import { AppError } from '../../http/problem.ts';
++import { SESSION_SECONDS } from './cookie.ts';
++import { hashPassword, verifyPassword, type ScryptParams } from './password.ts';
++import { findUserByEmail, fxAsOf, insertSession, type UserRow } from './sessions.ts';
++
++export type AuthDeps = { db: Db; clock: Clock; config: Config };
++
++// An unknown email is still compared against a hash of the configured cost, so timing doesn't
++// reveal which emails exist (04 A2). One dummy hash per cost, made on first use.
++const dummyHashes = new Map<string, Promise<string>>();
++function dummyHash(params: ScryptParams): Promise<string> {
++  const key = `${params.N}$${params.r}$${params.p}`;
++  let hash = dummyHashes.get(key);
++  if (!hash) {
++    hash = hashPassword(randomBytes(16).toString('base64'), params);
++    dummyHashes.set(key, hash);
++  }
++  return hash;
++}
++
++export const hashToken = (token: string) => createHash('sha256').update(token).digest('hex');
++
++export async function meFor(
++  { db, clock, config }: AuthDeps,
++  user: Pick<UserRow, 'id' | 'email' | 'displayName' | 'role'>,
++): Promise<MeResponse> {
++  return {
++    user: { id: user.id, email: user.email, displayName: user.displayName, role: user.role },
++    permissions: permissionsFor(user.role),
++    askEnabled: Boolean(config.anthropicApiKey) && can(user.role, 'ask.use'),
++    today: clock.today(),
++    fxAsOf: await fxAsOf(db),
++  };
++}
++
++/** Checks the password, stores a new session and returns its raw token with the me body. */
++export async function login(
++  deps: AuthDeps,
++  email: string,
++  password: string,
++): Promise<{ token: string; me: MeResponse }> {
++  const user = await findUserByEmail(deps.db, email);
++  const matches = await verifyPassword(
++    password,
++    user?.passwordHash ?? (await dummyHash(deps.config.scrypt)),
++  );
++  if (!user || !matches) {
++    throw new AppError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
++  }
++  const token = randomBytes(32).toString('base64url');
++  const now = deps.clock.now();
++  await insertSession(deps.db, {
++    tokenHash: hashToken(token),
++    userId: user.id,
++    createdAt: now.toISOString(),
++    expiresAt: new Date(now.getTime() + SESSION_SECONDS * 1000).toISOString(),
++  });
++  return { token, me: await meFor(deps, user) };
++}
+diff --git a/apps/api/src/modules/auth/sessions.ts b/apps/api/src/modules/auth/sessions.ts
+new file mode 100644
+index 0000000..0edab3e
+--- /dev/null
++++ b/apps/api/src/modules/auth/sessions.ts
+@@ -0,0 +1,42 @@
++import { and, eq, gt } from 'drizzle-orm';
++import type { Db } from '../../db/client.ts';
++import { fxRates, sessions, users } from '../../db/schema.ts';
++
++export type Session = typeof sessions.$inferInsert;
++export type UserRow = typeof users.$inferSelect;
++
++export async function insertSession(db: Db, session: Session): Promise<void> {
++  await db.insert(sessions).values(session);
++}
++
++export async function findUserByEmail(db: Db, email: string): Promise<UserRow | undefined> {
++  const [user] = await db.select().from(users).where(eq(users.email, email));
++  return user;
++}
++
++/** The FX rates' as-of date, shown next to every USD figure. */
++export async function fxAsOf(db: Db): Promise<string> {
++  const [row] = await db.select({ asOf: fxRates.asOfDate }).from(fxRates).limit(1);
++  return row?.asOf ?? '';
++}
++
++/**
++ * The user of an unexpired session: one primary-key lookup (04 section 4.3). Expiry is absolute
++ * (ADR 0006); an expired row is treated as missing.
++ */
++export async function findSessionUser(
++  db: Db,
++  tokenHash: string,
++  now: Date,
++): Promise<UserRow | undefined> {
++  const [row] = await db
++    .select({ user: users })
++    .from(sessions)
++    .innerJoin(users, eq(users.id, sessions.userId))
++    .where(and(eq(sessions.tokenHash, tokenHash), gt(sessions.expiresAt, now.toISOString())));
++  return row?.user;
++}
++
++export async function deleteSession(db: Db, tokenHash: string): Promise<void> {
++  await db.delete(sessions).where(eq(sessions.tokenHash, tokenHash));
++}
+diff --git a/apps/api/src/modules/health/routes.ts b/apps/api/src/modules/health/routes.ts
+index 08ac788..eed19bf 100644
+--- a/apps/api/src/modules/health/routes.ts
++++ b/apps/api/src/modules/health/routes.ts
+@@ -2,17 +2,22 @@ import type { HealthResponse } from '@acme/shared';
+ import { sql } from 'drizzle-orm';
+ import type { FastifyInstance } from 'fastify';
+ import type { Db } from '../../db/client.ts';
++import { requires } from '../../http/guard.ts';
+ import { AppError } from '../../http/problem.ts';
+ 
+ // A1 (04 section 5.1): public, answers when the database runs SELECT 1.
+ export function healthRoutes(app: FastifyInstance, { db }: { db: Db }) {
+-  app.get('/api/health', async (request): Promise<HealthResponse> => {
+-    try {
+-      await db.run(sql`SELECT 1`);
+-    } catch (err) {
+-      request.log.error({ err }, 'health check could not reach the database');
+-      throw new AppError(503, 'DB_UNAVAILABLE', 'The database is not answering right now.');
+-    }
+-    return { status: 'ok' };
+-  });
++  app.get(
++    '/api/health',
++    { onRequest: requires('public') },
++    async (request): Promise<HealthResponse> => {
++      try {
++        await db.run(sql`SELECT 1`);
++      } catch (err) {
++        request.log.error({ err }, 'health check could not reach the database');
++        throw new AppError(503, 'DB_UNAVAILABLE', 'The database is not answering right now.');
++      }
++      return { status: 'ok' };
++    },
++  );
+ }
+diff --git a/apps/api/test/builders/index.ts b/apps/api/test/builders/index.ts
+index 7bf264f..3aa1af0 100644
+--- a/apps/api/test/builders/index.ts
++++ b/apps/api/test/builders/index.ts
+@@ -8,3 +8,4 @@ export {
+   type HistoryEntry,
+ } from './employee.ts';
+ export { aReferenceSet } from './reference-set.ts';
++export { aSessionFor, aUser, loggedInAs, type InsertedUser } from './user.ts';
+diff --git a/apps/api/test/builders/user.ts b/apps/api/test/builders/user.ts
+new file mode 100644
+index 0000000..d109eba
+--- /dev/null
++++ b/apps/api/test/builders/user.ts
+@@ -0,0 +1,90 @@
++import { createHash } from 'node:crypto';
++import type { Role } from '@acme/shared';
++import { sessions, users } from '../../src/db/schema.ts';
++import { hashPassword } from '../../src/modules/auth/password.ts';
++import { testConfig } from '../helpers.ts';
++import { nextId, type DbOrTx } from './db.ts';
++
++export type InsertedUser = {
++  id: number;
++  email: string;
++  password: string;
++  displayName: string;
++  role: Role;
++};
++
++const DISPLAY_NAMES: Record<Role, string> = {
++  hr_admin: 'HR Admin (test)',
++  hr_viewer: 'HR Viewer (test)',
++  finance: 'Finance (test)',
++};
++
++/** Email `<role>@test.local`, password `test-password-123` hashed at test cost (05 section 4.2). */
++class UserBuilder {
++  readonly #role: Role;
++  #email: string;
++  #password = 'test-password-123';
++
++  constructor(role: Role) {
++    this.#role = role;
++    this.#email = `${role}@test.local`;
++  }
++
++  withEmail(email: string): this {
++    this.#email = email;
++    return this;
++  }
++  withPassword(password: string): this {
++    this.#password = password;
++    return this;
++  }
++
++  async insert(db: DbOrTx): Promise<InsertedUser> {
++    const id = await nextId(db, 'users');
++    const user = {
++      id,
++      email: this.#email,
++      displayName: DISPLAY_NAMES[this.#role],
++      role: this.#role,
++    };
++    await db.insert(users).values({
++      ...user,
++      passwordHash: await hashPassword(this.#password, testConfig.scrypt),
++      createdAt: '2026-01-01T00:00:00.000Z',
++    });
++    return { ...user, password: this.#password };
++  }
++}
++
++export const aUser = (role: Role) => new UserBuilder(role);
++
++/** Inserts a session row for an existing user and returns its cookie header. */
++export async function aSessionFor(
++  db: DbOrTx,
++  userId: number,
++  { createdAt = '2026-10-09T09:00:00.000Z' }: { createdAt?: string } = {},
++): Promise<string> {
++  const [row] = await db.all<{ n: number }>('SELECT count(*) + 1 AS n FROM sessions');
++  const token = `test-token-${row?.n ?? 1}`;
++  const created = new Date(createdAt);
++  await db.insert(sessions).values({
++    tokenHash: createHash('sha256').update(token).digest('hex'),
++    userId,
++    createdAt: created.toISOString(),
++    expiresAt: new Date(created.getTime() + 8 * 60 * 60 * 1000).toISOString(),
++  });
++  return `sid=${token}`;
++}
++
++/**
++ * Inserts a user and a session row directly and returns the cookie header, so only login tests
++ * pay for hashing (05 section 4.2). The session starts at the test clock's default instant.
++ */
++export async function loggedInAs(
++  db: DbOrTx,
++  role: Role,
++  options: { createdAt?: string } = {},
++): Promise<{ cookie: string; user: InsertedUser }> {
++  const user = await aUser(role).insert(db);
++  return { cookie: await aSessionFor(db, user.id, options), user };
++}
+diff --git a/apps/api/test/helpers.ts b/apps/api/test/helpers.ts
+index 4fdcf79..a4657c2 100644
+--- a/apps/api/test/helpers.ts
++++ b/apps/api/test/helpers.ts
+@@ -15,6 +15,8 @@ export const testConfig: Config = {
+   askUserDailyLimit: 30,
+   askGlobalDailyLimit: 300,
+   logLevel: 'silent',
++  // Tests hash at N=2^10 to stay fast (03 section 7).
++  scrypt: { N: 1024, r: 8, p: 3 },
+ };
+ 
+ // A fresh in-memory database with the real migrations and the seed's reference data (05 section 4.1).
+diff --git a/apps/web/src/App.test.tsx b/apps/web/src/App.test.tsx
+deleted file mode 100644
+index 02504ea..0000000
+--- a/apps/web/src/App.test.tsx
++++ /dev/null
+@@ -1,18 +0,0 @@
+-import { screen } from '@testing-library/react';
+-import { http, HttpResponse } from 'msw';
+-import { describe, expect, it } from 'vitest';
+-import { aHealthResponse } from '../test/fixtures/health.ts';
+-import { render } from '../test/render.tsx';
+-import { server } from '../test/server.ts';
+-import { App } from './App.tsx';
+-
+-describe('App', () => {
+-  it('renders the app shell placeholder with the API status through the test wrapper', async () => {
+-    server.use(http.get('/api/health', () => HttpResponse.json(aHealthResponse())));
+-
+-    render(<App />);
+-
+-    expect(screen.getByRole('heading', { name: 'ACME Salary Manager' })).toBeInTheDocument();
+-    expect(await screen.findByText('API status: ok')).toBeInTheDocument();
+-  });
+-});
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+deleted file mode 100644
+index bbc55c7..0000000
+--- a/apps/web/src/App.tsx
++++ /dev/null
+@@ -1,22 +0,0 @@
+-import { healthResponseSchema } from '@acme/shared';
+-import { Container, Text, Title } from '@mantine/core';
+-import { useQuery } from '@tanstack/react-query';
+-import type { ReactElement } from 'react';
+-
+-async function fetchHealth() {
+-  const response = await fetch('/api/health');
+-  if (!response.ok) throw new Error(`Health check failed with ${response.status}`);
+-  return healthResponseSchema.parse(await response.json());
+-}
+-
+-// S0 placeholder: the app name and whether the API answers.
+-export function App(): ReactElement {
+-  const health = useQuery({ queryKey: ['health'], queryFn: fetchHealth });
+-
+-  return (
+-    <Container py="xl">
+-      <Title order={1}>ACME Salary Manager</Title>
+-      <Text mt="md">API status: {health.data?.status ?? 'unknown'}</Text>
+-    </Container>
+-  );
+-}
+diff --git a/apps/web/src/AppRoutes.test.tsx b/apps/web/src/AppRoutes.test.tsx
+new file mode 100644
+index 0000000..207c74c
+--- /dev/null
++++ b/apps/web/src/AppRoutes.test.tsx
+@@ -0,0 +1,144 @@
++import type { Role } from '@acme/shared';
++import { act, screen, within } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { aMeResponse } from '../test/fixtures/me.ts';
++import { aProblem } from '../test/fixtures/problem.ts';
++import { render } from '../test/render.tsx';
++import { server } from '../test/server.ts';
++import { apiFetch } from './api/client.ts';
++import { AppRoutes } from './AppRoutes.tsx';
++
++const loggedInAs = (role: Role) =>
++  server.use(http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))));
++
++describe('app shell and route guards (04 sections 8.1, 8.2)', () => {
++  it.each<[Role, string[]]>([
++    ['hr_admin', ['Employees', 'Insights', 'Pay equity']],
++    ['hr_viewer', ['Employees', 'Insights', 'Pay equity']],
++    ['finance', ['Insights', 'Pay equity']],
++  ])('shows each role only its nav links (%s)', async (role, links) => {
++    loggedInAs(role);
++    render(<AppRoutes />, { route: '/insights' });
++
++    const nav = await screen.findByRole('navigation');
++
++    expect(
++      within(nav)
++        .getAllByRole('link')
++        .map((link) => link.textContent),
++    ).toEqual(links);
++  });
++
++  it('shows the forbidden page, not a redirect, when Finance opens /employees', async () => {
++    loggedInAs('finance');
++    render(<AppRoutes />, { route: '/employees' });
++
++    expect(await screen.findByText("You don't have access to this page.")).toBeInTheDocument();
++    expect(screen.getByRole('link', { name: 'Go to your start page' })).toHaveAttribute(
++      'href',
++      '/insights',
++    );
++    expect(screen.queryByRole('heading', { name: 'Employees' })).not.toBeInTheDocument();
++  });
++
++  it('shows the not-found page for an unknown path', async () => {
++    loggedInAs('hr_viewer');
++    render(<AppRoutes />, { route: '/no-such-page' });
++
++    expect(await screen.findByRole('heading', { name: 'Page not found' })).toBeInTheDocument();
++  });
++
++  it('logs out from the user menu and returns to /login', async () => {
++    let loggedOut = false;
++    loggedInAs('hr_admin');
++    server.use(
++      http.post('/api/auth/logout', () => {
++        loggedOut = true;
++        return new HttpResponse(null, { status: 204 });
++      }),
++    );
++    const user = userEvent.setup();
++    render(<AppRoutes />, { route: '/employees' });
++
++    await user.click(await screen.findByRole('button', { name: /HR Admin \(demo\)/ }));
++    await user.click(await screen.findByRole('menuitem', { name: 'Log out' }));
++
++    expect(await screen.findByRole('button', { name: 'Log in' })).toBeInTheDocument();
++    expect(loggedOut).toBe(true);
++  });
++});
++
++const unauthenticated = () =>
++  HttpResponse.json(aProblem({ status: 401, code: 'UNAUTHENTICATED' }), {
++    status: 401,
++    headers: { 'content-type': 'application/problem+json' },
++  });
++
++async function logInAs(role: Role) {
++  server.use(
++    http.post('/api/auth/login', () => HttpResponse.json(aMeResponse(role))),
++    http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))),
++  );
++  const user = userEvent.setup();
++  await user.type(await screen.findByLabelText('Email'), `${role}@acme.test`);
++  await user.type(screen.getByLabelText('Password'), 'demo-password-1');
++  await user.click(screen.getByRole('button', { name: 'Log in' }));
++}
++
++describe('redirects around login (04 sections 8.1, 8.2)', () => {
++  it.each<[Role, string]>([
++    ['hr_viewer', 'Employees'],
++    ['finance', 'Insights'],
++  ])("sends / to the role's landing page (%s)", async (role, heading) => {
++    loggedInAs(role);
++    render(<AppRoutes />, { route: '/' });
++
++    expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
++  });
++
++  it.each<[Role, string, string]>([
++    ['finance', '/employees', 'Insights'],
++    ['hr_viewer', '/insights/pay-equity', 'Pay equity'],
++    ['hr_admin', 'https://evil.example/', 'Employees'],
++    ['hr_admin', '//evil.example/employees', 'Employees'],
++  ])(
++    'honours ?next= only when the role may open that route (%s, %s)',
++    async (role, next, heading) => {
++      render(<AppRoutes />, { route: `/login?next=${encodeURIComponent(next)}` });
++
++      await logInAs(role);
++
++      expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
++    },
++  );
++
++  it('redirects a logged-out visitor to /login?next=<path>', async () => {
++    server.use(http.get('/api/auth/me', unauthenticated));
++    render(<AppRoutes />, { route: '/insights/pay-equity' });
++
++    expect(await screen.findByRole('button', { name: 'Log in' })).toBeInTheDocument();
++    expect(screen.queryByText('Your session expired. Log in again.')).not.toBeInTheDocument();
++    await logInAs('hr_viewer');
++
++    expect(
++      await screen.findByRole('heading', { level: 1, name: 'Pay equity' }),
++    ).toBeInTheDocument();
++  });
++
++  it('a 401 after login clears the cache and redirects to /login?next= with the session-expired notice', async () => {
++    loggedInAs('hr_admin');
++    server.use(http.get('/api/__test/data', unauthenticated));
++    const { queryClient } = render(<AppRoutes />, { route: '/employees' });
++    await screen.findByRole('heading', { level: 1, name: 'Employees' });
++
++    server.use(http.get('/api/auth/me', unauthenticated));
++    await act(() => apiFetch('/api/__test/data').catch(() => undefined));
++
++    expect(await screen.findByText('Your session expired. Log in again.')).toBeInTheDocument();
++    expect(queryClient.getQueryData(['me'])).toBeUndefined();
++    await logInAs('hr_admin');
++    expect(await screen.findByRole('heading', { level: 1, name: 'Employees' })).toBeInTheDocument();
++  });
++});
+diff --git a/apps/web/src/AppRoutes.tsx b/apps/web/src/AppRoutes.tsx
+new file mode 100644
+index 0000000..4cf362e
+--- /dev/null
++++ b/apps/web/src/AppRoutes.tsx
+@@ -0,0 +1,42 @@
++import type { Action } from '@acme/shared';
++import type { ReactElement } from 'react';
++import { Navigate, Route, Routes } from 'react-router';
++import { PlaceholderPage } from './components/PlaceholderPage.tsx';
++import { NotFoundPage, RoleGate } from './components/RoleGate.tsx';
++import { Shell, useViewer } from './components/Shell.tsx';
++import { LoginPage } from './features/auth/LoginPage.tsx';
++import { landingPath } from './features/auth/useSession.ts';
++import { ROUTES } from './routes.ts';
++
++function Gated({ action, title }: { action: Action; title: string }): ReactElement {
++  const me = useViewer();
++  return (
++    <RoleGate me={me} action={action}>
++      <PlaceholderPage title={title} />
++    </RoleGate>
++  );
++}
++
++function Landing(): ReactElement {
++  return <Navigate to={landingPath(useViewer())} replace />;
++}
++
++function NotFound(): ReactElement {
++  return <NotFoundPage me={useViewer()} />;
++}
++
++/** Every screen by URL (04 section 8.1). Screens are placeholders until their slice. */
++export function AppRoutes(): ReactElement {
++  return (
++    <Routes>
++      <Route path="/login" element={<LoginPage />} />
++      <Route element={<Shell />}>
++        <Route path="/" element={<Landing />} />
++        {ROUTES.map(({ path, action, title }) => (
++          <Route key={path} path={path} element={<Gated action={action} title={title} />} />
++        ))}
++        <Route path="*" element={<NotFound />} />
++      </Route>
++    </Routes>
++  );
++}
+diff --git a/apps/web/src/api/client.test.ts b/apps/web/src/api/client.test.ts
+new file mode 100644
+index 0000000..2391060
+--- /dev/null
++++ b/apps/web/src/api/client.test.ts
+@@ -0,0 +1,78 @@
++import { healthResponseSchema } from '@acme/shared';
++import { http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { aHealthResponse } from '../../test/fixtures/health.ts';
++import { aProblem } from '../../test/fixtures/problem.ts';
++import { server } from '../../test/server.ts';
++import { ApiError, apiFetch } from './client.ts';
++
++const problemJson = (body: object, init: { status: number; headers?: Record<string, string> }) =>
++  HttpResponse.json(body, {
++    status: init.status,
++    headers: { 'content-type': 'application/problem+json', ...init.headers },
++  });
++
++describe('apiFetch (05 section 5.9)', () => {
++  it('the API client turns a problem response into an ApiError with its code', async () => {
++    server.use(
++      http.post('/api/employees/7/salary-changes', () =>
++        problemJson(
++          aProblem({
++            status: 422,
++            code: 'SALARY_DATE_BEFORE_CURRENT',
++            detail: 'The effective date must be on or after 2026-04-01.',
++          }),
++          { status: 422 },
++        ),
++      ),
++    );
++
++    const error = await apiFetch('/api/employees/7/salary-changes', {
++      method: 'POST',
++      body: {},
++    }).catch((e: unknown) => e);
++
++    expect(error).toBeInstanceOf(ApiError);
++    expect(error).toMatchObject({
++      status: 422,
++      code: 'SALARY_DATE_BEFORE_CURRENT',
++      message: 'The effective date must be on or after 2026-04-01.',
++    });
++  });
++
++  it('reads the Retry-After seconds of a 429 into the ApiError', async () => {
++    server.use(
++      http.post('/api/auth/login', () =>
++        problemJson(aProblem({ status: 429, code: 'RATE_LIMITED' }), {
++          status: 429,
++          headers: { 'retry-after': '42' },
++        }),
++      ),
++    );
++
++    const error = await apiFetch('/api/auth/login', { method: 'POST', body: {} }).catch(
++      (e: unknown) => e,
++    );
++
++    expect(error).toMatchObject({ code: 'RATE_LIMITED', retryAfter: 42 });
++  });
++
++  it('sends JSON and returns the body parsed with the given schema', async () => {
++    let sent: { contentType: string | null; body: unknown } | undefined;
++    server.use(
++      http.post('/api/__test/echo', async ({ request }) => {
++        sent = { contentType: request.headers.get('content-type'), body: await request.json() };
++        return HttpResponse.json(aHealthResponse());
++      }),
++    );
++
++    const result = await apiFetch('/api/__test/echo', {
++      method: 'POST',
++      body: { a: 1 },
++      schema: healthResponseSchema,
++    });
++
++    expect(result).toEqual({ status: 'ok' });
++    expect(sent).toEqual({ contentType: 'application/json', body: { a: 1 } });
++  });
++});
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+new file mode 100644
+index 0000000..9195708
+--- /dev/null
++++ b/apps/web/src/api/client.ts
+@@ -0,0 +1,62 @@
++import { problemSchema, type ErrorCode, type Problem } from '@acme/shared';
++
++/** A problem response (04 section 4.4) as the screens see it. */
++export class ApiError extends Error {
++  readonly status: number;
++  readonly code: ErrorCode;
++  readonly errors: NonNullable<Problem['errors']>;
++  /** Seconds from a 429's Retry-After header. */
++  readonly retryAfter: number | undefined;
++
++  constructor(problem: Problem, retryAfter?: number) {
++    super(problem.detail);
++    this.name = 'ApiError';
++    this.status = problem.status;
++    this.code = problem.code;
++    this.errors = problem.errors ?? [];
++    this.retryAfter = retryAfter;
++  }
++}
++
++export type ApiRequest<T> = {
++  method?: 'GET' | 'POST' | 'PATCH';
++  body?: unknown;
++  /** Parses a 2xx JSON body; omit for 204 responses. */
++  schema?: { parse(value: unknown): T };
++};
++
++/** Reads a problem+json response (04 section 4.4) into an ApiError. */
++async function toApiError(response: Response): Promise<ApiError> {
++  const retryAfter = response.headers.get('retry-after');
++  return new ApiError(
++    problemSchema.parse(await response.json()),
++    retryAfter ? Number(retryAfter) : undefined,
++  );
++}
++
++const unauthenticatedListeners = new Set<() => void>();
++
++/** Runs `listener` whenever a call gets 401 UNAUTHENTICATED; returns the unsubscribe. */
++export function onUnauthenticated(listener: () => void): () => void {
++  unauthenticatedListeners.add(listener);
++  return () => unauthenticatedListeners.delete(listener);
++}
++
++/** Calls the same-origin API (ADR 0002). Throws ApiError for a problem response. */
++export async function apiFetch<T = void>(
++  path: string,
++  { method = 'GET', body, schema }: ApiRequest<T> = {},
++): Promise<T> {
++  const response = await fetch(path, {
++    method,
++    headers: body === undefined ? {} : { 'content-type': 'application/json' },
++    body: body === undefined ? undefined : JSON.stringify(body),
++  });
++  if (!response.ok) {
++    const error = await toApiError(response);
++    if (error.code === 'UNAUTHENTICATED')
++      unauthenticatedListeners.forEach((listener) => listener());
++    throw error;
++  }
++  return (schema ? schema.parse(await response.json()) : undefined) as T;
++}
+diff --git a/apps/web/src/components/PlaceholderPage.tsx b/apps/web/src/components/PlaceholderPage.tsx
+new file mode 100644
+index 0000000..30eb319
+--- /dev/null
++++ b/apps/web/src/components/PlaceholderPage.tsx
+@@ -0,0 +1,14 @@
++import { Text, Title } from '@mantine/core';
++import type { ReactElement } from 'react';
++
++/** A screen that a later slice builds (06 S2 scope). */
++export function PlaceholderPage({ title }: { title: string }): ReactElement {
++  return (
++    <>
++      <Title order={1}>{title}</Title>
++      <Text mt="md" c="dimmed">
++        This screen is coming soon.
++      </Text>
++    </>
++  );
++}
+diff --git a/apps/web/src/components/RoleGate.tsx b/apps/web/src/components/RoleGate.tsx
+new file mode 100644
+index 0000000..4f6f489
+--- /dev/null
++++ b/apps/web/src/components/RoleGate.tsx
+@@ -0,0 +1,42 @@
++import type { Action, MeResponse } from '@acme/shared';
++import { Anchor, Text, Title } from '@mantine/core';
++import type { ReactElement, ReactNode } from 'react';
++import { Link } from 'react-router';
++import { landingPath } from '../features/auth/useSession.ts';
++
++/** In-shell page for a route the viewer may not open; no redirect, so the reason shows (04 8.2). */
++export function ForbiddenPage({ me }: { me: MeResponse }): ReactElement {
++  return (
++    <>
++      <Title order={1}>No access</Title>
++      <Text mt="md">You don&apos;t have access to this page.</Text>
++      <Anchor component={Link} to={landingPath(me)} mt="sm" display="block">
++        Go to your start page
++      </Anchor>
++    </>
++  );
++}
++
++export function NotFoundPage({ me }: { me: MeResponse }): ReactElement {
++  return (
++    <>
++      <Title order={1}>Page not found</Title>
++      <Anchor component={Link} to={landingPath(me)} mt="sm" display="block">
++        Go to your start page
++      </Anchor>
++    </>
++  );
++}
++
++/** Renders the route only when `me` grants the action (04 section 8.1). */
++export function RoleGate({
++  me,
++  action,
++  children,
++}: {
++  me: MeResponse;
++  action: Action;
++  children: ReactNode;
++}): ReactElement {
++  return me.permissions.includes(action) ? <>{children}</> : <ForbiddenPage me={me} />;
++}
+diff --git a/apps/web/src/components/Shell.tsx b/apps/web/src/components/Shell.tsx
+new file mode 100644
+index 0000000..442f7eb
+--- /dev/null
++++ b/apps/web/src/components/Shell.tsx
+@@ -0,0 +1,109 @@
++import type { Action, MeResponse, Role } from '@acme/shared';
++import { AppShell, Badge, Button, Center, Group, Loader, Menu, Title } from '@mantine/core';
++import { useQueryClient } from '@tanstack/react-query';
++import { useEffect, type ReactElement } from 'react';
++import {
++  Navigate,
++  NavLink,
++  Outlet,
++  useLocation,
++  useNavigate,
++  useOutletContext,
++} from 'react-router';
++import { onUnauthenticated } from '../api/client.ts';
++import { ME_KEY, useLogout, useMe } from '../features/auth/useSession.ts';
++
++const NAV: { to: string; label: string; action: Action }[] = [
++  { to: '/employees', label: 'Employees', action: 'employee.read' },
++  { to: '/insights', label: 'Insights', action: 'insights.read' },
++  { to: '/insights/pay-equity', label: 'Pay equity', action: 'insights.read' },
++];
++
++const ROLE_LABELS: Record<Role, string> = {
++  hr_admin: 'HR Admin',
++  hr_viewer: 'HR Viewer',
++  finance: 'Finance',
++};
++
++/** The viewer for screens inside the shell. */
++export const useViewer = () => useOutletContext<MeResponse>();
++
++function UserMenu({ me }: { me: MeResponse }): ReactElement {
++  const navigate = useNavigate();
++  const logout = useLogout();
++  return (
++    <Menu position="bottom-end">
++      <Menu.Target>
++        <Button variant="subtle">
++          {me.user.displayName}
++          <Badge ml="xs" variant="light">
++            {ROLE_LABELS[me.user.role]}
++          </Badge>
++        </Button>
++      </Menu.Target>
++      <Menu.Dropdown>
++        <Menu.Item
++          onClick={() => logout.mutate(undefined, { onSuccess: () => navigate('/login') })}
++        >
++          Log out
++        </Menu.Item>
++      </Menu.Dropdown>
++    </Menu>
++  );
++}
++
++// Header with the app name, nav gated by `me.permissions` and the user menu (04 section 8.1).
++export function Shell(): ReactElement {
++  const me = useMe();
++  const queryClient = useQueryClient();
++  const navigate = useNavigate();
++  const location = useLocation();
++  const loginWithNext = `/login?next=${encodeURIComponent(location.pathname + location.search)}`;
++
++  // Session expired: any 401 after login clears the cache and asks to log in again (04 8.2).
++  useEffect(
++    () =>
++      onUnauthenticated(() => {
++        if (!queryClient.getQueryData(ME_KEY)) return;
++        queryClient.clear();
++        navigate(loginWithNext, { state: { sessionExpired: true } });
++      }),
++    [queryClient, navigate, loginWithNext],
++  );
++
++  // Logged out: `me` returned 401 (04 section 8.2).
++  if (me.isError) return <Navigate to={loginWithNext} replace />;
++
++  if (!me.data) {
++    return (
++      <Center h="100vh">
++        <Loader aria-label="Checking your session" />
++      </Center>
++    );
++  }
++
++  return (
++    <AppShell header={{ height: 60 }} padding="md">
++      <AppShell.Header>
++        <Group h="100%" px="md" justify="space-between">
++          <Group>
++            <Title order={4} component="p">
++              ACME Salary Manager
++            </Title>
++            <Group component="nav" gap="sm" aria-label="Main">
++              {NAV.filter((item) => me.data.permissions.includes(item.action)).map((item) => (
++                <NavLink key={item.to} to={item.to} end>
++                  {item.label}
++                </NavLink>
++              ))}
++            </Group>
++          </Group>
++          <UserMenu me={me.data} />
++        </Group>
++      </AppShell.Header>
++      <AppShell.Main>
++        <Outlet context={me.data} />
++      </AppShell.Main>
++    </AppShell>
++  );
++}
+diff --git a/apps/web/src/features/auth/LoginPage.test.tsx b/apps/web/src/features/auth/LoginPage.test.tsx
+new file mode 100644
+index 0000000..0a92343
+--- /dev/null
++++ b/apps/web/src/features/auth/LoginPage.test.tsx
+@@ -0,0 +1,79 @@
++import type { Role } from '@acme/shared';
++import { screen } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { describe, expect, it } from 'vitest';
++import { aMeResponse } from '../../../test/fixtures/me.ts';
++import { aProblem } from '../../../test/fixtures/problem.ts';
++import { render } from '../../../test/render.tsx';
++import { server } from '../../../test/server.ts';
++import { AppRoutes } from '../../AppRoutes.tsx';
++
++const problemJson = (body: object, status: number, headers: Record<string, string> = {}) =>
++  HttpResponse.json(body, {
++    status,
++    headers: { 'content-type': 'application/problem+json', ...headers },
++  });
++
++async function logIn(email = 'hr.admin@acme.test', password = 'demo-password-1') {
++  const user = userEvent.setup();
++  await user.type(screen.getByLabelText('Email'), email);
++  await user.type(screen.getByLabelText('Password'), password);
++  await user.click(screen.getByRole('button', { name: 'Log in' }));
++}
++
++describe('LoginPage (S-1)', () => {
++  it('shows "Email or password is incorrect." on a 401', async () => {
++    server.use(
++      http.post('/api/auth/login', () =>
++        problemJson(
++          aProblem({
++            status: 401,
++            code: 'INVALID_CREDENTIALS',
++            detail: 'Email or password is incorrect.',
++          }),
++          401,
++        ),
++      ),
++    );
++    render(<AppRoutes />, { route: '/login' });
++
++    await logIn();
++
++    expect(await screen.findByRole('alert')).toHaveTextContent('Email or password is incorrect.');
++  });
++
++  it('shows the wait in seconds on a 429', async () => {
++    server.use(
++      http.post('/api/auth/login', () =>
++        problemJson(aProblem({ status: 429, code: 'RATE_LIMITED' }), 429, { 'retry-after': '42' }),
++      ),
++    );
++    render(<AppRoutes />, { route: '/login' });
++
++    await logIn();
++
++    expect(await screen.findByRole('alert')).toHaveTextContent(
++      'Too many attempts. Try again in 42 seconds.',
++    );
++  });
++
++  it.each<[Role, string]>([
++    ['hr_admin', 'Employees'],
++    ['hr_viewer', 'Employees'],
++    ['finance', 'Insights'],
++  ])(
++    'sends HR roles to /employees and Finance to /insights after login (%s)',
++    async (role, heading) => {
++      server.use(
++        http.post('/api/auth/login', () => HttpResponse.json(aMeResponse(role))),
++        http.get('/api/auth/me', () => HttpResponse.json(aMeResponse(role))),
++      );
++      render(<AppRoutes />, { route: '/login' });
++
++      await logIn(`${role}@acme.test`);
++
++      expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
++    },
++  );
++});
+diff --git a/apps/web/src/features/auth/LoginPage.tsx b/apps/web/src/features/auth/LoginPage.tsx
+new file mode 100644
+index 0000000..031a746
+--- /dev/null
++++ b/apps/web/src/features/auth/LoginPage.tsx
+@@ -0,0 +1,75 @@
++import { Alert, Button, Container, PasswordInput, Stack, TextInput, Title } from '@mantine/core';
++import { useState, type FormEvent, type ReactElement } from 'react';
++import { useLocation, useNavigate, useSearchParams } from 'react-router';
++import { ApiError } from '../../api/client.ts';
++import { mayOpen } from '../../routes.ts';
++import { landingPath, useLogin } from './useSession.ts';
++
++function errorMessage(error: unknown): string {
++  if (error instanceof ApiError && error.code === 'INVALID_CREDENTIALS') {
++    return 'Email or password is incorrect.';
++  }
++  if (error instanceof ApiError && error.code === 'RATE_LIMITED') {
++    return `Too many attempts. Try again in ${error.retryAfter ?? 60} seconds.`;
++  }
++  return error instanceof Error ? error.message : 'Something went wrong. Try again.';
++}
++
++// S-1 (04 section 8.5).
++export function LoginPage(): ReactElement {
++  const navigate = useNavigate();
++  const location = useLocation();
++  const [searchParams] = useSearchParams();
++  const next = searchParams.get('next');
++  const sessionExpired = (location.state as { sessionExpired?: boolean } | null)?.sessionExpired;
++  const login = useLogin();
++  const [email, setEmail] = useState('');
++  const [password, setPassword] = useState('');
++
++  function submit(event: FormEvent) {
++    event.preventDefault();
++    login.mutate(
++      { email, password },
++      // ?next= only when the viewer may open that route (04 section 8.1).
++      { onSuccess: (me) => navigate(next && mayOpen(me, next) ? next : landingPath(me)) },
++    );
++  }
++
++  return (
++    <Container size="xs" py="xl">
++      <Title order={1}>ACME Salary Manager</Title>
++      <form onSubmit={submit}>
++        <Stack mt="lg">
++          {sessionExpired && !login.isError && (
++            <Alert color="yellow">Your session expired. Log in again.</Alert>
++          )}
++          {login.isError && (
++            <Alert color="red" role="alert">
++              {errorMessage(login.error)}
++            </Alert>
++          )}
++          <TextInput
++            label="Email"
++            type="email"
++            autoComplete="username"
++            required
++            withAsterisk={false}
++            value={email}
++            onChange={(event) => setEmail(event.currentTarget.value)}
++          />
++          <PasswordInput
++            label="Password"
++            autoComplete="current-password"
++            required
++            withAsterisk={false}
++            value={password}
++            onChange={(event) => setPassword(event.currentTarget.value)}
++          />
++          <Button type="submit" loading={login.isPending}>
++            Log in
++          </Button>
++        </Stack>
++      </form>
++    </Container>
++  );
++}
+diff --git a/apps/web/src/features/auth/useSession.ts b/apps/web/src/features/auth/useSession.ts
+new file mode 100644
+index 0000000..5bc37ff
+--- /dev/null
++++ b/apps/web/src/features/auth/useSession.ts
+@@ -0,0 +1,36 @@
++import { meResponseSchema, type LoginBody, type MeResponse } from '@acme/shared';
++import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
++import { apiFetch } from '../../api/client.ts';
++
++export const ME_KEY = ['me'];
++
++/** Where a viewer lands after login and on `/` (04 section 8.1, D-046). */
++export function landingPath(me: MeResponse): string {
++  return me.permissions.includes('employee.read') ? '/employees' : '/insights';
++}
++
++export function useLogin() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: (body: LoginBody) =>
++      apiFetch('/api/auth/login', { method: 'POST', body, schema: meResponseSchema }),
++    onSuccess: (me) => queryClient.setQueryData(ME_KEY, me),
++  });
++}
++
++/** The viewer from GET /api/auth/me; the web app's only source of permissions (D-046). */
++export function useMe() {
++  return useQuery({
++    queryKey: ME_KEY,
++    queryFn: () => apiFetch('/api/auth/me', { schema: meResponseSchema }),
++  });
++}
++
++/** Ends the session and forgets every cached response. */
++export function useLogout() {
++  const queryClient = useQueryClient();
++  return useMutation({
++    mutationFn: () => apiFetch('/api/auth/logout', { method: 'POST', body: {} }),
++    onSuccess: () => queryClient.clear(),
++  });
++}
+diff --git a/apps/web/src/main.tsx b/apps/web/src/main.tsx
+index f3458e7..33e4eca 100644
+--- a/apps/web/src/main.tsx
++++ b/apps/web/src/main.tsx
+@@ -1,19 +1,20 @@
+ import '@mantine/core/styles.css';
+ import { MantineProvider } from '@mantine/core';
+-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
++import { QueryClientProvider } from '@tanstack/react-query';
+ import { StrictMode } from 'react';
+ import { createRoot } from 'react-dom/client';
+ import { BrowserRouter } from 'react-router';
+-import { App } from './App.tsx';
++import { AppRoutes } from './AppRoutes.tsx';
++import { createQueryClient } from './queryClient.ts';
+ 
+-const queryClient = new QueryClient();
++const queryClient = createQueryClient();
+ 
+ createRoot(document.getElementById('root')!).render(
+   <StrictMode>
+     <MantineProvider>
+       <QueryClientProvider client={queryClient}>
+         <BrowserRouter>
+-          <App />
++          <AppRoutes />
+         </BrowserRouter>
+       </QueryClientProvider>
+     </MantineProvider>
+diff --git a/apps/web/src/queryClient.test.tsx b/apps/web/src/queryClient.test.tsx
+new file mode 100644
+index 0000000..cc36269
+--- /dev/null
++++ b/apps/web/src/queryClient.test.tsx
+@@ -0,0 +1,32 @@
++import { QueryClientProvider, useQuery } from '@tanstack/react-query';
++import { renderHook, waitFor } from '@testing-library/react';
++import type { ReactNode } from 'react';
++import { describe, expect, it } from 'vitest';
++import { aProblem } from '../test/fixtures/problem.ts';
++import { ApiError } from './api/client.ts';
++import { createQueryClient } from './queryClient.ts';
++
++describe('createQueryClient (04 section 8.3)', () => {
++  it('never retries a query that failed with an ApiError', async () => {
++    const client = createQueryClient();
++    const wrapper = ({ children }: { children: ReactNode }) => (
++      <QueryClientProvider client={client}>{children}</QueryClientProvider>
++    );
++    let calls = 0;
++
++    const { result } = renderHook(
++      () =>
++        useQuery({
++          queryKey: ['me'],
++          queryFn: () => {
++            calls += 1;
++            throw new ApiError(aProblem({ status: 401, code: 'UNAUTHENTICATED' }));
++          },
++        }),
++      { wrapper },
++    );
++
++    await waitFor(() => expect(result.current.isError).toBe(true));
++    expect(calls).toBe(1);
++  });
++});
+diff --git a/apps/web/src/queryClient.ts b/apps/web/src/queryClient.ts
+new file mode 100644
+index 0000000..40dc7eb
+--- /dev/null
++++ b/apps/web/src/queryClient.ts
+@@ -0,0 +1,14 @@
++import { QueryClient } from '@tanstack/react-query';
++import { ApiError } from './api/client.ts';
++
++/**
++ * The app's query client (04 section 8.3). A problem response is an answer, not a glitch, so it
++ * is never retried; a 401 from `me` then redirects to login at once (04 section 8.2).
++ */
++export function createQueryClient(): QueryClient {
++  return new QueryClient({
++    defaultOptions: {
++      queries: { retry: (failures, error) => !(error instanceof ApiError) && failures < 3 },
++    },
++  });
++}
+diff --git a/apps/web/src/routes.ts b/apps/web/src/routes.ts
+new file mode 100644
+index 0000000..86f21bb
+--- /dev/null
++++ b/apps/web/src/routes.ts
+@@ -0,0 +1,19 @@
++import type { Action, MeResponse } from '@acme/shared';
++import { matchPath } from 'react-router';
++
++// The screens inside the shell and the action each needs (04 section 8.1).
++export const ROUTES: { path: string; action: Action; title: string }[] = [
++  { path: '/employees', action: 'employee.read', title: 'Employees' },
++  { path: '/employees/new', action: 'employee.write', title: 'Add employee' },
++  { path: '/employees/:id', action: 'employee.read', title: 'Employee' },
++  { path: '/insights', action: 'insights.read', title: 'Insights' },
++  { path: '/insights/pay-equity', action: 'insights.read', title: 'Pay equity' },
++];
++
++/** Whether `?next=` may send this viewer to `path`: a known in-app route they may open. */
++export function mayOpen(me: MeResponse, path: string): boolean {
++  if (!path.startsWith('/') || path.startsWith('//')) return false;
++  const pathname = path.split(/[?#]/, 1)[0] ?? path;
++  const route = ROUTES.find((candidate) => matchPath(candidate.path, pathname));
++  return route !== undefined && me.permissions.includes(route.action);
++}
+diff --git a/apps/web/test/fixtures/me.ts b/apps/web/test/fixtures/me.ts
+new file mode 100644
+index 0000000..f5fbd48
+--- /dev/null
++++ b/apps/web/test/fixtures/me.ts
+@@ -0,0 +1,41 @@
++import { meResponseSchema, type Action, type MeResponse, type Role } from '@acme/shared';
++
++// Test data only: the web app itself reads permissions from `me` (D-046).
++const PERMISSIONS: Record<Role, Action[]> = {
++  hr_admin: [
++    'reference.read',
++    'employee.read',
++    'employee.write',
++    'salary.read',
++    'salary.write',
++    'export.employees',
++    'insights.read',
++    'ask.use',
++  ],
++  hr_viewer: [
++    'reference.read',
++    'employee.read',
++    'salary.read',
++    'export.employees',
++    'insights.read',
++    'ask.use',
++  ],
++  finance: ['reference.read', 'insights.read', 'ask.use'],
++};
++
++const NAMES: Record<Role, string> = {
++  hr_admin: 'HR Admin (demo)',
++  hr_viewer: 'HR Viewer (demo)',
++  finance: 'Finance (demo)',
++};
++
++// Fixture builders parse with the shared response schema (D-050).
++export const aMeResponse = (role: Role, overrides: Partial<MeResponse> = {}): MeResponse =>
++  meResponseSchema.parse({
++    user: { id: 1, email: `${role}@acme.test`, displayName: NAMES[role], role },
++    permissions: PERMISSIONS[role],
++    askEnabled: false,
++    today: '2026-10-09',
++    fxAsOf: '2026-09-30',
++    ...overrides,
++  });
+diff --git a/apps/web/test/fixtures/problem.ts b/apps/web/test/fixtures/problem.ts
+new file mode 100644
+index 0000000..6184aec
+--- /dev/null
++++ b/apps/web/test/fixtures/problem.ts
+@@ -0,0 +1,18 @@
++import { problemSchema, type Problem } from '@acme/shared';
++
++const TITLES: Record<number, string> = {
++  400: 'Bad Request',
++  401: 'Unauthorized',
++  403: 'Forbidden',
++  422: 'Unprocessable Content',
++  429: 'Too Many Requests',
++};
++
++// Fixture builders parse with the shared response schema (D-050).
++export const aProblem = (overrides: Partial<Problem> & Pick<Problem, 'status' | 'code'>): Problem =>
++  problemSchema.parse({
++    type: 'about:blank',
++    title: TITLES[overrides.status] ?? 'Error',
++    detail: 'Something was wrong with the request.',
++    ...overrides,
++  });
+diff --git a/apps/web/test/render.tsx b/apps/web/test/render.tsx
+index b7191cc..2255828 100644
+--- a/apps/web/test/render.tsx
++++ b/apps/web/test/render.tsx
+@@ -14,5 +14,5 @@ export function render(ui: ReactElement, { route = '/' }: { route?: string } = {
+       </QueryClientProvider>
+     </MantineProvider>
+   );
+-  return rtlRender(ui, { wrapper: Wrapper });
++  return { ...rtlRender(ui, { wrapper: Wrapper }), queryClient };
+ }
+diff --git a/package-lock.json b/package-lock.json
+index 17d2ac7..da492a3 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -39,6 +39,7 @@
+       "dependencies": {
+         "@acme/shared": "0.0.0",
+         "@faker-js/faker": "10.6.0",
++        "@fastify/rate-limit": "11.2.0",
+         "@fastify/static": "10.1.6",
+         "@libsql/client": "0.18.0",
+         "drizzle-orm": "0.45.4",
+@@ -1098,6 +1099,28 @@
+         "ipaddr.js": "^2.1.0"
+       }
+     },
++    "node_modules/@fastify/rate-limit": {
++      "version": "11.2.0",
++      "resolved": "https://registry.npmjs.org/@fastify/rate-limit/-/rate-limit-11.2.0.tgz",
++      "integrity": "sha512-X7osJd4XSvMoejYrnJkSZYYjY1eNYoBqhjlzf1RakC2204qExFqZFTKj5+T7VuzA/iUI9Z3UoSqQRkB2HpG0oQ==",
++      "funding": [
++        {
++          "type": "github",
++          "url": "https://github.com/sponsors/fastify"
++        },
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fastify"
++        }
++      ],
++      "license": "MIT",
++      "dependencies": {
++        "@lukeed/ms": "^2.0.2",
++        "fastify-plugin": "^6.0.0",
++        "ip-address": "^10.2.0",
++        "toad-cache": "^3.7.0"
++      }
++    },
+     "node_modules/@fastify/send": {
+       "version": "4.1.1",
+       "resolved": "https://registry.npmjs.org/@fastify/send/-/send-4.1.1.tgz",
+@@ -4044,6 +4067,15 @@
+         "node": "^20.17.0 || >=22.9.0"
+       }
+     },
++    "node_modules/ip-address": {
++      "version": "10.7.3",
++      "resolved": "https://registry.npmjs.org/ip-address/-/ip-address-10.7.3.tgz",
++      "integrity": "sha512-A1kdq/tSb5QjvKvAMgIoEvDBIgL7qaqVP/jkvSwYYRZ9iEzvPpopxp2wQfu3SuZRHtpHNxMn8Fs0bS+gf5Xmwg==",
++      "license": "MIT",
++      "engines": {
++        "node": ">= 12"
++      }
++    },
+     "node_modules/ipaddr.js": {
+       "version": "2.5.0",
+       "resolved": "https://registry.npmjs.org/ipaddr.js/-/ipaddr.js-2.5.0.tgz",
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index c4486d1..7892974 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -1,2 +1,5 @@
++export * from './schemas/auth.ts';
++export * from './schemas/common.ts';
+ export * from './schemas/health.ts';
++export * from './schemas/problem.ts';
+ export * from './money.ts';
+diff --git a/packages/shared/src/schemas/auth.ts b/packages/shared/src/schemas/auth.ts
+new file mode 100644
+index 0000000..8cc057e
+--- /dev/null
++++ b/packages/shared/src/schemas/auth.ts
+@@ -0,0 +1,40 @@
++import { z } from 'zod';
++import { isoDateSchema, roleSchema } from './common.ts';
++
++// 04 section 4.5: every action a route can require.
++export const actionSchema = z.enum([
++  'reference.read',
++  'employee.read',
++  'employee.write',
++  'salary.read',
++  'salary.write',
++  'export.employees',
++  'insights.read',
++  'ask.use',
++]);
++
++export type Action = z.infer<typeof actionSchema>;
++
++// A2 (04 section 5.2).
++export const loginBodySchema = z.object({
++  email: z.string().trim().toLowerCase().pipe(z.email().max(254)),
++  password: z.string().min(1).max(200),
++});
++
++export type LoginBody = z.infer<typeof loginBodySchema>;
++
++// A4 (04 section 5.2); also the body of a successful login.
++export const meResponseSchema = z.object({
++  user: z.object({
++    id: z.number().int(),
++    email: z.string(),
++    displayName: z.string(),
++    role: roleSchema,
++  }),
++  permissions: z.array(actionSchema),
++  askEnabled: z.boolean(),
++  today: isoDateSchema,
++  fxAsOf: isoDateSchema,
++});
++
++export type MeResponse = z.infer<typeof meResponseSchema>;
+diff --git a/packages/shared/src/schemas/common.ts b/packages/shared/src/schemas/common.ts
+new file mode 100644
+index 0000000..a9d6b8e
+--- /dev/null
++++ b/packages/shared/src/schemas/common.ts
+@@ -0,0 +1,11 @@
++import { z } from 'zod';
++
++// 04 section 4.7; values are the DB enums from 02 section 3.
++export const roleSchema = z.enum(['hr_admin', 'hr_viewer', 'finance']);
++
++export type Role = z.infer<typeof roleSchema>;
++
++// 04 section 4.2: YYYY-MM-DD, no time zone.
++export const isoDateSchema = z.iso.date();
++
++export type IsoDate = z.infer<typeof isoDateSchema>;
+diff --git a/packages/shared/src/schemas/problem.ts b/packages/shared/src/schemas/problem.ts
+new file mode 100644
+index 0000000..d0720a9
+--- /dev/null
++++ b/packages/shared/src/schemas/problem.ts
+@@ -0,0 +1,45 @@
++import { z } from 'zod';
++
++// 04 section 4.4: the complete error code catalogue.
++export const errorCodeSchema = z.enum([
++  'VALIDATION_FAILED',
++  'UNAUTHENTICATED',
++  'INVALID_CREDENTIALS',
++  'FORBIDDEN',
++  'EMPLOYEE_NOT_FOUND',
++  'PAY_BAND_NOT_FOUND',
++  'ROUTE_NOT_FOUND',
++  'UNSUPPORTED_MEDIA_TYPE',
++  'NO_PAY_BAND',
++  'SALARY_CURRENCY_MISMATCH',
++  'SALARY_DATE_BEFORE_CURRENT',
++  'DATE_IN_FUTURE',
++  'RAISE_REQUIRED',
++  'POSITION_MUST_NOT_CHANGE',
++  'PROMOTION_LEVEL_NOT_HIGHER',
++  'CORRECTION_NO_CHANGE',
++  'EMPLOYEE_TERMINATED',
++  'EMPLOYEE_ALREADY_TERMINATED',
++  'TERMINATION_BEFORE_HIRE',
++  'RATE_LIMITED',
++  'ASK_LIMIT_REACHED',
++  'ASK_UNAVAILABLE',
++  'ASK_UPSTREAM_FAILED',
++  'DB_UNAVAILABLE',
++  'INTERNAL',
++]);
++
++export type ErrorCode = z.infer<typeof errorCodeSchema>;
++
++// RFC 9457 problem details (04 section 4.4).
++export const problemSchema = z.object({
++  type: z.literal('about:blank'),
++  title: z.string(),
++  status: z.number().int(),
++  detail: z.string(),
++  code: errorCodeSchema,
++  instance: z.string().optional(),
++  errors: z.array(z.object({ path: z.string(), message: z.string() })).optional(),
++});
++
++export type Problem = z.infer<typeof problemSchema>;

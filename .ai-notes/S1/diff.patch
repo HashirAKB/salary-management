@@ -1,0 +1,3197 @@
+diff --git a/apps/api/package.json b/apps/api/package.json
+index 908a56c..274b963 100644
+--- a/apps/api/package.json
++++ b/apps/api/package.json
+@@ -8,6 +8,7 @@
+   },
+   "dependencies": {
+     "@acme/shared": "0.0.0",
++    "@faker-js/faker": "10.6.0",
+     "@fastify/static": "10.1.6",
+     "@libsql/client": "0.18.0",
+     "drizzle-orm": "0.45.4",
+diff --git a/apps/api/src/db/integrity.test.ts b/apps/api/src/db/integrity.test.ts
+new file mode 100644
+index 0000000..3441c4d
+--- /dev/null
++++ b/apps/api/src/db/integrity.test.ts
+@@ -0,0 +1,37 @@
++import { describe, expect, it } from 'vitest';
++import { anEmployee, aReferenceSet } from '../../test/builders/index.ts';
++import { testDb } from '../../test/helpers.ts';
++import { SOFTWARE_ENGINEER } from '../seed/reference.ts';
++
++const messageChain = (error: unknown): string => {
++  const parts: string[] = [];
++  for (let e = error; e instanceof Error; e = e.cause) parts.push(e.message);
++  return parts.join(' <- ');
++};
++
++describe('database integrity', () => {
++  it('rejects a row that breaks a foreign key (foreign keys are on)', async () => {
++    const db = await testDb(aReferenceSet().withoutBand('IN', SOFTWARE_ENGINEER, 'L5'));
++
++    const error = await anEmployee()
++      .inCountry('IN')
++      .atLevel('L5')
++      .withSalary(500_000_000)
++      .insert(db)
++      .catch((e: unknown) => e);
++
++    expect(messageChain(error)).toMatch(/FOREIGN KEY constraint failed/);
++    expect((await db.$client.execute('SELECT count(*) AS n FROM employees')).rows[0]?.n).toBe(0);
++  });
++
++  it('keeps data written in a transaction visible to the next read on an in-memory database', async () => {
++    const db = await testDb();
++
++    await db.transaction(async (tx) => {
++      await anEmployee().named('Lena', 'Vogel').insert(tx);
++    });
++    const rows = await db.$client.execute('SELECT first_name FROM employees');
++
++    expect(rows.rows.map((row) => row.first_name)).toEqual(['Lena']);
++  });
++});
+diff --git a/apps/api/src/db/migrate.test.ts b/apps/api/src/db/migrate.test.ts
+new file mode 100644
+index 0000000..2b1e1c8
+--- /dev/null
++++ b/apps/api/src/db/migrate.test.ts
+@@ -0,0 +1,61 @@
++import { describe, expect, it } from 'vitest';
++import { createDb, type Db } from './client.ts';
++import { migrate } from './migrate.ts';
++
++const tableNames = async (db: Db) =>
++  (
++    await db.$client.execute(
++      "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
++    )
++  ).rows.map((row) => row.name);
++
++const indexNames = async (db: Db) =>
++  (
++    await db.$client.execute(
++      "SELECT name FROM sqlite_master WHERE type = 'index' AND name LIKE 'ix_%' ORDER BY name",
++    )
++  ).rows.map((row) => row.name);
++
++describe('migrate', () => {
++  it('runs every migration on an empty database, and running them again changes nothing', async () => {
++    const db = createDb(':memory:');
++
++    const firstRun = await migrate(db);
++    const tablesAfterFirst = await tableNames(db);
++    const applied = await db.$client.execute('SELECT name FROM schema_migrations ORDER BY name');
++    const secondRun = await migrate(db);
++
++    expect(firstRun).toEqual(['0001_init.sql']);
++    expect(tablesAfterFirst).toEqual([
++      'ask_log',
++      'countries',
++      'departments',
++      'employees',
++      'fx_rates',
++      'job_titles',
++      'levels',
++      'pay_bands',
++      'salary_changes',
++      'schema_migrations',
++      'sessions',
++      'users',
++    ]);
++    expect(await indexNames(db)).toEqual([
++      'ix_ask_log_time',
++      'ix_ask_log_user_time',
++      'ix_employees_cohort',
++      'ix_employees_hire_date',
++      'ix_employees_salary_date',
++      'ix_employees_status_name',
++      'ix_employees_title_level',
++      'ix_salary_changes_employee',
++      'ix_sessions_user',
++    ]);
++    expect(applied.rows.map((row) => row.name)).toEqual(['0001_init.sql']);
++    expect(secondRun).toEqual([]);
++    expect(await tableNames(db)).toEqual(tablesAfterFirst);
++    expect(
++      (await db.$client.execute('SELECT count(*) AS n FROM schema_migrations')).rows[0]?.n,
++    ).toBe(1);
++  });
++});
+diff --git a/apps/api/src/db/migrate.ts b/apps/api/src/db/migrate.ts
+new file mode 100644
+index 0000000..afbf586
+--- /dev/null
++++ b/apps/api/src/db/migrate.ts
+@@ -0,0 +1,36 @@
++import { readdir, readFile } from 'node:fs/promises';
++import { join } from 'node:path';
++import { fileURLToPath } from 'node:url';
++import type { Db } from './client.ts';
++
++const defaultDir = fileURLToPath(new URL('./migrations', import.meta.url));
++
++// Applies migrations/*.sql in filename order, each once, recorded in schema_migrations (ADR 0003).
++// Returns the files applied by this run.
++export async function migrate(db: Db, dir: string = defaultDir): Promise<string[]> {
++  const client = db.$client;
++  await client.execute(
++    'CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY) STRICT',
++  );
++  const done = new Set(
++    (await client.execute('SELECT name FROM schema_migrations')).rows.map((row) =>
++      String(row.name),
++    ),
++  );
++  const files = (await readdir(dir)).filter((file) => file.endsWith('.sql')).sort();
++  const applied: string[] = [];
++  for (const file of files) {
++    if (done.has(file)) continue;
++    const sql = await readFile(join(dir, file), 'utf8');
++    const tx = await client.transaction('write');
++    try {
++      await tx.executeMultiple(sql);
++      await tx.execute({ sql: 'INSERT INTO schema_migrations (name) VALUES (?)', args: [file] });
++      await tx.commit();
++    } finally {
++      tx.close();
++    }
++    applied.push(file);
++  }
++  return applied;
++}
+diff --git a/apps/api/src/db/migrations/0001_init.sql b/apps/api/src/db/migrations/0001_init.sql
+new file mode 100644
+index 0000000..7c1ce2a
+--- /dev/null
++++ b/apps/api/src/db/migrations/0001_init.sql
+@@ -0,0 +1,120 @@
++-- 02-data-model.md sections 3 and 6. STRICT tables; the SQL is the source of truth for constraints (ADR 0003).
++
++CREATE TABLE fx_rates (
++  currency_code       TEXT    PRIMARY KEY CHECK (length(currency_code) = 3 AND currency_code = upper(currency_code)),
++  usd_per_unit_micros INTEGER NOT NULL CHECK (usd_per_unit_micros > 0),
++  as_of_date          TEXT    NOT NULL CHECK (date(as_of_date) IS as_of_date)
++) STRICT;
++
++CREATE TABLE countries (
++  code          TEXT PRIMARY KEY CHECK (length(code) = 2 AND code = upper(code)),  -- ISO 3166-1 alpha-2
++  name          TEXT NOT NULL UNIQUE,
++  currency_code TEXT NOT NULL REFERENCES fx_rates(currency_code)
++) STRICT;
++
++CREATE TABLE departments (
++  id   INTEGER PRIMARY KEY,
++  name TEXT    NOT NULL UNIQUE
++) STRICT;
++
++CREATE TABLE job_titles (
++  id            INTEGER PRIMARY KEY,
++  name          TEXT    NOT NULL UNIQUE,
++  department_id INTEGER NOT NULL REFERENCES departments(id)
++) STRICT;
++
++CREATE TABLE levels (
++  code TEXT    PRIMARY KEY CHECK (code IN ('L1','L2','L3','L4','L5')),
++  name TEXT    NOT NULL UNIQUE,
++  rank INTEGER NOT NULL UNIQUE
++) STRICT;
++
++CREATE TABLE pay_bands (
++  country_code  TEXT    NOT NULL REFERENCES countries(code),
++  job_title_id  INTEGER NOT NULL REFERENCES job_titles(id),
++  level_code    TEXT    NOT NULL REFERENCES levels(code),
++  currency_code TEXT    NOT NULL REFERENCES fx_rates(currency_code),
++  min_minor     INTEGER NOT NULL CHECK (min_minor > 0),
++  mid_minor     INTEGER NOT NULL,
++  max_minor     INTEGER NOT NULL,
++  PRIMARY KEY (country_code, job_title_id, level_code),
++  CHECK (min_minor < mid_minor AND mid_minor < max_minor)
++) STRICT;
++
++CREATE TABLE users (
++  id            INTEGER PRIMARY KEY,
++  email         TEXT    NOT NULL UNIQUE CHECK (email = lower(email)),
++  display_name  TEXT    NOT NULL,
++  role          TEXT    NOT NULL CHECK (role IN ('hr_admin','hr_viewer','finance')),
++  password_hash TEXT    NOT NULL,          -- scrypt$N$r$p$<salt>$<hash> (ADR 0006)
++  created_at    TEXT    NOT NULL
++) STRICT;
++
++CREATE TABLE employees (
++  id                    INTEGER PRIMARY KEY,
++  employee_code         TEXT    NOT NULL UNIQUE CHECK (employee_code GLOB 'E[0-9][0-9][0-9][0-9][0-9][0-9]'),
++  first_name            TEXT    NOT NULL CHECK (length(trim(first_name)) BETWEEN 1 AND 100),
++  last_name             TEXT    NOT NULL CHECK (length(trim(last_name))  BETWEEN 1 AND 100),
++  name_search           TEXT    NOT NULL,  -- normalised "first last", written by the app, see section 5
++  gender                TEXT    NOT NULL CHECK (gender IN ('female','male','non_binary','not_disclosed')),
++  country_code          TEXT    NOT NULL REFERENCES countries(code),
++  job_title_id          INTEGER NOT NULL REFERENCES job_titles(id),
++  level_code            TEXT    NOT NULL REFERENCES levels(code),
++  hire_date             TEXT    NOT NULL CHECK (date(hire_date) IS hire_date),
++  status                TEXT    NOT NULL CHECK (status IN ('active','terminated')),
++  termination_date      TEXT    CHECK (termination_date IS NULL OR date(termination_date) IS termination_date),
++  salary_minor          INTEGER NOT NULL CHECK (salary_minor > 0),
++  salary_currency       TEXT    NOT NULL REFERENCES fx_rates(currency_code),
++  salary_effective_date TEXT    NOT NULL CHECK (date(salary_effective_date) IS salary_effective_date),
++  created_at            TEXT    NOT NULL,
++  updated_at            TEXT    NOT NULL,
++  FOREIGN KEY (country_code, job_title_id, level_code)
++    REFERENCES pay_bands(country_code, job_title_id, level_code),  -- every employee has a band
++  CHECK ((status = 'terminated') = (termination_date IS NOT NULL)),
++  CHECK (termination_date IS NULL OR termination_date >= hire_date),
++  CHECK (salary_effective_date >= hire_date)
++) STRICT;
++
++CREATE TABLE salary_changes (
++  id                 INTEGER PRIMARY KEY,
++  employee_id        INTEGER NOT NULL REFERENCES employees(id),
++  effective_date     TEXT    NOT NULL CHECK (date(effective_date) IS effective_date),
++  amount_minor       INTEGER NOT NULL CHECK (amount_minor > 0),
++  currency_code      TEXT    NOT NULL REFERENCES fx_rates(currency_code),
++  job_title_id       INTEGER NOT NULL REFERENCES job_titles(id),  -- position in effect from effective_date (D-029)
++  level_code         TEXT    NOT NULL REFERENCES levels(code),
++  reason             TEXT    NOT NULL CHECK (reason IN ('hire','promotion','merit','market_adjustment','correction')),
++  changed_by_user_id INTEGER REFERENCES users(id),  -- NULL means imported by the seed; the UI shows "Imported"
++  created_at         TEXT    NOT NULL
++) STRICT;
++
++-- Added by Chat 3 (ADR 0006): server-side sessions. The cookie holds a random token; only its SHA-256 is stored.
++CREATE TABLE sessions (
++  token_hash TEXT    PRIMARY KEY,                    -- hex SHA-256 of the 32-byte random token
++  user_id    INTEGER NOT NULL REFERENCES users(id),
++  created_at TEXT    NOT NULL,
++  expires_at TEXT    NOT NULL
++) STRICT;
++
++-- Added by Chat 3 (ADR 0008): one row per "Ask about pay" request. Serves the daily caps and the audit trail.
++CREATE TABLE ask_log (
++  id                INTEGER PRIMARY KEY,
++  user_id           INTEGER NOT NULL REFERENCES users(id),
++  asked_at          TEXT    NOT NULL,
++  question          TEXT    NOT NULL CHECK (length(question) BETWEEN 1 AND 500),
++  outcome           TEXT    NOT NULL CHECK (outcome IN ('answered','cannot_answer','error','rate_limited')),
++  interpreted_query TEXT,                            -- JSON of the structured query; NULL unless answered
++  input_tokens      INTEGER,
++  output_tokens     INTEGER
++) STRICT;
++
++-- Indexes I2 to I7 and I12 to I14 (02-data-model.md section 6).
++CREATE INDEX ix_employees_status_name ON employees(status, last_name, first_name, id);
++CREATE INDEX ix_employees_cohort ON employees(country_code, job_title_id, level_code, status);
++CREATE INDEX ix_employees_title_level ON employees(job_title_id, level_code);
++CREATE INDEX ix_employees_salary_date ON employees(salary_effective_date);
++CREATE INDEX ix_employees_hire_date ON employees(hire_date);
++CREATE INDEX ix_salary_changes_employee ON salary_changes(employee_id, effective_date, id);
++CREATE INDEX ix_sessions_user ON sessions(user_id);
++CREATE INDEX ix_ask_log_user_time ON ask_log(user_id, asked_at);
++CREATE INDEX ix_ask_log_time ON ask_log(asked_at);
+diff --git a/apps/api/src/db/money-sql.test.ts b/apps/api/src/db/money-sql.test.ts
+new file mode 100644
+index 0000000..2b0083f
+--- /dev/null
++++ b/apps/api/src/db/money-sql.test.ts
+@@ -0,0 +1,33 @@
++import { toUsdMinor } from '@acme/shared';
++import { sql } from 'drizzle-orm';
++import { describe, expect, it } from 'vitest';
++import { createDb } from './client.ts';
++import { usdMinorSql } from './money-sql.ts';
++
++const cases = [
++  { amountMinor: 9_500_000, micros: 1_000_000 },
++  { amountMinor: 100, micros: 1_340_000 },
++  { amountMinor: 12_345, micros: 1_160_000 },
++  { amountMinor: 50, micros: 1_010_000 },
++  { amountMinor: 50, micros: 11_500 },
++  { amountMinor: 130, micros: 11_500 },
++  { amountMinor: 1_500_000_000, micros: 11_500 },
++  { amountMinor: 7_654_321, micros: 720_000 },
++];
++
++describe('usdMinorSql', () => {
++  it('the SQL conversion form agrees with toUsdMinor (02 section 4)', async () => {
++    const db = createDb(':memory:');
++    // Integer literals, as stored in the INTEGER columns salary_minor and usd_per_unit_micros.
++    const values = sql.raw(cases.map((c) => `(${c.amountMinor}, ${c.micros})`).join(', '));
++
++    const rows = await db.all<{ usd: number }>(
++      sql`WITH v(amount_minor, micros) AS (VALUES ${values})
++          SELECT ${usdMinorSql(sql`amount_minor`, sql`micros`)} AS usd FROM v`,
++    );
++
++    expect(rows.map((row) => row.usd)).toEqual(
++      cases.map((c) => toUsdMinor(c.amountMinor, c.micros)),
++    );
++  });
++});
+diff --git a/apps/api/src/db/money-sql.ts b/apps/api/src/db/money-sql.ts
+new file mode 100644
+index 0000000..2019785
+--- /dev/null
++++ b/apps/api/src/db/money-sql.ts
+@@ -0,0 +1,7 @@
++import { sql, type SQL, type SQLWrapper } from 'drizzle-orm';
++
++// The SQL form of toUsdMinor for sorting by USD (02 section 4). Integer division of positive
++// integers gives the same half-up result as Math.round in TypeScript.
++export function usdMinorSql(amountMinor: SQLWrapper, usdPerUnitMicros: SQLWrapper): SQL<number> {
++  return sql<number>`((${amountMinor} * ${usdPerUnitMicros} + 500000) / 1000000)`;
++}
+diff --git a/apps/api/src/db/schema.test.ts b/apps/api/src/db/schema.test.ts
+new file mode 100644
+index 0000000..a826b48
+--- /dev/null
++++ b/apps/api/src/db/schema.test.ts
+@@ -0,0 +1,64 @@
++import { is } from 'drizzle-orm';
++import { getTableConfig, SQLiteTable } from 'drizzle-orm/sqlite-core';
++import { describe, expect, it } from 'vitest';
++import { createDb } from './client.ts';
++import { migrate } from './migrate.ts';
++import * as schema from './schema.ts';
++
++type ColumnShape = { name: string; type: string; notNull: boolean; primaryKey: boolean };
++
++const byName = (a: ColumnShape, b: ColumnShape) => a.name.localeCompare(b.name);
++
++const drizzleTables = Object.values(schema as Record<string, unknown>).filter(
++  (value): value is SQLiteTable => is(value, SQLiteTable),
++);
++
++function drizzleColumns(table: SQLiteTable): ColumnShape[] {
++  const config = getTableConfig(table);
++  const compositeKey = new Set(config.primaryKeys.flatMap((pk) => pk.columns.map((c) => c.name)));
++  return config.columns
++    .map((column) => {
++      const primaryKey = column.primary || compositeKey.has(column.name);
++      return {
++        name: column.name,
++        type: column.getSQLType().toUpperCase(),
++        // SQLite reports INTEGER PRIMARY KEY as nullable; key columns are compared by primaryKey only.
++        notNull: primaryKey ? true : column.notNull,
++        primaryKey,
++      };
++    })
++    .sort(byName);
++}
++
++describe('db/schema.ts (drift guard, ADR 0003)', () => {
++  it("every Drizzle table's columns equal PRAGMA table_info for that table", async () => {
++    const db = createDb(':memory:');
++    await migrate(db);
++    const sqlTables = (
++      await db.$client.execute(
++        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name <> 'schema_migrations' ORDER BY name",
++      )
++    ).rows.map((row) => String(row.name));
++
++    expect(drizzleTables.map((table) => getTableConfig(table).name).sort()).toEqual(sqlTables);
++    for (const table of drizzleTables) {
++      const name = getTableConfig(table).name;
++      const info = await db.$client.execute(`PRAGMA table_info(${name})`);
++      const sqlColumns = info.rows
++        .map((row) => {
++          const primaryKey = Number(row.pk) > 0;
++          return {
++            name: String(row.name),
++            type: String(row.type).toUpperCase(),
++            notNull: primaryKey ? true : Number(row.notnull) === 1,
++            primaryKey,
++          };
++        })
++        .sort(byName);
++      expect({ table: name, columns: drizzleColumns(table) }).toEqual({
++        table: name,
++        columns: sqlColumns,
++      });
++    }
++  });
++});
+diff --git a/apps/api/src/db/schema.ts b/apps/api/src/db/schema.ts
+new file mode 100644
+index 0000000..5508350
+--- /dev/null
++++ b/apps/api/src/db/schema.ts
+@@ -0,0 +1,161 @@
++import { integer, primaryKey, sqliteTable, text } from 'drizzle-orm/sqlite-core';
++
++// Drizzle tables mirroring db/migrations/*.sql (ADR 0003). The SQL is the source of truth for
++// constraints; these give typed queries, and schema.test.ts fails if the two drift apart.
++
++export const fxRates = sqliteTable('fx_rates', {
++  currencyCode: text('currency_code').primaryKey(),
++  usdPerUnitMicros: integer('usd_per_unit_micros').notNull(),
++  asOfDate: text('as_of_date').notNull(),
++});
++
++export const countries = sqliteTable('countries', {
++  code: text('code').primaryKey(),
++  name: text('name').notNull(),
++  currencyCode: text('currency_code')
++    .notNull()
++    .references(() => fxRates.currencyCode),
++});
++
++export const departments = sqliteTable('departments', {
++  id: integer('id').primaryKey(),
++  name: text('name').notNull(),
++});
++
++export const jobTitles = sqliteTable('job_titles', {
++  id: integer('id').primaryKey(),
++  name: text('name').notNull(),
++  departmentId: integer('department_id')
++    .notNull()
++    .references(() => departments.id),
++});
++
++export const levelCodes = ['L1', 'L2', 'L3', 'L4', 'L5'] as const;
++export type LevelCode = (typeof levelCodes)[number];
++
++export const levels = sqliteTable('levels', {
++  code: text('code', { enum: levelCodes }).primaryKey(),
++  name: text('name').notNull(),
++  rank: integer('rank').notNull(),
++});
++
++export const payBands = sqliteTable(
++  'pay_bands',
++  {
++    countryCode: text('country_code')
++      .notNull()
++      .references(() => countries.code),
++    jobTitleId: integer('job_title_id')
++      .notNull()
++      .references(() => jobTitles.id),
++    levelCode: text('level_code', { enum: levelCodes })
++      .notNull()
++      .references(() => levels.code),
++    currencyCode: text('currency_code')
++      .notNull()
++      .references(() => fxRates.currencyCode),
++    minMinor: integer('min_minor').notNull(),
++    midMinor: integer('mid_minor').notNull(),
++    maxMinor: integer('max_minor').notNull(),
++  },
++  (t) => [primaryKey({ columns: [t.countryCode, t.jobTitleId, t.levelCode] })],
++);
++
++export const roles = ['hr_admin', 'hr_viewer', 'finance'] as const;
++export type Role = (typeof roles)[number];
++
++export const users = sqliteTable('users', {
++  id: integer('id').primaryKey(),
++  email: text('email').notNull(),
++  displayName: text('display_name').notNull(),
++  role: text('role', { enum: roles }).notNull(),
++  passwordHash: text('password_hash').notNull(),
++  createdAt: text('created_at').notNull(),
++});
++
++export const genders = ['female', 'male', 'non_binary', 'not_disclosed'] as const;
++export type Gender = (typeof genders)[number];
++
++export const employeeStatuses = ['active', 'terminated'] as const;
++
++export const employees = sqliteTable('employees', {
++  id: integer('id').primaryKey(),
++  employeeCode: text('employee_code').notNull(),
++  firstName: text('first_name').notNull(),
++  lastName: text('last_name').notNull(),
++  nameSearch: text('name_search').notNull(),
++  gender: text('gender', { enum: genders }).notNull(),
++  countryCode: text('country_code')
++    .notNull()
++    .references(() => countries.code),
++  jobTitleId: integer('job_title_id')
++    .notNull()
++    .references(() => jobTitles.id),
++  levelCode: text('level_code', { enum: levelCodes })
++    .notNull()
++    .references(() => levels.code),
++  hireDate: text('hire_date').notNull(),
++  status: text('status', { enum: employeeStatuses }).notNull(),
++  terminationDate: text('termination_date'),
++  salaryMinor: integer('salary_minor').notNull(),
++  salaryCurrency: text('salary_currency')
++    .notNull()
++    .references(() => fxRates.currencyCode),
++  salaryEffectiveDate: text('salary_effective_date').notNull(),
++  createdAt: text('created_at').notNull(),
++  updatedAt: text('updated_at').notNull(),
++});
++
++export const salaryChangeReasons = [
++  'hire',
++  'promotion',
++  'merit',
++  'market_adjustment',
++  'correction',
++] as const;
++export type SalaryChangeReason = (typeof salaryChangeReasons)[number];
++
++export const salaryChanges = sqliteTable('salary_changes', {
++  id: integer('id').primaryKey(),
++  employeeId: integer('employee_id')
++    .notNull()
++    .references(() => employees.id),
++  effectiveDate: text('effective_date').notNull(),
++  amountMinor: integer('amount_minor').notNull(),
++  currencyCode: text('currency_code')
++    .notNull()
++    .references(() => fxRates.currencyCode),
++  jobTitleId: integer('job_title_id')
++    .notNull()
++    .references(() => jobTitles.id),
++  levelCode: text('level_code', { enum: levelCodes })
++    .notNull()
++    .references(() => levels.code),
++  reason: text('reason', { enum: salaryChangeReasons }).notNull(),
++  changedByUserId: integer('changed_by_user_id').references(() => users.id),
++  createdAt: text('created_at').notNull(),
++});
++
++export const sessions = sqliteTable('sessions', {
++  tokenHash: text('token_hash').primaryKey(),
++  userId: integer('user_id')
++    .notNull()
++    .references(() => users.id),
++  createdAt: text('created_at').notNull(),
++  expiresAt: text('expires_at').notNull(),
++});
++
++export const askOutcomes = ['answered', 'cannot_answer', 'error', 'rate_limited'] as const;
++
++export const askLog = sqliteTable('ask_log', {
++  id: integer('id').primaryKey(),
++  userId: integer('user_id')
++    .notNull()
++    .references(() => users.id),
++  askedAt: text('asked_at').notNull(),
++  question: text('question').notNull(),
++  outcome: text('outcome', { enum: askOutcomes }).notNull(),
++  interpretedQuery: text('interpreted_query'),
++  inputTokens: integer('input_tokens'),
++  outputTokens: integer('output_tokens'),
++});
+diff --git a/apps/api/src/domain/name-search.test.ts b/apps/api/src/domain/name-search.test.ts
+new file mode 100644
+index 0000000..c9904c0
+--- /dev/null
++++ b/apps/api/src/domain/name-search.test.ts
+@@ -0,0 +1,16 @@
++import { describe, expect, it } from 'vitest';
++import { nameSearch } from './name-search.ts';
++
++describe('nameSearch', () => {
++  it.each([
++    { first: 'Jörg', last: 'Müller', expected: 'jorg muller' },
++    { first: '  Ana  María ', last: 'López ', expected: 'ana maria lopez' },
++    { first: 'ZOË', last: 'Brontë', expected: 'zoe bronte' },
++    { first: 'Priya', last: 'Iyer', expected: 'priya iyer' },
++  ])(
++    'normalises name_search to lower-case "first last" without diacritics: $first $last',
++    ({ first, last, expected }) => {
++      expect(nameSearch(first, last)).toBe(expected);
++    },
++  );
++});
+diff --git a/apps/api/src/domain/name-search.ts b/apps/api/src/domain/name-search.ts
+new file mode 100644
+index 0000000..c9fbf57
+--- /dev/null
++++ b/apps/api/src/domain/name-search.ts
+@@ -0,0 +1,10 @@
++// name_search (02 section 5): "first last", Unicode NFKD, diacritics removed, lower-cased,
++// spaces collapsed. Search input is normalised the same way, so "muller" finds "Müller".
++export function nameSearch(firstName: string, lastName: string): string {
++  return `${firstName} ${lastName}`
++    .normalize('NFKD')
++    .replace(/\p{M}/gu, '')
++    .toLowerCase()
++    .replace(/\s+/g, ' ')
++    .trim();
++}
+diff --git a/apps/api/src/main.ts b/apps/api/src/main.ts
+index 8abbae1..03274a6 100644
+--- a/apps/api/src/main.ts
++++ b/apps/api/src/main.ts
+@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
+ import { buildApp } from './app.ts';
+ import { ConfigError, loadConfig, type Config } from './config.ts';
+ import { createDb } from './db/client.ts';
++import { migrate } from './db/migrate.ts';
+ import { systemClock } from './domain/clock.ts';
+ 
+ function readConfig(): Config {
+@@ -18,6 +19,7 @@ function readConfig(): Config {
+ 
+ const config = readConfig();
+ const db = createDb(config.databaseUrl, config.databaseAuthToken);
++await migrate(db);
+ // apps/api/{src,dist}/main → apps/web/dist; served only in production (03 section 8).
+ const staticRoot =
+   config.nodeEnv === 'production'
+diff --git a/apps/api/src/modules/auth/password.test.ts b/apps/api/src/modules/auth/password.test.ts
+new file mode 100644
+index 0000000..83bd1bc
+--- /dev/null
++++ b/apps/api/src/modules/auth/password.test.ts
+@@ -0,0 +1,26 @@
++import { describe, expect, it } from 'vitest';
++import { hashPassword, PRODUCTION_SCRYPT, verifyPassword } from './password.ts';
++
++// Tests use N=2^10 to stay fast (03 section 7); one test checks the production default.
++const TEST_SCRYPT = { N: 1024, r: 8, p: 3 };
++
++describe('password hashing (ADR 0006)', () => {
++  it('password hashing round-trips, and a wrong password fails the comparison', async () => {
++    const stored = await hashPassword('correct horse battery', TEST_SCRYPT);
++    const again = await hashPassword('correct horse battery', TEST_SCRYPT);
++
++    expect(await verifyPassword('correct horse battery', stored)).toBe(true);
++    expect(await verifyPassword('correct horse batterz', stored)).toBe(false);
++    expect(stored).toMatch(/^scrypt\$1024\$8\$3\$[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+$/);
++    expect(again).not.toBe(stored);
++  });
++
++  it('the production hash string uses scrypt$32768$8$3$', async () => {
++    const stored = await hashPassword('demo-password-123', PRODUCTION_SCRYPT);
++    const [, , , , salt] = stored.split('$');
++
++    expect(stored.startsWith('scrypt$32768$8$3$')).toBe(true);
++    expect(Buffer.from(salt ?? '', 'base64')).toHaveLength(16);
++    expect(await verifyPassword('demo-password-123', stored)).toBe(true);
++  });
++});
+diff --git a/apps/api/src/modules/auth/password.ts b/apps/api/src/modules/auth/password.ts
+new file mode 100644
+index 0000000..cafa3df
+--- /dev/null
++++ b/apps/api/src/modules/auth/password.ts
+@@ -0,0 +1,43 @@
++import { randomBytes, scrypt, timingSafeEqual, type ScryptOptions } from 'node:crypto';
++
++export type ScryptParams = { N: number; r: number; p: number };
++
++// ADR 0006: one of OWASP's equivalent scrypt settings, 32 MiB per hash.
++export const PRODUCTION_SCRYPT: ScryptParams = { N: 32768, r: 8, p: 3 };
++
++const KEY_LENGTH = 32;
++
++function derive(password: string, salt: Buffer, { N, r, p }: ScryptParams): Promise<Buffer> {
++  // scrypt needs 128 * N * r bytes; Node's default maxmem (32 MiB) is exactly the production cost.
++  const options: ScryptOptions = { N, r, p, maxmem: 256 * N * r };
++  return new Promise((resolve, reject) =>
++    scrypt(password, salt, KEY_LENGTH, options, (error, key) =>
++      error ? reject(error) : resolve(key),
++    ),
++  );
++}
++
++// Stored as scrypt$N$r$p$<salt base64>$<hash base64> (03 section 7).
++export async function hashPassword(password: string, params: ScryptParams): Promise<string> {
++  const salt = randomBytes(16);
++  const hash = await derive(password, salt, params);
++  return [
++    'scrypt',
++    params.N,
++    params.r,
++    params.p,
++    salt.toString('base64'),
++    hash.toString('base64'),
++  ].join('$');
++}
++
++export async function verifyPassword(password: string, stored: string): Promise<boolean> {
++  const [, N, r, p, salt = '', hash = ''] = stored.split('$');
++  const expected = Buffer.from(hash, 'base64');
++  const actual = await derive(password, Buffer.from(salt, 'base64'), {
++    N: Number(N),
++    r: Number(r),
++    p: Number(p),
++  });
++  return actual.length === expected.length && timingSafeEqual(actual, expected);
++}
+diff --git a/apps/api/src/seed/cli.test.ts b/apps/api/src/seed/cli.test.ts
+new file mode 100644
+index 0000000..9e17610
+--- /dev/null
++++ b/apps/api/src/seed/cli.test.ts
+@@ -0,0 +1,57 @@
++import { describe, expect, it } from 'vitest';
++import { runSeed } from './cli.ts';
++
++const validEnv = {
++  DATABASE_URL: ':memory:',
++  DEMO_HR_ADMIN_PASSWORD: 'admin-password-1',
++  DEMO_HR_VIEWER_PASSWORD: 'viewer-password-1',
++  DEMO_FINANCE_PASSWORD: 'finance-password-1',
++};
++
++describe('seed CLI', () => {
++  it.each([
++    {
++      case: 'HR admin password missing',
++      env: { ...validEnv, DEMO_HR_ADMIN_PASSWORD: undefined },
++      variables: ['DEMO_HR_ADMIN_PASSWORD'],
++    },
++    {
++      case: 'finance password of 11 characters',
++      env: { ...validEnv, DEMO_FINANCE_PASSWORD: 'eleven-char' },
++      variables: ['DEMO_FINANCE_PASSWORD'],
++    },
++    {
++      case: 'all three empty',
++      env: {
++        DATABASE_URL: ':memory:',
++        DEMO_HR_ADMIN_PASSWORD: '',
++        DEMO_HR_VIEWER_PASSWORD: '',
++        DEMO_FINANCE_PASSWORD: '',
++      },
++      variables: ['DEMO_HR_ADMIN_PASSWORD', 'DEMO_HR_VIEWER_PASSWORD', 'DEMO_FINANCE_PASSWORD'],
++    },
++  ])(
++    'the seed CLI exits with an error when a demo password variable is missing or shorter than 12 characters: $case',
++    async ({ env, variables }) => {
++      const errors: string[] = [];
++      let opened = false;
++
++      const exitCode = await runSeed(env, {
++        openDb: () => {
++          opened = true;
++          throw new Error('the database must not be opened');
++        },
++        log: () => {},
++        error: (line) => errors.push(line),
++      });
++
++      expect(exitCode).toBe(1);
++      expect(opened).toBe(false);
++      const output = errors.join('\n');
++      for (const variable of variables) {
++        expect(output).toContain(`${variable}: must be set and at least 12 characters`);
++      }
++      expect(output).not.toContain(validEnv.DEMO_HR_VIEWER_PASSWORD);
++    },
++  );
++});
+diff --git a/apps/api/src/seed/cli.ts b/apps/api/src/seed/cli.ts
+new file mode 100644
+index 0000000..74e6ca0
+--- /dev/null
++++ b/apps/api/src/seed/cli.ts
+@@ -0,0 +1,81 @@
++import { loadConfig } from '../config.ts';
++import { createDb, type Db } from '../db/client.ts';
++import { migrate } from '../db/migrate.ts';
++import type { Role } from '../db/schema.ts';
++import { hashPassword, PRODUCTION_SCRYPT, type ScryptParams } from '../modules/auth/password.ts';
++import { generateDataset, REF_DATE, SEED, SEED_CONFIG } from './generate.ts';
++import { formatSeedReport, seedReport } from './report.ts';
++import { writeDataset, type SeedUser } from './write.ts';
++
++export type SeedDeps = {
++  openDb: (url: string, authToken?: string) => Db;
++  log: (line: string) => void;
++  error: (line: string) => void;
++  /** Defaults to the production cost. */
++  scrypt?: ScryptParams;
++};
++
++// 02 section 7.9: the three demo accounts and the variables holding their passwords.
++const DEMO_USERS: { email: string; displayName: string; role: Role; variable: string }[] = [
++  {
++    email: 'hr.admin@acme.test',
++    displayName: 'HR Admin (demo)',
++    role: 'hr_admin',
++    variable: 'DEMO_HR_ADMIN_PASSWORD',
++  },
++  {
++    email: 'hr.viewer@acme.test',
++    displayName: 'HR Viewer (demo)',
++    role: 'hr_viewer',
++    variable: 'DEMO_HR_VIEWER_PASSWORD',
++  },
++  {
++    email: 'finance@acme.test',
++    displayName: 'Finance (demo)',
++    role: 'finance',
++    variable: 'DEMO_FINANCE_PASSWORD',
++  },
++];
++
++const MIN_PASSWORD_LENGTH = 12;
++
++// npm run seed (02 section 7.1): validates the demo passwords before touching the database, then
++// migrates, writes the dataset and users in one transaction, and prints the report.
++export async function runSeed(
++  env: Record<string, string | undefined>,
++  deps: SeedDeps,
++): Promise<number> {
++  const invalid = DEMO_USERS.filter((u) => (env[u.variable] ?? '').length < MIN_PASSWORD_LENGTH);
++  if (invalid.length > 0) {
++    deps.error('Cannot seed: demo passwords are missing or too short.');
++    for (const u of invalid) {
++      deps.error(`  ${u.variable}: must be set and at least ${MIN_PASSWORD_LENGTH} characters`);
++    }
++    return 1;
++  }
++  const config = loadConfig(env);
++
++  const db = deps.openDb(config.databaseUrl, config.databaseAuthToken);
++  await migrate(db);
++  const dataset = generateDataset(SEED_CONFIG, SEED, REF_DATE);
++  const users: SeedUser[] = await Promise.all(
++    DEMO_USERS.map(async (u) => ({
++      email: u.email,
++      displayName: u.displayName,
++      role: u.role,
++      passwordHash: await hashPassword(env[u.variable] ?? '', deps.scrypt ?? PRODUCTION_SCRYPT),
++      createdAt: `${REF_DATE}T00:00:00.000Z`,
++    })),
++  );
++  await writeDataset(db, dataset, users);
++  deps.log(formatSeedReport(seedReport(dataset, SEED_CONFIG)));
++  return 0;
++}
++
++if (import.meta.main) {
++  process.exitCode = await runSeed(process.env, {
++    openDb: createDb,
++    log: (line) => console.log(line),
++    error: (line) => console.error(line),
++  });
++}
+diff --git a/apps/api/src/seed/generate.test.ts b/apps/api/src/seed/generate.test.ts
+new file mode 100644
+index 0000000..12951cd
+--- /dev/null
++++ b/apps/api/src/seed/generate.test.ts
+@@ -0,0 +1,280 @@
++import { createHash } from 'node:crypto';
++import { describe, expect, it } from 'vitest';
++import { generateDataset, REF_DATE, SEED, SEED_CONFIG, type Dataset } from './generate.ts';
++import { SOFTWARE_ENGINEER } from './reference.ts';
++
++// One generation shared by every test in the file; a failure fails each test, not the file.
++let cached: Dataset | undefined;
++const dataset = (): Dataset => (cached ??= generateDataset(SEED_CONFIG, SEED, REF_DATE));
++
++const active = () => dataset().employees.filter((e) => e.status === 'active');
++
++const countBy = <T>(items: readonly T[], key: (item: T) => string) => {
++  const counts: Record<string, number> = {};
++  for (const item of items) counts[key(item)] = (counts[key(item)] ?? 0) + 1;
++  return counts;
++};
++
++describe('generateDataset: allocation (02 sections 7.3 and 7.5)', () => {
++  it('creates exactly 10,000 active employees with the per-country counts of 02 section 7.3', () => {
++    const employees = active();
++    const codes = employees.map((e) => e.employeeCode).sort();
++
++    expect(employees).toHaveLength(10_000);
++    expect(countBy(employees, (e) => e.countryCode)).toEqual({
++      CA: 800,
++      DE: 1200,
++      GB: 1500,
++      IN: 4000,
++      US: 2500,
++    });
++    expect(codes[0]).toBe('E000001');
++    expect(codes[codes.length - 1]).toBe('E010000');
++    expect(new Set(codes).size).toBe(10_000);
++  });
++
++  it('allocates IN / Software Engineer / L3 as 280 people: 76 women, 195 men, 3 non-binary, 6 not disclosed', () => {
++    const cohort = active().filter(
++      (e) => e.countryCode === 'IN' && e.jobTitleId === SOFTWARE_ENGINEER && e.levelCode === 'L3',
++    );
++
++    expect(cohort).toHaveLength(280);
++    expect(countBy(cohort, (e) => e.gender)).toEqual({
++      female: 76,
++      male: 195,
++      non_binary: 3,
++      not_disclosed: 6,
++    });
++  });
++
++  it('gives every employee a band', () => {
++    const { payBands, employees } = dataset();
++    const bandCurrency = new Map(
++      payBands.map((b) => [`${b.countryCode}/${b.jobTitleId}/${b.levelCode}`, b.currencyCode]),
++    );
++
++    for (const e of employees) {
++      expect(bandCurrency.get(`${e.countryCode}/${e.jobTitleId}/${e.levelCode}`)).toBe(
++        e.salaryCurrency,
++      );
++    }
++    expect(employees.length).toBeGreaterThan(0);
++  });
++});
++
++type Cohort = { key: string; women: number[]; men: number[] };
++
++// Gender gap per 02 section 4, in local currency: (meanMale - meanFemale) / meanMale * 100.
++const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
++const gapPct = (c: Cohort) => ((mean(c.men) - mean(c.women)) / mean(c.men)) * 100;
++
++const eligibleCohorts = (): Cohort[] => {
++  const cohorts = new Map<string, Cohort>();
++  for (const e of active()) {
++    const key = `${e.countryCode}/${e.jobTitleId}/${e.levelCode}`;
++    const cohort = cohorts.get(key) ?? { key, women: [], men: [] };
++    if (e.gender === 'female') cohort.women.push(e.salaryMinor);
++    if (e.gender === 'male') cohort.men.push(e.salaryMinor);
++    cohorts.set(key, cohort);
++  }
++  return [...cohorts.values()].filter((c) => c.women.length >= 5 && c.men.length >= 5);
++};
++
++describe('generateDataset: current salary (02 section 7.6)', () => {
++  it('lands the four target cohorts within 0.1 points of their gap, with the expected flags, and keeps every other eligible cohort under 2.5%', () => {
++    const targets: Record<string, { gap: number; flagged: boolean }> = {
++      'IN/1/L3': { gap: 8.0, flagged: true },
++      'US/5/L2': { gap: 6.0, flagged: true },
++      'GB/1/L4': { gap: 5.3, flagged: true },
++      'DE/1/L2': { gap: 4.7, flagged: false },
++    };
++    const cohorts = eligibleCohorts();
++
++    for (const [key, target] of Object.entries(targets)) {
++      const cohort = cohorts.find((c) => c.key === key);
++      expect(cohort, key).toBeDefined();
++      const gap = gapPct(cohort!);
++      expect(Math.abs(gap - target.gap), `${key} gap ${gap}`).toBeLessThanOrEqual(0.1);
++      expect(gap >= 5, key).toBe(target.flagged);
++    }
++    for (const cohort of cohorts.filter((c) => !(c.key in targets))) {
++      expect(Math.abs(gapPct(cohort)), cohort.key).toBeLessThan(2.5);
++    }
++  });
++
++  it('keeps the outside-band share between 5% and 8%', () => {
++    const band = new Map(
++      dataset().payBands.map((b) => [`${b.countryCode}/${b.jobTitleId}/${b.levelCode}`, b]),
++    );
++
++    const outside = active().filter((e) => {
++      const b = band.get(`${e.countryCode}/${e.jobTitleId}/${e.levelCode}`)!;
++      return e.salaryMinor < b.minMinor || e.salaryMinor > b.maxMinor;
++    });
++
++    expect(outside.length / 10_000).toBeGreaterThanOrEqual(0.05);
++    expect(outside.length / 10_000).toBeLessThanOrEqual(0.08);
++  });
++
++  it('rounds salaries to the nearest 100 major units, 1,000 for INR', () => {
++    const notRounded = dataset().employees.filter(
++      (e) => e.salaryMinor % ((e.salaryCurrency === 'INR' ? 1000 : 100) * 100) !== 0,
++    );
++    const distinctSalaries = new Set(active().map((e) => e.salaryMinor));
++
++    expect(notRounded).toEqual([]);
++    expect(distinctSalaries.size).toBeGreaterThan(1000);
++  });
++});
++
++const RANK: Record<string, number> = { L1: 1, L2: 2, L3: 3, L4: 4, L5: 5 };
++
++let cachedHistories: Map<number, Dataset['salaryChanges']> | undefined;
++const histories = () => {
++  if (!cachedHistories) {
++    cachedHistories = new Map();
++    for (const row of dataset().salaryChanges) {
++      const rows = cachedHistories.get(row.employeeId) ?? [];
++      rows.push(row);
++      cachedHistories.set(row.employeeId, rows);
++    }
++  }
++  return cachedHistories;
++};
++
++describe('generateDataset: salary history (02 section 7.7)', () => {
++  it('starts each history with a hire row on the hire date, keeps dates increasing, ends no later than the reference or termination date, and ends on the current salary, title and level', () => {
++    for (const e of dataset().employees) {
++      const rows = histories().get(e.id) ?? [];
++      const first = rows[0];
++      const last = rows[rows.length - 1];
++
++      expect(first?.reason, e.employeeCode).toBe('hire');
++      expect(first?.effectiveDate, e.employeeCode).toBe(e.hireDate);
++      expect(e.hireDate >= '2013-10-01', e.employeeCode).toBe(true);
++      for (let i = 1; i < rows.length; i++) {
++        expect(rows[i]!.effectiveDate > rows[i - 1]!.effectiveDate, e.employeeCode).toBe(true);
++      }
++      expect(last!.effectiveDate <= (e.terminationDate ?? REF_DATE), e.employeeCode).toBe(true);
++      expect(
++        {
++          amountMinor: last?.amountMinor,
++          currencyCode: last?.currencyCode,
++          effectiveDate: last?.effectiveDate,
++          jobTitleId: last?.jobTitleId,
++          levelCode: last?.levelCode,
++        },
++        e.employeeCode,
++      ).toEqual({
++        amountMinor: e.salaryMinor,
++        currencyCode: e.salaryCurrency,
++        effectiveDate: e.salaryEffectiveDate,
++        jobTitleId: e.jobTitleId,
++        levelCode: e.levelCode,
++      });
++    }
++  });
++
++  it('changes level only on promotion rows, one rank up', () => {
++    for (const rows of histories().values()) {
++      for (let i = 1; i < rows.length; i++) {
++        const before = rows[i - 1]!;
++        const row = rows[i]!;
++        const levelChanged = row.levelCode !== before.levelCode;
++
++        expect(levelChanged).toBe(row.reason === 'promotion');
++        if (levelChanged) expect(RANK[row.levelCode]).toBe(RANK[before.levelCode]! + 1);
++        expect(row.jobTitleId).toBe(before.jobTitleId);
++      }
++    }
++  });
++
++  it('keeps the stale share between 9% and 13%', () => {
++    const stale = active().filter((e) => e.salaryEffectiveDate < '2024-09-30');
++
++    expect(stale.length / 10_000).toBeGreaterThanOrEqual(0.09);
++    expect(stale.length / 10_000).toBeLessThanOrEqual(0.13);
++  });
++
++  it('builds about 4 history rows per employee, using every change reason', () => {
++    const rows = dataset().salaryChanges;
++
++    expect(rows.length / dataset().employees.length).toBeGreaterThanOrEqual(3);
++    expect(rows.length / dataset().employees.length).toBeLessThanOrEqual(5);
++    expect(new Set(rows.map((r) => r.reason))).toEqual(
++      new Set(['hire', 'merit', 'promotion', 'market_adjustment', 'correction']),
++    );
++  });
++});
++
++describe('generateDataset: terminated employees (02 section 7.8)', () => {
++  const terminated = () => dataset().employees.filter((e) => e.status === 'terminated');
++
++  it('creates exactly 250 terminated employees, spread across countries in proportion to headcount', () => {
++    const byCountry = countBy(terminated(), (e) => e.countryCode);
++    const headcount: Record<string, number> = { CA: 800, DE: 1200, GB: 1500, IN: 4000, US: 2500 };
++
++    expect(terminated()).toHaveLength(250);
++    for (const [country, active] of Object.entries(headcount)) {
++      expect(Math.abs((byCountry[country] ?? 0) - (250 * active) / 10_000), country).toBeLessThan(
++        1,
++      );
++    }
++  });
++
++  it('terminates between 2024-01-01 and 2026-09-15, at least 6 months after hire, with codes E010001 to E010250', () => {
++    const rows = terminated();
++    const codes = rows.map((e) => e.employeeCode).sort();
++    const sixMonthsAfter = (date: string) => {
++      const d = new Date(`${date}T00:00:00.000Z`);
++      d.setUTCMonth(d.getUTCMonth() + 6);
++      return d.toISOString().slice(0, 10);
++    };
++
++    for (const e of rows) {
++      expect(e.terminationDate! >= '2024-01-01', e.employeeCode).toBe(true);
++      expect(e.terminationDate! <= '2026-09-15', e.employeeCode).toBe(true);
++      expect(sixMonthsAfter(e.hireDate) <= e.terminationDate!, e.employeeCode).toBe(true);
++    }
++    expect(codes).toEqual(
++      Array.from({ length: 250 }, (_, i) => `E${String(10_001 + i).padStart(6, '0')}`),
++    );
++  });
++
++  it('spreads termination dates over the whole window, with some in 2026', () => {
++    const byYear = countBy(terminated(), (e) => e.terminationDate!.slice(0, 4));
++
++    // 989 days: 366 in 2024, 365 in 2025 and 258 in 2026, so about 65 of 250 land in 2026.
++    expect(byYear['2026'] ?? 0).toBeGreaterThanOrEqual(40);
++    expect(byYear['2024'] ?? 0).toBeGreaterThanOrEqual(70);
++    expect(byYear['2025'] ?? 0).toBeGreaterThanOrEqual(70);
++  });
++});
++
++// Recorded with the full 02 section 7.8 termination window; CI must reproduce it (06 S1 acceptance).
++const RECORDED_HASH = '042be9bb34db0a76b4ea64af495db2b297f00de79340d8232bde391ca4f2cf39';
++
++const TABLES = [
++  'fxRates',
++  'countries',
++  'departments',
++  'jobTitles',
++  'levels',
++  'payBands',
++  'employees',
++  'salaryChanges',
++] as const;
++
++const hashRows = (d: Dataset) =>
++  createHash('sha256')
++    .update(JSON.stringify(TABLES.map((table) => d[table])))
++    .digest('hex');
++
++describe('generateDataset: determinism (02 section 7.2)', () => {
++  it('the same seed gives a deep-equal dataset, and the hash of its ordered rows matches the recorded value', () => {
++    const again = generateDataset(SEED_CONFIG, SEED, REF_DATE);
++
++    expect(again).toEqual(dataset());
++    expect(hashRows(again)).toBe(RECORDED_HASH);
++  });
++});
+diff --git a/apps/api/src/seed/generate.ts b/apps/api/src/seed/generate.ts
+new file mode 100644
+index 0000000..2550136
+--- /dev/null
++++ b/apps/api/src/seed/generate.ts
+@@ -0,0 +1,334 @@
++import {
++  base,
++  de,
++  en,
++  en_CA,
++  en_GB,
++  en_IN,
++  en_US,
++  Faker,
++  type LocaleDefinition,
++} from '@faker-js/faker';
++import type { employees, Gender, LevelCode, salaryChanges } from '../db/schema.ts';
++import { nameSearch } from '../domain/name-search.ts';
++import { addDays, buildHistory, drawHireDate, roundSalary, tenureYears } from './history.ts';
++import { createRandom, largestRemainder, type Random } from './random.ts';
++import {
++  ACCOUNT_EXECUTIVE,
++  COUNTRIES,
++  generateReferenceData,
++  JOB_TITLES,
++  LEVELS,
++  type CountrySpec,
++  type PayBandRow,
++  type ReferenceData,
++  SOFTWARE_ENGINEER,
++} from './reference.ts';
++
++export const SEED = 20261011;
++export const REF_DATE = '2026-09-30';
++
++export type EmployeeRow = typeof employees.$inferInsert & { id: number };
++export type SalaryChangeRow = typeof salaryChanges.$inferInsert & { id: number };
++
++export type Dataset = ReferenceData & {
++  employees: EmployeeRow[];
++  salaryChanges: SalaryChangeRow[];
++};
++
++export type GapTarget = {
++  countryCode: string;
++  jobTitleId: number;
++  levelCode: LevelCode;
++  gapPct: number;
++};
++
++export type SeedConfig = {
++  terminatedCount: number;
++  /** Realised gender gaps for named cohorts (02 section 7.6 step 2). */
++  gapTargets: readonly GapTarget[];
++  /** Every other eligible cohort draws its gap uniformly in [-x, +x]. */
++  otherGapRangePct: number;
++  /** Share of active employees outside the target cohorts moved below band, and again above. */
++  outlierShare: number;
++};
++
++export const SEED_CONFIG: SeedConfig = {
++  terminatedCount: 250,
++  gapTargets: [
++    { countryCode: 'IN', jobTitleId: SOFTWARE_ENGINEER, levelCode: 'L3', gapPct: 8.0 },
++    { countryCode: 'US', jobTitleId: ACCOUNT_EXECUTIVE, levelCode: 'L2', gapPct: 6.0 },
++    { countryCode: 'GB', jobTitleId: SOFTWARE_ENGINEER, levelCode: 'L4', gapPct: 5.3 },
++    { countryCode: 'DE', jobTitleId: SOFTWARE_ENGINEER, levelCode: 'L2', gapPct: 4.7 },
++  ],
++  otherGapRangePct: 2.0,
++  outlierShare: 0.03,
++};
++
++const LOCALES: Record<CountrySpec['locale'], LocaleDefinition> = { en_CA, de, en_GB, en_IN, en_US };
++
++const GENDERS: readonly Gender[] = ['female', 'male', 'non_binary', 'not_disclosed'];
++
++/** A generated person before ids, codes and history are assigned. */
++type Person = {
++  countryCode: string;
++  jobTitleId: number;
++  levelCode: LevelCode;
++  gender: Gender;
++  firstName: string;
++  lastName: string;
++  band: PayBandRow;
++  salaryMinor: number;
++  terminationDate: string | null;
++};
++
++type NameOf = (gender: Gender) => { firstName: string; lastName: string };
++
++const bandKey = (countryCode: string, jobTitleId: number, levelCode: string) =>
++  `${countryCode}/${jobTitleId}/${levelCode}`;
++
++function namesFor(
++  country: CountrySpec,
++  countryIndex: number,
++  seed: number,
++  refDate: string,
++): NameOf {
++  const faker = new Faker({ locale: [LOCALES[country.locale], en, base] });
++  faker.seed(seed + countryIndex);
++  faker.setDefaultRefDate(refDate);
++  return (gender: Gender) => ({
++    firstName:
++      gender === 'female' || gender === 'male'
++        ? faker.person.firstName(gender)
++        : faker.person.firstName(),
++    lastName: faker.person.lastName(),
++  });
++}
++
++// 02 section 7.5: cohort counts by largest remainder per country, then genders per cohort.
++function allocateActive(names: NameOf[], bands: Map<string, PayBandRow>): Person[] {
++  const people: Person[] = [];
++  const cohortWeights = JOB_TITLES.flatMap((t) => LEVELS.map((l) => t.share * l.share));
++  COUNTRIES.forEach((country, countryIndex) => {
++    const nameOf = names[countryIndex] as NameOf;
++    const cohortCounts = largestRemainder(country.activeHeadcount, cohortWeights);
++    let cohort = 0;
++    for (const title of JOB_TITLES) {
++      for (const level of LEVELS) {
++        const size = cohortCounts[cohort++] ?? 0;
++        const w = Math.min(0.9, title.womenShare * level.womenFactor);
++        const genderCounts = largestRemainder(size, [0.97 * w, 0.97 * (1 - w), 0.01, 0.02]);
++        const band = bands.get(bandKey(country.code, title.id, level.code));
++        if (!band) throw new Error(`No band for ${bandKey(country.code, title.id, level.code)}`);
++        GENDERS.forEach((gender, g) => {
++          for (let i = 0; i < (genderCounts[g] ?? 0); i++) {
++            people.push({
++              countryCode: country.code,
++              jobTitleId: title.id,
++              levelCode: level.code,
++              gender,
++              ...nameOf(gender),
++              band,
++              salaryMinor: band.midMinor,
++              terminationDate: null,
++            });
++          }
++        });
++      }
++    }
++  });
++  return people;
++}
++
++const pickWeighted = (random: Random, weights: readonly number[]): number => {
++  const total = weights.reduce((a, b) => a + b, 0);
++  let u = random.next() * total;
++  for (let i = 0; i < weights.length; i++) {
++    u -= weights[i] ?? 0;
++    if (u < 0) return i;
++  }
++  return weights.length - 1;
++};
++
++const TERMINATION_FROM = '2024-01-01';
++const TERMINATION_DAYS = 989; // 2024-01-01 to 2026-09-15 inclusive
++
++// 02 section 7.8: spread across countries by headcount, titles and levels drawn by their shares,
++// salaries drawn like active pay but with no gap shaping or outliers.
++function generateTerminated(
++  count: number,
++  names: NameOf[],
++  bands: Map<string, PayBandRow>,
++  random: Random,
++): Person[] {
++  const people: Person[] = [];
++  const perCountry = largestRemainder(
++    count,
++    COUNTRIES.map((c) => c.activeHeadcount),
++  );
++  COUNTRIES.forEach((country, countryIndex) => {
++    for (let n = 0; n < (perCountry[countryIndex] ?? 0); n++) {
++      const title =
++        JOB_TITLES[
++          pickWeighted(
++            random,
++            JOB_TITLES.map((t) => t.share),
++          )
++        ]!;
++      const level =
++        LEVELS[
++          pickWeighted(
++            random,
++            LEVELS.map((l) => l.share),
++          )
++        ]!;
++      const w = Math.min(0.9, title.womenShare * level.womenFactor);
++      const gender = GENDERS[pickWeighted(random, [0.97 * w, 0.97 * (1 - w), 0.01, 0.02])]!;
++      const band = bands.get(bandKey(country.code, title.id, level.code))!;
++      const compa = Math.min(1.16, Math.max(0.84, random.normal(1, 0.06)));
++      const terminationDate = addDays(TERMINATION_FROM, random.int(0, TERMINATION_DAYS - 1));
++      people.push({
++        countryCode: country.code,
++        jobTitleId: title.id,
++        levelCode: level.code,
++        gender,
++        ...(names[countryIndex] as NameOf)(gender),
++        band,
++        salaryMinor: roundSalary(compa * band.midMinor, band.currencyCode),
++        terminationDate,
++      });
++    }
++  });
++  return people;
++}
++
++const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
++
++// 02 section 7.6: compa-ratio draws, outliers outside the target cohorts, then one factor on
++// women's pay per eligible cohort so the realised gap meets its target, then rounding.
++function shapeSalaries(people: Person[], random: Random, config: SeedConfig): void {
++  const targets = new Map(
++    config.gapTargets.map((t) => [bandKey(t.countryCode, t.jobTitleId, t.levelCode), t.gapPct]),
++  );
++  const compa = people.map(() => Math.min(1.16, Math.max(0.84, random.normal(1, 0.06))));
++
++  const outlierPool = random.shuffle(
++    people.flatMap((p, i) =>
++      targets.has(bandKey(p.countryCode, p.jobTitleId, p.levelCode)) ? [] : [i],
++    ),
++  );
++  const outliers = Math.round(outlierPool.length * config.outlierShare);
++  outlierPool.slice(0, outliers).forEach((i) => (compa[i] = random.uniform(0.65, 0.76)));
++  outlierPool.slice(outliers, 2 * outliers).forEach((i) => (compa[i] = random.uniform(1.25, 1.4)));
++
++  const raw = people.map((p, i) => (compa[i] ?? 1) * p.band.midMinor);
++
++  const cohorts = new Map<string, { women: number[]; men: number[] }>();
++  people.forEach((p, i) => {
++    const key = bandKey(p.countryCode, p.jobTitleId, p.levelCode);
++    const cohort = cohorts.get(key) ?? { women: [], men: [] };
++    if (p.gender === 'female') cohort.women.push(i);
++    if (p.gender === 'male') cohort.men.push(i);
++    cohorts.set(key, cohort);
++  });
++  for (const [key, { women, men }] of cohorts) {
++    if (women.length < 5 || men.length < 5) continue;
++    const target =
++      targets.get(key) ?? random.uniform(-config.otherGapRangePct, config.otherGapRangePct);
++    const meanMen = mean(men.map((i) => raw[i] ?? 0));
++    const meanWomen = mean(women.map((i) => raw[i] ?? 0));
++    const factor = (meanMen * (1 - target / 100)) / meanWomen;
++    for (const i of women) raw[i] = (raw[i] ?? 0) * factor;
++  }
++
++  people.forEach((p, i) => {
++    p.salaryMinor = roundSalary(raw[i] ?? 0, p.band.currencyCode);
++  });
++}
++
++const code = (n: number) => `E${String(n).padStart(6, '0')}`;
++
++type Rows = { employees: EmployeeRow[]; salaryChanges: SalaryChangeRow[] };
++
++// Shuffles, numbers and gives each person a hire date and history (02 sections 7.2 and 7.7).
++function appendRows(people: Person[], random: Random, refDate: string, out: Rows): void {
++  const shuffled = random.shuffle(people);
++  const endDate = (p: Person) => p.terminationDate ?? refDate;
++  const hireDates = shuffled.map((p) =>
++    drawHireDate(random, endDate(p), p.terminationDate ? 6 : 0),
++  );
++  // 02 section 7.7: 10% of active employees, chosen among those with 2.5+ years of tenure, are stale.
++  const activeCount = shuffled.filter((p) => !p.terminationDate).length;
++  const candidates = shuffled.flatMap((p, i) =>
++    !p.terminationDate && tenureYears(hireDates[i] as string, refDate) >= 2.5 ? [i] : [],
++  );
++  const stale = new Set(random.shuffle(candidates).slice(0, Math.round(activeCount * 0.1)));
++  shuffled.forEach((person, index) => {
++    const id = out.employees.length + 1;
++    const currencyCode = person.band.currencyCode;
++    const hireDate = hireDates[index] as string;
++    const { rows } = buildHistory(
++      {
++        levelCode: person.levelCode,
++        salaryMinor: person.salaryMinor,
++        currencyCode,
++        endDate: endDate(person),
++        hireDate,
++        stale: stale.has(index),
++      },
++      random,
++    );
++    const last = rows[rows.length - 1] ?? { effectiveDate: hireDate };
++    out.employees.push({
++      id,
++      employeeCode: code(id),
++      firstName: person.firstName,
++      lastName: person.lastName,
++      nameSearch: nameSearch(person.firstName, person.lastName),
++      gender: person.gender,
++      countryCode: person.countryCode,
++      jobTitleId: person.jobTitleId,
++      levelCode: person.levelCode,
++      hireDate,
++      status: person.terminationDate ? 'terminated' : 'active',
++      terminationDate: person.terminationDate,
++      salaryMinor: person.salaryMinor,
++      salaryCurrency: currencyCode,
++      salaryEffectiveDate: last.effectiveDate,
++      createdAt: `${hireDate}T00:00:00.000Z`,
++      updatedAt: `${last.effectiveDate}T00:00:00.000Z`,
++    });
++    for (const row of rows) {
++      out.salaryChanges.push({
++        id: out.salaryChanges.length + 1,
++        employeeId: id,
++        effectiveDate: row.effectiveDate,
++        amountMinor: row.amountMinor,
++        currencyCode,
++        jobTitleId: person.jobTitleId,
++        levelCode: row.levelCode,
++        reason: row.reason,
++        changedByUserId: null,
++        createdAt: `${row.effectiveDate}T00:00:00.000Z`,
++      });
++    }
++  });
++}
++
++// generateDataset: pure, no DB, no clock, no env (02 section 7.1).
++export function generateDataset(config: SeedConfig, seed: number, refDate: string): Dataset {
++  const reference = generateReferenceData();
++  const bands = new Map(
++    reference.payBands.map((b) => [bandKey(b.countryCode, b.jobTitleId, b.levelCode), b]),
++  );
++  const random = createRandom(seed);
++  const names = COUNTRIES.map((country, i) => namesFor(country, i, seed, refDate));
++  const active = allocateActive(names, bands);
++  shapeSalaries(active, random, config);
++  const terminated = generateTerminated(config.terminatedCount, names, bands, random);
++  // Active employees are numbered E000001 onwards, terminated ones after them (02 section 7.2).
++  const rows: Rows = { employees: [], salaryChanges: [] };
++  appendRows(active, random, refDate, rows);
++  appendRows(terminated, random, refDate, rows);
++  return { ...reference, ...rows };
++}
+diff --git a/apps/api/src/seed/history.ts b/apps/api/src/seed/history.ts
+new file mode 100644
+index 0000000..8e1d458
+--- /dev/null
++++ b/apps/api/src/seed/history.ts
+@@ -0,0 +1,156 @@
++import type { LevelCode, SalaryChangeReason } from '../db/schema.ts';
++import type { Random } from './random.ts';
++import { LEVELS } from './reference.ts';
++
++export type HistoryRow = {
++  reason: SalaryChangeReason;
++  effectiveDate: string;
++  amountMinor: number;
++  levelCode: LevelCode;
++};
++
++export type History = { rows: HistoryRow[] };
++
++export type HistoryInput = {
++  levelCode: LevelCode;
++  salaryMinor: number;
++  currencyCode: string;
++  /** REF_DATE for active employees, the termination date for terminated ones (02 section 7.8). */
++  endDate: string;
++  hireDate: string;
++  /** Stale employees get no rows after 2024-09-29 (02 section 7.7). */
++  stale: boolean;
++};
++
++const EARLIEST_HIRE = '2013-10-01';
++const LAST_REVIEW = '2026-04-01';
++const STALE_CUTOFF = '2024-09-29';
++const DAY_MS = 86_400_000;
++const YEAR_DAYS = 365.25;
++
++// 02 section 7.7: tenure buckets in years before the end date.
++const TENURE_BUCKETS = [
++  { share: 0.3, fromYears: 0, toYears: 2 },
++  { share: 0.35, fromYears: 2, toYears: 5 },
++  { share: 0.25, fromYears: 5, toYears: 9 },
++  { share: 0.1, fromYears: 9, toYears: 13 },
++];
++
++const toDays = (date: string) => Date.parse(`${date}T00:00:00.000Z`) / DAY_MS;
++const fromDays = (days: number) => new Date(days * DAY_MS).toISOString().slice(0, 10);
++export const addDays = (date: string, days: number) => fromDays(toDays(date) + days);
++// Calendar months, clamped to the month's last day: 2024-10-31 minus 6 months is 2024-04-30.
++const addMonths = (date: string, months: number) => {
++  const d = new Date(`${date}T00:00:00.000Z`);
++  const day = d.getUTCDate();
++  d.setUTCDate(1);
++  d.setUTCMonth(d.getUTCMonth() + months);
++  const lastDay = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 0)).getUTCDate();
++  d.setUTCDate(Math.min(day, lastDay));
++  return d.toISOString().slice(0, 10);
++};
++const minDate = (a: string, b: string) => (a < b ? a : b);
++const pct = (random: Random, from: number, to: number) =>
++  Math.round(random.uniform(from, to) * 10) / 10;
++
++/** Salary rounding step in minor units: 100 major units, 1,000 for INR (02 section 7.6 step 4). */
++export const roundSalary = (amountMinor: number, currencyCode: string) => {
++  const step = (currencyCode === 'INR' ? 1000 : 100) * 100;
++  return Math.round(amountMinor / step) * step;
++};
++
++/** Hire date by tenure bucket before the end date; terminated employees need 6 months' tenure. */
++export function drawHireDate(random: Random, endDate: string, minTenureMonths = 0): string {
++  const u = random.next();
++  let cumulative = 0;
++  const bucket =
++    TENURE_BUCKETS.find((b) => (cumulative += b.share) > u) ??
++    (TENURE_BUCKETS[TENURE_BUCKETS.length - 1] as (typeof TENURE_BUCKETS)[number]);
++  const days = random.int(
++    Math.ceil(bucket.fromYears * YEAR_DAYS),
++    Math.floor(bucket.toYears * YEAR_DAYS) - 1,
++  );
++  const hire = minDate(addDays(endDate, -days), addMonths(endDate, -minTenureMonths));
++  return hire < EARLIEST_HIRE ? EARLIEST_HIRE : hire;
++}
++
++type Change = { reason: Exclude<SalaryChangeReason, 'hire'>; effectiveDate: string; pct: number };
++
++// 02 section 7.7: draw the changes forward in time, then compute amounts backwards from the
++// current salary so the last row always equals it.
++/** Stale candidates have at least 2.5 years of tenure at the end date (02 section 7.7). */
++export const tenureYears = (hireDate: string, endDate: string) =>
++  (toDays(endDate) - toDays(hireDate)) / YEAR_DAYS;
++
++export function buildHistory(input: HistoryInput, random: Random): History {
++  const { hireDate, stale } = input;
++  const tenure = tenureYears(hireDate, input.endDate);
++  const rank = LEVELS.find((l) => l.code === input.levelCode)?.rank ?? 1;
++
++  const cutoff = stale ? minDate(STALE_CUTOFF, input.endDate) : input.endDate;
++  const firstEligible = addMonths(hireDate, 6);
++  const cycles: string[] = [];
++  for (let year = 2014; year <= 2026; year++) {
++    const cycle = `${year}-04-01`;
++    if (cycle >= firstEligible && cycle <= minDate(cutoff, LAST_REVIEW)) cycles.push(cycle);
++  }
++
++  const promotionAt =
++    rank >= 2 && tenure >= 2 && cycles.length > 0 && random.chance(0.6)
++      ? random.int(0, cycles.length - 1)
++      : -1;
++  const changes: Change[] = [];
++  cycles.forEach((cycle, i) => {
++    if (i === promotionAt) {
++      changes.push({ reason: 'promotion', effectiveDate: cycle, pct: pct(random, 10, 15) });
++    } else if (random.chance(0.85)) {
++      changes.push({ reason: 'merit', effectiveDate: cycle, pct: pct(random, 2, 6) });
++    }
++  });
++  if (random.chance(0.05)) {
++    const day = addDays('2025-06-01', random.int(0, 213));
++    if (day > hireDate && day <= cutoff) {
++      changes.push({ reason: 'market_adjustment', effectiveDate: day, pct: pct(random, 5, 10) });
++    }
++  }
++  if (random.chance(0.01) && changes.length > 0) {
++    const raise = changes[random.int(0, changes.length - 1)] as Change;
++    const day = addDays(raise.effectiveDate, 14);
++    const sign = random.chance(0.5) ? -1 : 1;
++    const change = sign * pct(random, 0.5, 3);
++    if (day <= cutoff && !changes.some((c) => c.effectiveDate === day)) {
++      changes.push({ reason: 'correction', effectiveDate: day, pct: change });
++    }
++  }
++  changes.sort((a, b) => (a.effectiveDate < b.effectiveDate ? -1 : 1));
++
++  const previousLevel = LEVELS.find((l) => l.rank === rank - 1)?.code ?? input.levelCode;
++  const promotionIndex = changes.findIndex((c) => c.reason === 'promotion');
++  const amounts = new Array<number>(changes.length + 1);
++  amounts[changes.length] = input.salaryMinor;
++  for (let k = changes.length; k > 0; k--) {
++    const later = amounts[k] as number;
++    amounts[k - 1] = roundSalary(
++      later / (1 + (changes[k - 1] as Change).pct / 100),
++      input.currencyCode,
++    );
++  }
++  // Rows before the promotion carry the level one rank lower; the hire row is row 0.
++  const levelAt = (row: number) =>
++    promotionIndex >= 0 && row <= promotionIndex ? previousLevel : input.levelCode;
++  const rows: HistoryRow[] = [
++    {
++      reason: 'hire',
++      effectiveDate: hireDate,
++      amountMinor: amounts[0] as number,
++      levelCode: levelAt(0),
++    },
++    ...changes.map((c, i) => ({
++      reason: c.reason,
++      effectiveDate: c.effectiveDate,
++      amountMinor: amounts[i + 1] as number,
++      levelCode: levelAt(i + 1),
++    })),
++  ];
++  return { rows };
++}
+diff --git a/apps/api/src/seed/random.test.ts b/apps/api/src/seed/random.test.ts
+new file mode 100644
+index 0000000..ac70c2d
+--- /dev/null
++++ b/apps/api/src/seed/random.test.ts
+@@ -0,0 +1,78 @@
++import { describe, expect, it } from 'vitest';
++import { createRandom, largestRemainder, normalFrom } from './random.ts';
++
++const draws = (n: number, draw: () => number) => Array.from({ length: n }, draw);
++
++describe('largestRemainder', () => {
++  it.each([
++    { total: 10, weights: [1, 1, 1], counts: [4, 3, 3] },
++    { total: 5, weights: [2, 2, 1], counts: [2, 2, 1] },
++    { total: 7, weights: [0.5, 0.3, 0.2], counts: [4, 2, 1] },
++    // 02 section 7.5: IN / Software Engineer / L3 has 280 people and w = 0.28.
++    { total: 280, weights: [0.97 * 0.28, 0.97 * 0.72, 0.01, 0.02], counts: [76, 195, 3, 6] },
++    { total: 0, weights: [0.6, 0.4], counts: [0, 0] },
++  ])(
++    'allocates counts that sum exactly to the total: $total over $weights',
++    ({ total, weights, counts }) => {
++      const result = largestRemainder(total, weights);
++
++      expect(result).toEqual(counts);
++      expect(result.reduce((a, b) => a + b, 0)).toBe(total);
++    },
++  );
++
++  it('allocates counts that sum exactly to the total for the 02 section 7.3 title shares', () => {
++    const titleShares = [0.28, 0.07, 0.04, 0.04, 0.15, 0.07, 0.05, 0.04, 0.1, 0.16];
++
++    for (const total of [4000, 2500, 1500, 1200, 800, 13]) {
++      expect(largestRemainder(total, titleShares).reduce((a, b) => a + b, 0)).toBe(total);
++    }
++  });
++});
++
++describe('createRandom', () => {
++  it('the seeded normal generator returns the same values for the same seed', () => {
++    const first = createRandom(20261011);
++    const second = createRandom(20261011);
++    const other = createRandom(20261012);
++
++    const a = draws(20, () => first.normal(1, 0.06));
++    const b = draws(20, () => second.normal(1, 0.06));
++    const c = draws(20, () => other.normal(1, 0.06));
++
++    expect(a).toEqual(b);
++    expect(c).not.toEqual(a);
++  });
++
++  it('the seeded uniform generator and shuffle repeat for the same seed and stay in range', () => {
++    const first = createRandom(7);
++    const second = createRandom(7);
++    const items = Array.from({ length: 50 }, (_, i) => i);
++
++    const uniforms = draws(1000, () => first.next());
++    const ints = draws(1000, () => first.int(3, 6));
++    const shuffled = first.shuffle(items);
++
++    expect(draws(1000, () => second.next())).toEqual(uniforms);
++    expect(draws(1000, () => second.int(3, 6))).toEqual(ints);
++    expect(second.shuffle(items)).toEqual(shuffled);
++    expect(uniforms.every((u) => u >= 0 && u < 1)).toBe(true);
++    expect(new Set(ints)).toEqual(new Set([3, 4, 5, 6]));
++    expect(shuffled).not.toEqual(items);
++    expect([...shuffled].sort((a, b) => a - b)).toEqual(items);
++    expect(items[0]).toBe(0);
++  });
++});
++
++describe('normalFrom (Box-Muller)', () => {
++  it('normal draws have mean near 0 and standard deviation near 1 over 10,000 samples', () => {
++    const random = createRandom(1);
++    const samples = draws(10_000, () => normalFrom(() => random.next()));
++
++    const mean = samples.reduce((a, b) => a + b, 0) / samples.length;
++    const sd = Math.sqrt(samples.reduce((a, b) => a + (b - mean) ** 2, 0) / samples.length);
++
++    expect(Math.abs(mean)).toBeLessThan(0.05);
++    expect(Math.abs(sd - 1)).toBeLessThan(0.05);
++  });
++});
+diff --git a/apps/api/src/seed/random.ts b/apps/api/src/seed/random.ts
+new file mode 100644
+index 0000000..9ea8481
+--- /dev/null
++++ b/apps/api/src/seed/random.ts
+@@ -0,0 +1,73 @@
++// Seeded randomness for the seed (02 section 7.2, D-051). Never reads Math.random.
++
++export interface Random {
++  /** Uniform in [0, 1). */
++  next(): number;
++  /** Uniform integer in [min, max], both inclusive. */
++  int(min: number, max: number): number;
++  /** Uniform in [min, max). */
++  uniform(min: number, max: number): number;
++  /** True with probability p. */
++  chance(p: number): boolean;
++  /** Normal draw with the given mean and standard deviation. */
++  normal(mean: number, sd: number): number;
++  /** A shuffled copy; the input is not changed. */
++  shuffle<T>(items: readonly T[]): T[];
++}
++
++// mulberry32: a small 32-bit generator, plenty for 10,000 rows and stable across platforms.
++function mulberry32(seed: number): () => number {
++  let state = seed >>> 0;
++  return () => {
++    state = (state + 0x6d2b79f5) >>> 0;
++    let t = state;
++    t = Math.imul(t ^ (t >>> 15), t | 1);
++    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
++    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
++  };
++}
++
++export function createRandom(seed: number): Random {
++  const next = mulberry32(seed);
++  const random: Random = {
++    next,
++    int: (min, max) => min + Math.floor(next() * (max - min + 1)),
++    uniform: (min, max) => min + next() * (max - min),
++    chance: (p) => next() < p,
++    normal: (mean, sd) => mean + sd * normalFrom(next),
++    shuffle: (items) => {
++      const copy = [...items];
++      for (let i = copy.length - 1; i > 0; i--) {
++        const j = random.int(0, i);
++        [copy[i], copy[j]] = [copy[j] as (typeof copy)[number], copy[i] as (typeof copy)[number]];
++      }
++      return copy;
++    },
++  };
++  return random;
++}
++
++// Box-Muller: one standard normal draw from two uniforms (02 section 7.2).
++export function normalFrom(uniform: () => number): number {
++  const u1 = 1 - uniform(); // (0, 1], so the log is finite
++  const u2 = uniform();
++  return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
++}
++
++// Splits total in proportion to weights so the parts sum exactly to total (02 section 7.5).
++// Leftover units go to the largest remainders; ties go to the earlier index.
++export function largestRemainder(total: number, weights: readonly number[]): number[] {
++  const sum = weights.reduce((a, b) => a + b, 0);
++  const exact = weights.map((w) => (total * w) / sum);
++  const counts = exact.map(Math.floor);
++  let left = total - counts.reduce((a, b) => a + b, 0);
++  const order = exact
++    .map((value, index) => ({ index, remainder: value - Math.floor(value) }))
++    .sort((a, b) => b.remainder - a.remainder || a.index - b.index);
++  for (const { index } of order) {
++    if (left === 0) break;
++    counts[index] = (counts[index] ?? 0) + 1;
++    left--;
++  }
++  return counts;
++}
+diff --git a/apps/api/src/seed/reference.test.ts b/apps/api/src/seed/reference.test.ts
+new file mode 100644
+index 0000000..186549d
+--- /dev/null
++++ b/apps/api/src/seed/reference.test.ts
+@@ -0,0 +1,89 @@
++import { describe, expect, it } from 'vitest';
++import { generateReferenceData } from './reference.ts';
++
++describe('generateReferenceData', () => {
++  it('generates the FX rates, 5 countries, 8 departments, 10 titles and 5 levels', () => {
++    const ref = generateReferenceData();
++
++    expect(ref.fxRates).toEqual([
++      { currencyCode: 'CAD', usdPerUnitMicros: 720_000, asOfDate: '2026-09-30' },
++      { currencyCode: 'EUR', usdPerUnitMicros: 1_160_000, asOfDate: '2026-09-30' },
++      { currencyCode: 'GBP', usdPerUnitMicros: 1_340_000, asOfDate: '2026-09-30' },
++      { currencyCode: 'INR', usdPerUnitMicros: 11_500, asOfDate: '2026-09-30' },
++      { currencyCode: 'USD', usdPerUnitMicros: 1_000_000, asOfDate: '2026-09-30' },
++    ]);
++    expect(ref.countries).toEqual([
++      { code: 'CA', name: 'Canada', currencyCode: 'CAD' },
++      { code: 'DE', name: 'Germany', currencyCode: 'EUR' },
++      { code: 'GB', name: 'United Kingdom', currencyCode: 'GBP' },
++      { code: 'IN', name: 'India', currencyCode: 'INR' },
++      { code: 'US', name: 'United States', currencyCode: 'USD' },
++    ]);
++    expect(ref.departments.map((d) => d.name)).toEqual([
++      'Engineering',
++      'Product',
++      'Sales',
++      'Marketing',
++      'Finance',
++      'People',
++      'Operations',
++      'Customer Support',
++    ]);
++    const departmentOf = (title: string) => {
++      const row = ref.jobTitles.find((t) => t.name === title);
++      return ref.departments.find((d) => d.id === row?.departmentId)?.name;
++    };
++    expect(ref.jobTitles).toHaveLength(10);
++    expect(departmentOf('Software Engineer')).toBe('Engineering');
++    expect(departmentOf('Data Analyst')).toBe('Engineering');
++    expect(departmentOf('Product Designer')).toBe('Product');
++    expect(departmentOf('Account Executive')).toBe('Sales');
++    expect(departmentOf('HR Generalist')).toBe('People');
++    expect(departmentOf('Support Specialist')).toBe('Customer Support');
++    expect(ref.levels).toEqual([
++      { code: 'L1', name: 'Associate', rank: 1 },
++      { code: 'L2', name: 'Intermediate', rank: 2 },
++      { code: 'L3', name: 'Senior', rank: 3 },
++      { code: 'L4', name: 'Lead', rank: 4 },
++      { code: 'L5', name: 'Principal', rank: 5 },
++    ]);
++  });
++
++  it('generates 250 bands, one per country, title and level, each with min < mid < max', () => {
++    const ref = generateReferenceData();
++
++    const keys = new Set(
++      ref.payBands.map((b) => `${b.countryCode}/${b.jobTitleId}/${b.levelCode}`),
++    );
++    const currencyOf = new Map(ref.countries.map((c) => [c.code, c.currencyCode]));
++
++    expect(ref.payBands).toHaveLength(250);
++    expect(keys.size).toBe(250);
++    for (const band of ref.payBands) {
++      expect(band.currencyCode).toBe(currencyOf.get(band.countryCode));
++      expect(band.minMinor).toBeGreaterThan(0);
++      expect(band.minMinor).toBeLessThan(band.midMinor);
++      expect(band.midMinor).toBeLessThan(band.maxMinor);
++    }
++  });
++
++  it('prices India Software Engineer L3 at INR 1,640,000 / 2,050,000 / 2,460,000', () => {
++    const ref = generateReferenceData();
++
++    const softwareEngineer = ref.jobTitles.find((t) => t.name === 'Software Engineer')?.id;
++
++    const band = ref.payBands.find(
++      (b) => b.countryCode === 'IN' && b.jobTitleId === softwareEngineer && b.levelCode === 'L3',
++    );
++
++    expect(band).toEqual({
++      countryCode: 'IN',
++      jobTitleId: softwareEngineer,
++      levelCode: 'L3',
++      currencyCode: 'INR',
++      minMinor: 164_000_000,
++      midMinor: 205_000_000,
++      maxMinor: 246_000_000,
++    });
++  });
++});
+diff --git a/apps/api/src/seed/reference.ts b/apps/api/src/seed/reference.ts
+new file mode 100644
+index 0000000..7862693
+--- /dev/null
++++ b/apps/api/src/seed/reference.ts
+@@ -0,0 +1,239 @@
++import type {
++  countries,
++  departments,
++  fxRates,
++  jobTitles,
++  LevelCode,
++  levels,
++  payBands,
++} from '../db/schema.ts';
++
++export type FxRateRow = typeof fxRates.$inferInsert;
++export type CountryRow = typeof countries.$inferInsert;
++export type DepartmentRow = typeof departments.$inferInsert;
++export type JobTitleRow = typeof jobTitles.$inferInsert & { id: number };
++export type LevelRow = typeof levels.$inferInsert;
++export type PayBandRow = typeof payBands.$inferInsert;
++
++export type ReferenceData = {
++  fxRates: FxRateRow[];
++  countries: CountryRow[];
++  departments: DepartmentRow[];
++  jobTitles: JobTitleRow[];
++  levels: LevelRow[];
++  payBands: PayBandRow[];
++};
++
++export const FX_AS_OF = '2026-09-30';
++
++// 02 section 4: illustrative demo rates, fixed for reproducibility.
++export const FX_RATES: readonly FxRateRow[] = [
++  { currencyCode: 'CAD', usdPerUnitMicros: 720_000, asOfDate: FX_AS_OF },
++  { currencyCode: 'EUR', usdPerUnitMicros: 1_160_000, asOfDate: FX_AS_OF },
++  { currencyCode: 'GBP', usdPerUnitMicros: 1_340_000, asOfDate: FX_AS_OF },
++  { currencyCode: 'INR', usdPerUnitMicros: 11_500, asOfDate: FX_AS_OF },
++  { currencyCode: 'USD', usdPerUnitMicros: 1_000_000, asOfDate: FX_AS_OF },
++];
++
++export type CountrySpec = {
++  code: string;
++  name: string;
++  currencyCode: string;
++  locale: 'en_CA' | 'de' | 'en_GB' | 'en_IN' | 'en_US';
++  activeHeadcount: number;
++  /** Pay level vs the US, in USD. */
++  payLevel: number;
++};
++
++// 02 section 7.3, sorted by code (the generation order, 02 section 7.2).
++export const COUNTRIES: readonly CountrySpec[] = [
++  {
++    code: 'CA',
++    name: 'Canada',
++    currencyCode: 'CAD',
++    locale: 'en_CA',
++    activeHeadcount: 800,
++    payLevel: 0.78,
++  },
++  {
++    code: 'DE',
++    name: 'Germany',
++    currencyCode: 'EUR',
++    locale: 'de',
++    activeHeadcount: 1200,
++    payLevel: 0.75,
++  },
++  {
++    code: 'GB',
++    name: 'United Kingdom',
++    currencyCode: 'GBP',
++    locale: 'en_GB',
++    activeHeadcount: 1500,
++    payLevel: 0.72,
++  },
++  {
++    code: 'IN',
++    name: 'India',
++    currencyCode: 'INR',
++    locale: 'en_IN',
++    activeHeadcount: 4000,
++    payLevel: 0.16,
++  },
++  {
++    code: 'US',
++    name: 'United States',
++    currencyCode: 'USD',
++    locale: 'en_US',
++    activeHeadcount: 2500,
++    payLevel: 1.0,
++  },
++];
++
++export const DEPARTMENTS: readonly DepartmentRow[] = [
++  { id: 1, name: 'Engineering' },
++  { id: 2, name: 'Product' },
++  { id: 3, name: 'Sales' },
++  { id: 4, name: 'Marketing' },
++  { id: 5, name: 'Finance' },
++  { id: 6, name: 'People' },
++  { id: 7, name: 'Operations' },
++  { id: 8, name: 'Customer Support' },
++];
++
++export type JobTitleSpec = JobTitleRow & {
++  /** Share of headcount. */
++  share: number;
++  /** L1 midpoint in the US, in USD. */
++  l1MidUsd: number;
++  /** Women's share before the level factor. */
++  womenShare: number;
++};
++
++export const SOFTWARE_ENGINEER = 1;
++export const ACCOUNT_EXECUTIVE = 5;
++
++export const JOB_TITLES: readonly JobTitleSpec[] = [
++  {
++    id: SOFTWARE_ENGINEER,
++    name: 'Software Engineer',
++    departmentId: 1,
++    share: 0.28,
++    l1MidUsd: 95_000,
++    womenShare: 0.28,
++  },
++  { id: 2, name: 'Data Analyst', departmentId: 1, share: 0.07, l1MidUsd: 75_000, womenShare: 0.28 },
++  {
++    id: 3,
++    name: 'Product Manager',
++    departmentId: 2,
++    share: 0.04,
++    l1MidUsd: 100_000,
++    womenShare: 0.45,
++  },
++  {
++    id: 4,
++    name: 'Product Designer',
++    departmentId: 2,
++    share: 0.04,
++    l1MidUsd: 80_000,
++    womenShare: 0.45,
++  },
++  {
++    id: ACCOUNT_EXECUTIVE,
++    name: 'Account Executive',
++    departmentId: 3,
++    share: 0.15,
++    l1MidUsd: 65_000,
++    womenShare: 0.4,
++  },
++  {
++    id: 6,
++    name: 'Marketing Specialist',
++    departmentId: 4,
++    share: 0.07,
++    l1MidUsd: 60_000,
++    womenShare: 0.55,
++  },
++  { id: 7, name: 'Accountant', departmentId: 5, share: 0.05, l1MidUsd: 62_000, womenShare: 0.5 },
++  { id: 8, name: 'HR Generalist', departmentId: 6, share: 0.04, l1MidUsd: 58_000, womenShare: 0.7 },
++  {
++    id: 9,
++    name: 'Operations Analyst',
++    departmentId: 7,
++    share: 0.1,
++    l1MidUsd: 52_000,
++    womenShare: 0.4,
++  },
++  {
++    id: 10,
++    name: 'Support Specialist',
++    departmentId: 8,
++    share: 0.16,
++    l1MidUsd: 45_000,
++    womenShare: 0.55,
++  },
++];
++
++export type LevelSpec = LevelRow & {
++  code: LevelCode;
++  share: number;
++  midMultiplier: number;
++  womenFactor: number;
++};
++
++export const LEVELS: readonly LevelSpec[] = [
++  { code: 'L1', name: 'Associate', rank: 1, share: 0.25, midMultiplier: 1.0, womenFactor: 1.15 },
++  { code: 'L2', name: 'Intermediate', rank: 2, share: 0.3, midMultiplier: 1.25, womenFactor: 1.05 },
++  { code: 'L3', name: 'Senior', rank: 3, share: 0.25, midMultiplier: 1.55, womenFactor: 1.0 },
++  { code: 'L4', name: 'Lead', rank: 4, share: 0.13, midMultiplier: 1.9, womenFactor: 0.85 },
++  { code: 'L5', name: 'Principal', rank: 5, share: 0.07, midMultiplier: 2.3, womenFactor: 0.7 },
++];
++
++const usdPerUnitMicros = (currencyCode: string): number => {
++  const rate = FX_RATES.find((r) => r.currencyCode === currencyCode);
++  if (!rate) throw new Error(`No FX rate for ${currencyCode}`);
++  return rate.usdPerUnitMicros;
++};
++
++/** Major-unit rounding step for band figures: 1,000, or 10,000 for INR (02 section 7.4). */
++export const bandStep = (currencyCode: string): number => (currencyCode === 'INR' ? 10_000 : 1_000);
++
++const roundTo = (value: number, step: number): number => Math.round(value / step) * step;
++
++// 02 section 7.4: mid from the US L1 midpoint, level multiplier and country pay level; min and
++// max at 80% and 120% of mid, all rounded to the band step and stored in minor units.
++export function generateBands(): PayBandRow[] {
++  const bands: PayBandRow[] = [];
++  for (const country of COUNTRIES) {
++    const step = bandStep(country.currencyCode);
++    const micros = usdPerUnitMicros(country.currencyCode);
++    for (const title of JOB_TITLES) {
++      for (const level of LEVELS) {
++        const midUsd = title.l1MidUsd * level.midMultiplier * country.payLevel;
++        const mid = roundTo((midUsd * 1_000_000) / micros, step);
++        bands.push({
++          countryCode: country.code,
++          jobTitleId: title.id,
++          levelCode: level.code,
++          currencyCode: country.currencyCode,
++          minMinor: roundTo(0.8 * mid, step) * 100,
++          midMinor: mid * 100,
++          maxMinor: roundTo(1.2 * mid, step) * 100,
++        });
++      }
++    }
++  }
++  return bands;
++}
++
++// The seed's reference data and the pure band generator (02 sections 4, 7.3 and 7.4).
++export function generateReferenceData(): ReferenceData {
++  return {
++    fxRates: FX_RATES.map((r) => ({ ...r })),
++    countries: COUNTRIES.map(({ code, name, currencyCode }) => ({ code, name, currencyCode })),
++    departments: DEPARTMENTS.map((d) => ({ ...d })),
++    jobTitles: JOB_TITLES.map(({ id, name, departmentId }) => ({ id, name, departmentId })),
++    levels: LEVELS.map(({ code, name, rank }) => ({ code, name, rank })),
++    payBands: generateBands(),
++  };
++}
+diff --git a/apps/api/src/seed/report.test.ts b/apps/api/src/seed/report.test.ts
+new file mode 100644
+index 0000000..6eaad42
+--- /dev/null
++++ b/apps/api/src/seed/report.test.ts
+@@ -0,0 +1,145 @@
++import { describe, expect, it } from 'vitest';
++import type { Gender, LevelCode } from '../db/schema.ts';
++import { SEED_CONFIG, type Dataset, type EmployeeRow } from './generate.ts';
++import { ACCOUNT_EXECUTIVE, generateReferenceData, SOFTWARE_ENGINEER } from './reference.ts';
++import { formatSeedReport, seedReport } from './report.ts';
++
++let nextId = 1;
++const employee = (fields: {
++  country: string;
++  title: number;
++  level: LevelCode;
++  gender: Gender;
++  salaryMinor: number;
++  currency: string;
++  effective?: string;
++  terminated?: boolean;
++}): EmployeeRow => {
++  const id = nextId++;
++  return {
++    id,
++    employeeCode: `E${String(id).padStart(6, '0')}`,
++    firstName: 'A',
++    lastName: 'B',
++    nameSearch: 'a b',
++    gender: fields.gender,
++    countryCode: fields.country,
++    jobTitleId: fields.title,
++    levelCode: fields.level,
++    hireDate: '2020-01-01',
++    status: fields.terminated ? 'terminated' : 'active',
++    terminationDate: fields.terminated ? '2025-01-01' : null,
++    salaryMinor: fields.salaryMinor,
++    salaryCurrency: fields.currency,
++    salaryEffectiveDate: fields.effective ?? '2026-04-01',
++    createdAt: '2020-01-01T00:00:00.000Z',
++    updatedAt: '2026-04-01T00:00:00.000Z',
++  };
++};
++
++// IN / Software Engineer / L3: 5 women at INR 1,800,000 and 5 men at INR 2,000,000 (a 10% gap).
++// US / Account Executive / L2 (band USD 65,000 to 97,000): one woman below, one man above.
++const smallDataset = (): Dataset => {
++  nextId = 1;
++  const inSe = (gender: Gender, salaryMinor: number, effective?: string) =>
++    employee({
++      country: 'IN',
++      title: SOFTWARE_ENGINEER,
++      level: 'L3',
++      gender,
++      salaryMinor,
++      currency: 'INR',
++      effective,
++    });
++  return {
++    ...generateReferenceData(),
++    employees: [
++      inSe('female', 180_000_000, '2024-01-01'),
++      inSe('female', 180_000_000, '2024-01-01'),
++      inSe('female', 180_000_000),
++      inSe('female', 180_000_000),
++      inSe('female', 180_000_000),
++      inSe('male', 200_000_000, '2024-09-29'),
++      inSe('male', 200_000_000, '2024-09-30'),
++      inSe('male', 200_000_000),
++      inSe('male', 200_000_000),
++      inSe('male', 200_000_000),
++      employee({
++        country: 'US',
++        title: ACCOUNT_EXECUTIVE,
++        level: 'L2',
++        gender: 'female',
++        salaryMinor: 6_000_000,
++        currency: 'USD',
++      }),
++      employee({
++        country: 'US',
++        title: ACCOUNT_EXECUTIVE,
++        level: 'L2',
++        gender: 'male',
++        salaryMinor: 10_000_000,
++        currency: 'USD',
++      }),
++      employee({
++        country: 'CA',
++        title: SOFTWARE_ENGINEER,
++        level: 'L1',
++        gender: 'male',
++        salaryMinor: 1_000,
++        currency: 'CAD',
++        effective: '2020-01-01',
++        terminated: true,
++      }),
++    ],
++    salaryChanges: [],
++  };
++};
++
++describe('seedReport (02 section 7.11)', () => {
++  it('the seed report counts active, terminated, history rows, outside-band and stale employees', () => {
++    const dataset = smallDataset();
++    dataset.salaryChanges = new Array(17).fill(dataset.salaryChanges[0]);
++
++    const report = seedReport(dataset, SEED_CONFIG);
++
++    expect(report).toMatchObject({
++      active: 12,
++      terminated: 1,
++      activeByCountry: { IN: 10, US: 2 },
++      terminatedByCountry: { CA: 1 },
++      historyRows: 17,
++      outsideBand: { below: 1, above: 1 },
++      noChangeSince20240930: 3,
++    });
++    expect(formatSeedReport(report)).toContain('Active employees: 12 (IN 10, US 2)');
++    expect(formatSeedReport(report)).toContain('Outside band: 2 (below 1, above 1)');
++  });
++
++  it('the seed report gives cohort gaps and flags, eligible cohorts, groups under 5, and org-wide USD mean and median gaps', () => {
++    const report = seedReport(smallDataset(), SEED_CONFIG);
++
++    expect(report.targetCohorts[0]).toEqual({
++      countryCode: 'IN',
++      jobTitle: 'Software Engineer',
++      levelCode: 'L3',
++      women: 5,
++      men: 5,
++      gapPct: 10,
++      flagged: true,
++    });
++    expect(report.targetCohorts[1]).toMatchObject({
++      countryCode: 'US',
++      gapPct: null,
++      flagged: false,
++    });
++    expect(report.eligibleCohorts).toBe(1);
++    expect(report.bandCount).toBe(250);
++    expect(report.groupsUnder5).toBe(1);
++    // USD per employee: men 5 x 2,300,000 and 10,000,000; women 5 x 2,070,000 and 6,000,000.
++    expect(report.orgGapUsd.meanPct).toBeCloseTo((858_333.333 / 3_583_333.333) * 100, 3);
++    expect(report.orgGapUsd.medianPct).toBeCloseTo(10, 6);
++    expect(formatSeedReport(report)).toContain(
++      'IN / Software Engineer / L3: gap 10.0% (flagged), 5 women, 5 men',
++    );
++  });
++});
+diff --git a/apps/api/src/seed/report.ts b/apps/api/src/seed/report.ts
+new file mode 100644
+index 0000000..147b3be
+--- /dev/null
++++ b/apps/api/src/seed/report.ts
+@@ -0,0 +1,144 @@
++import { toUsdMinor } from '@acme/shared';
++import type { LevelCode } from '../db/schema.ts';
++import type { Dataset, EmployeeRow, SeedConfig } from './generate.ts';
++
++export type CohortGap = {
++  countryCode: string;
++  jobTitle: string;
++  levelCode: LevelCode;
++  women: number;
++  men: number;
++  /** Null when the cohort has fewer than 5 women or 5 men. */
++  gapPct: number | null;
++  flagged: boolean;
++};
++
++export type SeedReport = {
++  active: number;
++  terminated: number;
++  activeByCountry: Record<string, number>;
++  terminatedByCountry: Record<string, number>;
++  historyRows: number;
++  outsideBand: { below: number; above: number };
++  noChangeSince20240930: number;
++  targetCohorts: CohortGap[];
++  eligibleCohorts: number;
++  bandCount: number;
++  orgGapUsd: { meanPct: number; medianPct: number };
++  groupsUnder5: number;
++};
++
++const STALE_SINCE = '2024-09-30';
++const MIN_GROUP = 5;
++const FLAG_AT_PCT = 5; // D-013
++
++const key = (countryCode: string, jobTitleId: number, levelCode: string) =>
++  `${countryCode}/${jobTitleId}/${levelCode}`;
++
++const countBy = (rows: EmployeeRow[], by: (e: EmployeeRow) => string) => {
++  const counts: Record<string, number> = {};
++  for (const row of rows) counts[by(row)] = (counts[by(row)] ?? 0) + 1;
++  return counts;
++};
++
++const mean = (values: number[]) => values.reduce((a, b) => a + b, 0) / values.length;
++
++// Linear interpolation at p = 0.5 (D-024).
++const median = (values: number[]) => {
++  const sorted = [...values].sort((a, b) => a - b);
++  const h = (sorted.length - 1) / 2;
++  const lo = sorted[Math.floor(h)] ?? 0;
++  const hi = sorted[Math.ceil(h)] ?? lo;
++  return lo + (h - Math.floor(h)) * (hi - lo);
++};
++
++// 02 section 4: positive means women are paid less.
++const gapPct = (men: number, women: number) => ((men - women) / men) * 100;
++
++// The summary printed after seeding (02 section 7.11). Insight figures cover active employees.
++export function seedReport(dataset: Dataset, config: SeedConfig): SeedReport {
++  const active = dataset.employees.filter((e) => e.status === 'active');
++  const terminated = dataset.employees.filter((e) => e.status === 'terminated');
++  const bands = new Map(
++    dataset.payBands.map((b) => [key(b.countryCode, b.jobTitleId, b.levelCode), b]),
++  );
++  const fx = new Map(dataset.fxRates.map((r) => [r.currencyCode, r.usdPerUnitMicros]));
++  const titleName = new Map(dataset.jobTitles.map((t) => [t.id, t.name]));
++
++  const outsideBand = { below: 0, above: 0 };
++  const cohorts = new Map<string, EmployeeRow[]>();
++  for (const e of active) {
++    const band = bands.get(key(e.countryCode, e.jobTitleId, e.levelCode));
++    if (band && e.salaryMinor < band.minMinor) outsideBand.below++;
++    if (band && e.salaryMinor > band.maxMinor) outsideBand.above++;
++    const k = key(e.countryCode, e.jobTitleId, e.levelCode);
++    cohorts.set(k, [...(cohorts.get(k) ?? []), e]);
++  }
++
++  const cohortGap = (members: EmployeeRow[]) => {
++    const women = members.filter((e) => e.gender === 'female').map((e) => e.salaryMinor);
++    const men = members.filter((e) => e.gender === 'male').map((e) => e.salaryMinor);
++    const eligible = women.length >= MIN_GROUP && men.length >= MIN_GROUP;
++    const gap = eligible ? gapPct(mean(men), mean(women)) : null;
++    return {
++      women: women.length,
++      men: men.length,
++      gapPct: gap,
++      flagged: gap !== null && gap >= FLAG_AT_PCT,
++    };
++  };
++
++  const usd = (e: EmployeeRow) => toUsdMinor(e.salaryMinor, fx.get(e.salaryCurrency) ?? 0);
++  const womenUsd = active.filter((e) => e.gender === 'female').map(usd);
++  const menUsd = active.filter((e) => e.gender === 'male').map(usd);
++
++  return {
++    active: active.length,
++    terminated: terminated.length,
++    activeByCountry: countBy(active, (e) => e.countryCode),
++    terminatedByCountry: countBy(terminated, (e) => e.countryCode),
++    historyRows: dataset.salaryChanges.length,
++    outsideBand,
++    noChangeSince20240930: active.filter((e) => e.salaryEffectiveDate < STALE_SINCE).length,
++    targetCohorts: config.gapTargets.map((t) => ({
++      countryCode: t.countryCode,
++      jobTitle: titleName.get(t.jobTitleId) ?? String(t.jobTitleId),
++      levelCode: t.levelCode,
++      ...cohortGap(cohorts.get(key(t.countryCode, t.jobTitleId, t.levelCode)) ?? []),
++    })),
++    eligibleCohorts: [...cohorts.values()].filter((m) => cohortGap(m).gapPct !== null).length,
++    bandCount: dataset.payBands.length,
++    orgGapUsd: {
++      meanPct: gapPct(mean(menUsd), mean(womenUsd)),
++      medianPct: gapPct(median(menUsd), median(womenUsd)),
++    },
++    groupsUnder5: [...cohorts.values()].filter((m) => m.length < MIN_GROUP).length,
++  };
++}
++
++const byCountry = (counts: Record<string, number>) =>
++  Object.entries(counts)
++    .sort(([a], [b]) => a.localeCompare(b))
++    .map(([country, n]) => `${country} ${n}`)
++    .join(', ');
++
++export function formatSeedReport(r: SeedReport): string {
++  const cohortLine = (c: CohortGap) =>
++    `  ${c.countryCode} / ${c.jobTitle} / ${c.levelCode}: ` +
++    (c.gapPct === null
++      ? `not eligible, ${c.women} women, ${c.men} men`
++      : `gap ${c.gapPct.toFixed(1)}%${c.flagged ? ' (flagged)' : ''}, ${c.women} women, ${c.men} men`);
++  return [
++    'Seed report',
++    `Active employees: ${r.active} (${byCountry(r.activeByCountry)})`,
++    `Terminated employees: ${r.terminated} (${byCountry(r.terminatedByCountry)})`,
++    `Salary history rows: ${r.historyRows}`,
++    `Outside band: ${r.outsideBand.below + r.outsideBand.above} (below ${r.outsideBand.below}, above ${r.outsideBand.above})`,
++    `No salary change since ${STALE_SINCE}: ${r.noChangeSince20240930}`,
++    'Target cohorts:',
++    ...r.targetCohorts.map(cohortLine),
++    `Eligible cohorts (${MIN_GROUP}+ women and ${MIN_GROUP}+ men): ${r.eligibleCohorts} of ${r.bandCount}`,
++    `Org-wide gender gap in USD: mean ${r.orgGapUsd.meanPct.toFixed(1)}%, median ${r.orgGapUsd.medianPct.toFixed(1)}%`,
++    `Groups with fewer than ${MIN_GROUP} people: ${r.groupsUnder5}`,
++  ].join('\n');
++}
+diff --git a/apps/api/src/seed/seed.int.test.ts b/apps/api/src/seed/seed.int.test.ts
+new file mode 100644
+index 0000000..bf8a36a
+--- /dev/null
++++ b/apps/api/src/seed/seed.int.test.ts
+@@ -0,0 +1,176 @@
++import { describe, expect, it } from 'vitest';
++import { createDb, type Db } from '../db/client.ts';
++import { migrate } from '../db/migrate.ts';
++import { verifyPassword } from '../modules/auth/password.ts';
++import { runSeed } from './cli.ts';
++import { generateDataset, REF_DATE, SEED, SEED_CONFIG, type Dataset } from './generate.ts';
++import { generateReferenceData } from './reference.ts';
++import { writeDataset, type SeedUser } from './write.ts';
++
++// The one file that writes the full seed (05 section 4.1). Read-only checks share one write.
++// A full write takes 1 to 4 s locally under coverage, so these tests get more than Vitest's
++// default 5 s on slower CI runners. The limit is a time budget, not part of any assertion.
++const FULL_SEED_TIMEOUT_MS = 30_000;
++
++const users = (hashSuffix: string): SeedUser[] => [
++  {
++    email: 'hr.admin@acme.test',
++    displayName: 'HR Admin (demo)',
++    role: 'hr_admin',
++    passwordHash: `admin-${hashSuffix}`,
++    createdAt: '2026-09-30T00:00:00.000Z',
++  },
++  {
++    email: 'hr.viewer@acme.test',
++    displayName: 'HR Viewer (demo)',
++    role: 'hr_viewer',
++    passwordHash: `viewer-${hashSuffix}`,
++    createdAt: '2026-09-30T00:00:00.000Z',
++  },
++  {
++    email: 'finance@acme.test',
++    displayName: 'Finance (demo)',
++    role: 'finance',
++    passwordHash: `finance-${hashSuffix}`,
++    createdAt: '2026-09-30T00:00:00.000Z',
++  },
++];
++
++let cachedDataset: Dataset | undefined;
++const dataset = () => (cachedDataset ??= generateDataset(SEED_CONFIG, SEED, REF_DATE));
++
++const emptyDb = async (): Promise<Db> => {
++  const db = createDb(':memory:');
++  await migrate(db);
++  return db;
++};
++
++let seeded: Promise<Db> | undefined;
++const seededDb = () =>
++  (seeded ??= emptyDb().then(async (db) => {
++    await writeDataset(db, dataset(), users('one'));
++    return db;
++  }));
++
++const DOMAIN_TABLES = [
++  'fx_rates',
++  'countries',
++  'departments',
++  'job_titles',
++  'levels',
++  'pay_bands',
++  'employees',
++  'salary_changes',
++];
++
++const snapshot = async (db: Db) => {
++  const tables: Record<string, string> = {};
++  for (const table of DOMAIN_TABLES) {
++    const rows = await db.$client.execute(`SELECT * FROM ${table} ORDER BY rowid`);
++    tables[table] = JSON.stringify(rows.rows);
++  }
++  return tables;
++};
++
++const count = async (db: Db, table: string) =>
++  Number((await db.$client.execute(`SELECT count(*) AS n FROM ${table}`)).rows[0]?.n);
++
++describe('writeDataset (seed.int)', { timeout: FULL_SEED_TIMEOUT_MS }, () => {
++  it("after writeDataset, every employee's current-salary columns equal their latest history row, and foreign keys are on", async () => {
++    const db = await seededDb();
++
++    const mismatches = await db.$client.execute(`
++      SELECT e.employee_code
++      FROM employees e
++      JOIN salary_changes s ON s.id = (
++        SELECT id FROM salary_changes WHERE employee_id = e.id ORDER BY effective_date DESC, id DESC LIMIT 1
++      )
++      WHERE s.amount_minor <> e.salary_minor OR s.currency_code <> e.salary_currency
++         OR s.effective_date <> e.salary_effective_date OR s.job_title_id <> e.job_title_id
++         OR s.level_code <> e.level_code`);
++    const foreignKeys = await db.$client.execute('PRAGMA foreign_keys');
++    const violations = await db.$client.execute('PRAGMA foreign_key_check');
++
++    expect(await count(db, 'employees')).toBe(10_250);
++    expect(await count(db, 'salary_changes')).toBe(dataset().salaryChanges.length);
++    expect(mismatches.rows).toEqual([]);
++    expect(foreignKeys.rows[0]?.foreign_keys).toBe(1);
++    expect(violations.rows).toEqual([]);
++  });
++
++  it('running the seed twice leaves identical domain data and resets sessions and ask_log', async () => {
++    const db = await emptyDb();
++    await writeDataset(db, dataset(), users('one'));
++    const before = await snapshot(db);
++    await db.$client.execute(
++      "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) SELECT 'abc', id, '2026-10-09T09:00:00.000Z', '2026-10-09T17:00:00.000Z' FROM users LIMIT 1",
++    );
++    await db.$client.execute(
++      "INSERT INTO ask_log (user_id, asked_at, question, outcome) SELECT id, '2026-10-09T09:00:00.000Z', 'How many?', 'answered' FROM users LIMIT 1",
++    );
++
++    await writeDataset(db, dataset(), users('one'));
++
++    expect(await snapshot(db)).toEqual(before);
++    expect(await count(db, 'sessions')).toBe(0);
++    expect(await count(db, 'ask_log')).toBe(0);
++  });
++
++  it('upserts the three demo users by email, so a second run replaces their password hash', async () => {
++    const db = await emptyDb();
++    const referenceOnly: Dataset = { ...generateReferenceData(), employees: [], salaryChanges: [] };
++    await writeDataset(db, referenceOnly, users('one'));
++    const first = await db.$client.execute('SELECT id, email FROM users ORDER BY id');
++
++    await writeDataset(db, referenceOnly, users('two'));
++    const second = await db.$client.execute(
++      'SELECT id, email, role, password_hash FROM users ORDER BY id',
++    );
++
++    expect(second.rows.map((r) => ({ id: r.id, email: r.email }))).toEqual(
++      first.rows.map((r) => ({ id: r.id, email: r.email })),
++    );
++    expect(second.rows.map((r) => [r.email, r.role, r.password_hash])).toEqual([
++      ['hr.admin@acme.test', 'hr_admin', 'admin-two'],
++      ['hr.viewer@acme.test', 'hr_viewer', 'viewer-two'],
++      ['finance@acme.test', 'finance', 'finance-two'],
++    ]);
++  });
++});
++
++describe('seed CLI (seed.int)', { timeout: FULL_SEED_TIMEOUT_MS }, () => {
++  it('the seed CLI migrates, writes the dataset, stores scrypt hashes for the demo users and prints the report', async () => {
++    const db = createDb(':memory:');
++    const output: string[] = [];
++    const env = {
++      DATABASE_URL: ':memory:',
++      DEMO_HR_ADMIN_PASSWORD: 'admin-password-1',
++      DEMO_HR_VIEWER_PASSWORD: 'viewer-password-1',
++      DEMO_FINANCE_PASSWORD: 'finance-password-1',
++    };
++
++    const exitCode = await runSeed(env, {
++      openDb: () => db,
++      log: (line) => output.push(line),
++      error: (line) => output.push(line),
++      scrypt: { N: 1024, r: 8, p: 3 },
++    });
++    const stored = await db.$client.execute('SELECT email, password_hash FROM users ORDER BY id');
++
++    expect(exitCode).toBe(0);
++    expect(await count(db, 'employees')).toBe(10_250);
++    expect(stored.rows.map((r) => r.email)).toEqual([
++      'hr.admin@acme.test',
++      'hr.viewer@acme.test',
++      'finance@acme.test',
++    ]);
++    const hashes = stored.rows.map((r) => String(r.password_hash));
++    expect(await verifyPassword('admin-password-1', hashes[0]!)).toBe(true);
++    expect(await verifyPassword('viewer-password-1', hashes[1]!)).toBe(true);
++    expect(await verifyPassword('finance-password-1', hashes[2]!)).toBe(true);
++    expect(output.join('\n')).toContain(
++      'Active employees: 10000 (CA 800, DE 1200, GB 1500, IN 4000, US 2500)',
++    );
++    expect(output.join('\n')).not.toContain('admin-password-1');
++  });
++});
+diff --git a/apps/api/src/seed/write.ts b/apps/api/src/seed/write.ts
+new file mode 100644
+index 0000000..e16dba4
+--- /dev/null
++++ b/apps/api/src/seed/write.ts
+@@ -0,0 +1,83 @@
++import { sql } from 'drizzle-orm';
++import type { SQLiteTable } from 'drizzle-orm/sqlite-core';
++import type { Db } from '../db/client.ts';
++import {
++  askLog,
++  countries,
++  departments,
++  employees,
++  fxRates,
++  jobTitles,
++  levels,
++  payBands,
++  salaryChanges,
++  sessions,
++  users,
++  type Role,
++} from '../db/schema.ts';
++import type { Dataset } from './generate.ts';
++
++export type SeedUser = {
++  email: string;
++  displayName: string;
++  role: Role;
++  passwordHash: string;
++  createdAt: string;
++};
++
++type Tx = Parameters<Parameters<Db['transaction']>[0]>[0];
++
++// 500 rows per INSERT keeps employees (17 columns) under SQLite's bound-parameter limit (02 section 7.1).
++const CHUNK = 500;
++
++async function insertChunked<T extends SQLiteTable>(
++  tx: Tx,
++  table: T,
++  rows: readonly T['$inferInsert'][],
++): Promise<void> {
++  for (let i = 0; i < rows.length; i += CHUNK) {
++    await tx.insert(table).values(rows.slice(i, i + CHUNK));
++  }
++}
++
++// 02 section 7.10: one write transaction resets, inserts the dataset and upserts the users by
++// email. Inside it only the transaction handle is used (05 section 4.1).
++export async function writeDataset(db: Db, dataset: Dataset, seedUsers: SeedUser[]): Promise<void> {
++  await db.transaction(async (tx) => {
++    for (const table of [
++      askLog,
++      sessions,
++      salaryChanges,
++      employees,
++      payBands,
++      jobTitles,
++      departments,
++      levels,
++      countries,
++      fxRates,
++    ]) {
++      await tx.delete(table);
++    }
++    await insertChunked(tx, fxRates, dataset.fxRates);
++    await insertChunked(tx, countries, dataset.countries);
++    await insertChunked(tx, departments, dataset.departments);
++    await insertChunked(tx, jobTitles, dataset.jobTitles);
++    await insertChunked(tx, levels, dataset.levels);
++    await insertChunked(tx, payBands, dataset.payBands);
++    await insertChunked(tx, employees, dataset.employees);
++    await insertChunked(tx, salaryChanges, dataset.salaryChanges);
++    for (const user of seedUsers) {
++      await tx
++        .insert(users)
++        .values(user)
++        .onConflictDoUpdate({
++          target: users.email,
++          set: {
++            displayName: sql`excluded.display_name`,
++            role: sql`excluded.role`,
++            passwordHash: sql`excluded.password_hash`,
++          },
++        });
++    }
++  });
++}
+diff --git a/apps/api/test/builders/db.ts b/apps/api/test/builders/db.ts
+new file mode 100644
+index 0000000..d12e5ce
+--- /dev/null
++++ b/apps/api/test/builders/db.ts
+@@ -0,0 +1,12 @@
++import type { Db } from '../../src/db/client.ts';
++
++/** A database handle or a transaction handle: builders insert through whichever they're given. */
++export type DbOrTx = Db | Parameters<Parameters<Db['transaction']>[0]>[0];
++
++/** The next sequential id for a table, so ids follow insert order within a test (05 section 4.2). */
++export async function nextId(db: DbOrTx, table: string): Promise<number> {
++  const rows = await db.all<{ next: number }>(
++    `SELECT coalesce(max(id), 0) + 1 AS next FROM ${table}`,
++  );
++  return rows[0]?.next ?? 1;
++}
+diff --git a/apps/api/test/builders/employee.test.ts b/apps/api/test/builders/employee.test.ts
+new file mode 100644
+index 0000000..d6b7e0a
+--- /dev/null
++++ b/apps/api/test/builders/employee.test.ts
+@@ -0,0 +1,44 @@
++import { describe, expect, it } from 'vitest';
++import { testDb } from '../helpers.ts';
++import { anEmployee, merit, promotion } from './index.ts';
++
++describe('anEmployee builder', () => {
++  it('anEmployee().withHistory keeps the current-salary columns equal to the last row', async () => {
++    const db = await testDb();
++
++    const { id } = await anEmployee()
++      .atLevel('L2')
++      .withSalary(10_000_000)
++      .hiredOn('2022-01-10')
++      .withHistory([merit('2023-04-01', 4.0), promotion('2024-04-01', 'L3', 12.0)])
++      .insert(db);
++    const employee = (
++      await db.$client.execute({
++        sql: 'SELECT salary_minor, salary_effective_date, level_code FROM employees WHERE id = ?',
++        args: [id],
++      })
++    ).rows[0];
++    const history = (
++      await db.$client.execute({
++        sql: 'SELECT reason, effective_date, amount_minor, level_code FROM salary_changes WHERE employee_id = ? ORDER BY effective_date',
++        args: [id],
++      })
++    ).rows.map((row) => ({ ...row }));
++
++    expect(history).toEqual([
++      { reason: 'hire', effective_date: '2022-01-10', amount_minor: 10_000_000, level_code: 'L2' },
++      { reason: 'merit', effective_date: '2023-04-01', amount_minor: 10_400_000, level_code: 'L2' },
++      {
++        reason: 'promotion',
++        effective_date: '2024-04-01',
++        amount_minor: 11_648_000,
++        level_code: 'L3',
++      },
++    ]);
++    expect({ ...employee }).toEqual({
++      salary_minor: 11_648_000,
++      salary_effective_date: '2024-04-01',
++      level_code: 'L3',
++    });
++  });
++});
+diff --git a/apps/api/test/builders/employee.ts b/apps/api/test/builders/employee.ts
+new file mode 100644
+index 0000000..0dd170e
+--- /dev/null
++++ b/apps/api/test/builders/employee.ts
+@@ -0,0 +1,160 @@
++import type { Gender, LevelCode, SalaryChangeReason } from '../../src/db/schema.ts';
++import { employees, salaryChanges } from '../../src/db/schema.ts';
++import { COUNTRIES, generateBands, SOFTWARE_ENGINEER } from '../../src/seed/reference.ts';
++import { nextId, type DbOrTx } from './db.ts';
++
++export type HistoryEntry = {
++  reason: Exclude<SalaryChangeReason, 'hire'>;
++  effectiveDate: string;
++  changePct: number;
++  /** The level from this row on; promotions only. */
++  levelCode?: LevelCode;
++};
++
++export const merit = (effectiveDate: string, changePct: number): HistoryEntry => ({
++  reason: 'merit',
++  effectiveDate,
++  changePct,
++});
++export const marketAdjustment = (effectiveDate: string, changePct: number): HistoryEntry => ({
++  reason: 'market_adjustment',
++  effectiveDate,
++  changePct,
++});
++export const correction = (effectiveDate: string, changePct: number): HistoryEntry => ({
++  reason: 'correction',
++  effectiveDate,
++  changePct,
++});
++export const promotion = (
++  effectiveDate: string,
++  levelCode: LevelCode,
++  changePct: number,
++): HistoryEntry => ({ reason: 'promotion', effectiveDate, changePct, levelCode });
++
++export type InsertedEmployee = { id: number; employeeCode: string };
++
++/**
++ * Active, India, Software Engineer, L3, female, salary at band mid, hired 2022-01-10, one hire row
++ * (05 section 4.2). With withHistory, atLevel and withSalary describe the hire row; each entry
++ * applies its change in order, and the current-salary columns equal the last row.
++ */
++class EmployeeBuilder {
++  #countryCode = 'IN';
++  #jobTitleId = SOFTWARE_ENGINEER;
++  #levelCode: LevelCode = 'L3';
++  #gender: Gender = 'female';
++  #firstName = 'Asha';
++  #lastName = 'Rao';
++  #salaryMinor: number | undefined;
++  #hireDate = '2022-01-10';
++  #terminationDate: string | undefined;
++  #history: HistoryEntry[] = [];
++
++  inCountry(code: string): this {
++    this.#countryCode = code;
++    return this;
++  }
++  withTitle(jobTitleId: number): this {
++    this.#jobTitleId = jobTitleId;
++    return this;
++  }
++  atLevel(code: LevelCode): this {
++    this.#levelCode = code;
++    return this;
++  }
++  withGender(gender: Gender): this {
++    this.#gender = gender;
++    return this;
++  }
++  named(firstName: string, lastName: string): this {
++    this.#firstName = firstName;
++    this.#lastName = lastName;
++    return this;
++  }
++  withSalary(amountMinor: number): this {
++    this.#salaryMinor = amountMinor;
++    return this;
++  }
++  hiredOn(date: string): this {
++    this.#hireDate = date;
++    return this;
++  }
++  terminatedOn(date: string): this {
++    this.#terminationDate = date;
++    return this;
++  }
++  withHistory(entries: HistoryEntry[]): this {
++    this.#history = entries;
++    return this;
++  }
++
++  async insert(db: DbOrTx): Promise<InsertedEmployee> {
++    const currency = COUNTRIES.find((c) => c.code === this.#countryCode)?.currencyCode ?? 'USD';
++    const band = generateBands().find(
++      (b) =>
++        b.countryCode === this.#countryCode &&
++        b.jobTitleId === this.#jobTitleId &&
++        b.levelCode === this.#levelCode,
++    );
++    const rows = [
++      {
++        reason: 'hire' as SalaryChangeReason,
++        effectiveDate: this.#hireDate,
++        amountMinor: this.#salaryMinor ?? band?.midMinor ?? 10_000_000,
++        levelCode: this.#levelCode,
++      },
++    ];
++    for (const entry of this.#history) {
++      const previous = rows[rows.length - 1]!;
++      rows.push({
++        reason: entry.reason,
++        effectiveDate: entry.effectiveDate,
++        amountMinor: Math.round(previous.amountMinor * (1 + entry.changePct / 100)),
++        levelCode: entry.levelCode ?? previous.levelCode,
++      });
++    }
++    const current = rows[rows.length - 1]!;
++    const id = await nextId(db, 'employees');
++    const employeeCode = `E${String(id).padStart(6, '0')}`;
++    const createdAt = `${this.#hireDate}T00:00:00.000Z`;
++
++    await db.insert(employees).values({
++      id,
++      employeeCode,
++      firstName: this.#firstName,
++      lastName: this.#lastName,
++      nameSearch: `${this.#firstName} ${this.#lastName}`.toLowerCase(),
++      gender: this.#gender,
++      countryCode: this.#countryCode,
++      jobTitleId: this.#jobTitleId,
++      levelCode: current.levelCode,
++      hireDate: this.#hireDate,
++      status: this.#terminationDate ? 'terminated' : 'active',
++      terminationDate: this.#terminationDate ?? null,
++      salaryMinor: current.amountMinor,
++      salaryCurrency: currency,
++      salaryEffectiveDate: current.effectiveDate,
++      createdAt,
++      updatedAt: createdAt,
++    });
++    let changeId = await nextId(db, 'salary_changes');
++    await db.insert(salaryChanges).values(
++      rows.map((row) => ({
++        id: changeId++,
++        employeeId: id,
++        effectiveDate: row.effectiveDate,
++        amountMinor: row.amountMinor,
++        currencyCode: currency,
++        jobTitleId: this.#jobTitleId,
++        levelCode: row.levelCode,
++        reason: row.reason,
++        changedByUserId: null,
++        createdAt: `${row.effectiveDate}T00:00:00.000Z`,
++      })),
++    );
++    return { id, employeeCode };
++  }
++}
++
++export const anEmployee = () => new EmployeeBuilder();
+diff --git a/apps/api/test/builders/index.ts b/apps/api/test/builders/index.ts
+new file mode 100644
+index 0000000..7bf264f
+--- /dev/null
++++ b/apps/api/test/builders/index.ts
+@@ -0,0 +1,10 @@
++export { nextId, type DbOrTx } from './db.ts';
++export {
++  anEmployee,
++  correction,
++  marketAdjustment,
++  merit,
++  promotion,
++  type HistoryEntry,
++} from './employee.ts';
++export { aReferenceSet } from './reference-set.ts';
+diff --git a/apps/api/test/builders/reference-set.ts b/apps/api/test/builders/reference-set.ts
+new file mode 100644
+index 0000000..7d1bbc9
+--- /dev/null
++++ b/apps/api/test/builders/reference-set.ts
+@@ -0,0 +1,36 @@
++import type { LevelCode } from '../../src/db/schema.ts';
++import {
++  countries,
++  departments,
++  fxRates,
++  jobTitles,
++  levels,
++  payBands,
++} from '../../src/db/schema.ts';
++import { generateReferenceData } from '../../src/seed/reference.ts';
++import type { DbOrTx } from './db.ts';
++
++// The seed's FX rates, countries, departments, titles, levels and all 250 bands (05 section 4.2).
++class ReferenceSetBuilder {
++  readonly #without: string[] = [];
++
++  withoutBand(countryCode: string, jobTitleId: number, levelCode: LevelCode): this {
++    this.#without.push(`${countryCode}/${jobTitleId}/${levelCode}`);
++    return this;
++  }
++
++  async insert(db: DbOrTx): Promise<void> {
++    const ref = generateReferenceData();
++    const bands = ref.payBands.filter(
++      (b) => !this.#without.includes(`${b.countryCode}/${b.jobTitleId}/${b.levelCode}`),
++    );
++    await db.insert(fxRates).values(ref.fxRates);
++    await db.insert(countries).values(ref.countries);
++    await db.insert(departments).values(ref.departments);
++    await db.insert(jobTitles).values(ref.jobTitles);
++    await db.insert(levels).values(ref.levels);
++    await db.insert(payBands).values(bands);
++  }
++}
++
++export const aReferenceSet = () => new ReferenceSetBuilder();
+diff --git a/apps/api/test/helpers.ts b/apps/api/test/helpers.ts
+index d6c91d0..4fdcf79 100644
+--- a/apps/api/test/helpers.ts
++++ b/apps/api/test/helpers.ts
+@@ -1,7 +1,9 @@
+ import { buildApp, type AppDeps } from '../src/app.ts';
+ import type { Config } from '../src/config.ts';
+-import { createDb } from '../src/db/client.ts';
++import { createDb, type Db } from '../src/db/client.ts';
++import { migrate } from '../src/db/migrate.ts';
+ import { fixedClock } from '../src/domain/clock.ts';
++import { aReferenceSet } from './builders/index.ts';
+ 
+ export const testConfig: Config = {
+   nodeEnv: 'test',
+@@ -15,12 +17,30 @@ export const testConfig: Config = {
+   logLevel: 'silent',
+ };
+ 
+-// A fresh app on its own in-memory database for every test (05 section 4.1).
++// A fresh in-memory database with the real migrations and the seed's reference data (05 section 4.1).
++export async function testDb(reference = aReferenceSet()): Promise<Db> {
++  const db = createDb(':memory:');
++  await migrate(db);
++  await reference.insert(db);
++  return db;
++}
++
++// A fresh app on its own in-memory database for every test (05 section 4.1). The database is
++// migrated and given reference data before the app is ready. A test that passes its own db
++// prepares it itself.
+ export function testApp(overrides: Partial<AppDeps> = {}) {
+-  return buildApp({
+-    db: createDb(':memory:'),
++  const db = overrides.db ?? createDb(':memory:');
++  const app = buildApp({
++    db,
+     clock: fixedClock('2026-10-09T09:00:00.000Z'),
+     config: testConfig,
+     ...overrides,
+   });
++  if (!overrides.db) {
++    app.addHook('onReady', async () => {
++      await migrate(db);
++      await aReferenceSet().insert(db);
++    });
++  }
++  return app;
+ }
+diff --git a/docs/decisions.md b/docs/decisions.md
+index bad8198..e3135f3 100644
+--- a/docs/decisions.md
++++ b/docs/decisions.md
+@@ -106,3 +106,4 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | A-005 | D-038 (old: "npm workspaces (apps/api, apps/web, packages/shared), tsc -b builds, Vitest 4 for all tests, one Playwright smoke test") | Vitest 4 replaced by Vitest 5, pinned exactly (D-055) | Vitest 5.0 released 3 Sep 2026, after Chat 3 |
+ | A-006 | D-059 (old: "Conventional Commits checked by commitlint (commit-msg hook); red test(scope) with tests and not-implemented stubs only; green feat/fix; refactor with tests unchanged; pre-commit runs lint-staged only, never tests; Claude Code's co-author trailer kept") | commit-msg also runs scripts/check-commit-shape.mjs: test commits must include a test file, feat/fix must not change tests, refactor must not mix test and production changes | Makes the red/green/refactor shape deterministic for every committer |
+ | A-007 | D-038 (old: as amended by A-005) | Supporting packages added at S0: `typescript-eslint` (ESLint parser and rules for TypeScript), `@types/node`, `@types/react`, `@types/react-dom` (types for strict `tsc`), `@mantine/hooks` (required peer of `@mantine/core`). `@fastify/swagger` and `openapi-types` arrive transitively as required peers of `fastify-type-provider-zod`. TypeScript pinned to 6.0.x because `typescript-eslint` supports `typescript <6.1.0` | ESLint can't parse TypeScript, and `tsc` can't type Node or React, without them; Mantine core doesn't install without its hooks package |
++| A-008 | D-038 (old: as amended by A-007) | `@faker-js/faker` 10.6.0 added at S1 for seed names (02 section 7.2, D-026), pinned exactly in `apps/api` dependencies so the seed CLI runs wherever the API is installed | D-026 and 02 section 7.2 chose Faker, but no ADR, 03 section 5, 05 section 3 or 06 named it as a package |
+diff --git a/package-lock.json b/package-lock.json
+index 271377d..17d2ac7 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -38,6 +38,7 @@
+       "version": "0.0.0",
+       "dependencies": {
+         "@acme/shared": "0.0.0",
++        "@faker-js/faker": "10.6.0",
+         "@fastify/static": "10.1.6",
+         "@libsql/client": "0.18.0",
+         "drizzle-orm": "0.45.4",
+@@ -954,6 +955,22 @@
+         }
+       }
+     },
++    "node_modules/@faker-js/faker": {
++      "version": "10.6.0",
++      "resolved": "https://registry.npmjs.org/@faker-js/faker/-/faker-10.6.0.tgz",
++      "integrity": "sha512-3RQHgEtvL1Frl/d1cSreo7qhJ3Gk1OdNUai/CtZ8G+wYeRQnJih3s9xJ9/kgYekPQRdwgh0HXRPqMlzWGwivIQ==",
++      "funding": [
++        {
++          "type": "opencollective",
++          "url": "https://opencollective.com/fakerjs"
++        }
++      ],
++      "license": "MIT",
++      "engines": {
++        "node": "^20.19.0 || ^22.13.0 || ^23.5.0 || >=24.0.0",
++        "npm": ">=10"
++      }
++    },
+     "node_modules/@fastify/accept-negotiator": {
+       "version": "2.1.0",
+       "resolved": "https://registry.npmjs.org/@fastify/accept-negotiator/-/accept-negotiator-2.1.0.tgz",
+diff --git a/package.json b/package.json
+index 59511e7..5c0481d 100644
+--- a/package.json
++++ b/package.json
+@@ -12,11 +12,12 @@
+   ],
+   "scripts": {
+     "dev": "npm run dev -w @acme/api & npm run dev -w @acme/web & wait",
+-    "build": "tsc -b apps/api/tsconfig.build.json && npm run build -w @acme/web",
++    "build": "tsc -b apps/api/tsconfig.build.json && cp -r apps/api/src/db/migrations apps/api/dist/db/ && npm run build -w @acme/web",
+     "typecheck": "tsc -p packages/shared && tsc -p apps/api && tsc -p apps/web",
+     "test": "TZ=UTC vitest run",
+     "test:coverage": "TZ=UTC vitest run --coverage",
+     "lint": "eslint .",
++    "seed": "node --conditions=source --env-file-if-exists=.env apps/api/src/seed/cli.ts",
+     "prepare": "husky"
+   },
+   "lint-staged": {
+diff --git a/packages/shared/src/index.ts b/packages/shared/src/index.ts
+index 80eb3ef..c4486d1 100644
+--- a/packages/shared/src/index.ts
++++ b/packages/shared/src/index.ts
+@@ -1 +1,2 @@
+ export * from './schemas/health.ts';
++export * from './money.ts';
+diff --git a/packages/shared/src/money.test.ts b/packages/shared/src/money.test.ts
+new file mode 100644
+index 0000000..6d7dd1e
+--- /dev/null
++++ b/packages/shared/src/money.test.ts
+@@ -0,0 +1,22 @@
++import { describe, expect, it } from 'vitest';
++import { toUsdMinor } from './money.ts';
++
++describe('toUsdMinor', () => {
++  // 02 section 4: usdMinor = round(amountMinor * usdPerUnitMicros / 1_000_000), half up to the cent.
++  it.each([
++    { case: 'USD stays the same', amountMinor: 9_500_000, micros: 1_000_000, usdMinor: 9_500_000 },
++    { case: 'GBP at 1.34', amountMinor: 100, micros: 1_340_000, usdMinor: 134 },
++    {
++      case: 'EUR rounds down below half',
++      amountMinor: 12_345,
++      micros: 1_160_000,
++      usdMinor: 14_320,
++    },
++    { case: 'an exact half rounds up', amountMinor: 50, micros: 1_010_000, usdMinor: 51 },
++    { case: 'INR just above half rounds up', amountMinor: 50, micros: 11_500, usdMinor: 1 },
++    { case: 'INR just below half rounds down', amountMinor: 130, micros: 11_500, usdMinor: 1 },
++    { case: 'INR 1.5 crore', amountMinor: 1_500_000_000, micros: 11_500, usdMinor: 17_250_000 },
++  ])('rounds half up to the cent: $case', ({ amountMinor, micros, usdMinor }) => {
++    expect(toUsdMinor(amountMinor, micros)).toBe(usdMinor);
++  });
++});
+diff --git a/packages/shared/src/money.ts b/packages/shared/src/money.ts
+new file mode 100644
+index 0000000..5e3abe6
+--- /dev/null
++++ b/packages/shared/src/money.ts
+@@ -0,0 +1,5 @@
++// Converts one positive amount to USD minor units, half up to the cent (02 section 4, D-023).
++// Convert each employee first, then aggregate; never convert an aggregate.
++export function toUsdMinor(amountMinor: number, usdPerUnitMicros: number): number {
++  return Math.round((amountMinor * usdPerUnitMicros) / 1_000_000);
++}
+diff --git a/vitest.config.ts b/vitest.config.ts
+index 4ad86c8..400e1aa 100644
+--- a/vitest.config.ts
++++ b/vitest.config.ts
+@@ -24,7 +24,11 @@ export default defineConfig({
+     ],
+     coverage: {
+       provider: 'v8',
+-      include: ['packages/shared/src/**', 'apps/api/src/**', 'apps/web/src/**'],
++      include: [
++        'packages/shared/src/**/*.ts',
++        'apps/api/src/**/*.ts',
++        'apps/web/src/**/*.{ts,tsx}',
++      ],
+       thresholds: {
+         'apps/api/src/domain/**': { lines: 90, branches: 85 },
+         'packages/shared/src/**': { lines: 90, branches: 85 },

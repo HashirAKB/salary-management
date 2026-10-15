@@ -1,0 +1,31 @@
+6daf457 docs(docs): split s3 list rows between s3 and s4
+208788f test(shared): apply list query defaults and reject unknown params
+04ed133 feat(shared): add employee list query schema
+7ea505f test(shared): round compa-ratio half away from zero from integers
+85fe0bc feat(shared): add compa-ratio calculation
+53688a3 test(api): return reference data for filters and forms
+b52fa2d feat(api): add reference endpoint
+8611f86 test(employees): page active employees by name with totals
+0409efa feat(employees): add employee list endpoint with offset paging
+c5578c4 test(employees): return local and usd salary with band position
+519ddaf feat(employees): add usd salary and band position to the list
+e3b25a5 chore(web): add mantine theme with violet primary and table defaults
+126e1c1 fix(web): pass the colour scheme key to ColorSchemeScript
+b889136 test(web): toggle dark and light mode from the user menu
+51c8012 feat(web): add dark mode toggle to the shell user menu
+513b0c1 test(web): format money, dates and major-unit input
+bd285e8 feat(web): add money, date and input formatting helpers
+c25c019 refactor(web): match the non-breaking space with a visible escape
+18eac53 test(web): format percentages and compa-ratio per 8.4.1
+ef738ed feat(web): add percentage formatting helpers
+952718d test(web): render the employee table with count and pager
+4490f40 test(web): format september as sep
+d7e185c fix(web): format september as sep
+3fbdd6f chore(web): raise the web test timeout for large tables
+f5490e1 feat(web): add employee list page
+e32f6ee test(web): change page and page size through the url
+6f807a3 test(web): use the combobox role for the page size select
+04606b1 chore(web): render tests with mantine env test
+0c953f5 feat(web): keep list page and page size in the url
+dd41d33 test(web): show list error, empty state and add button by role
+3fb0e50 feat(web): add list error, empty and add-employee states

@@ -1,5 +1,4 @@
 node_modules/
-.ai-notes/
 .env
 dist/
 coverage/

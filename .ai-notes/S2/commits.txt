@@ -1,0 +1,40 @@
+47b3af3 test(auth): define allowed actions per role
+878d2c6 feat(auth): add permissions table and minimum group size
+1c748ec test(auth): read the scrypt cost from config
+bedb25a feat(auth): default the scrypt cost to the production setting
+2b7edfd test(auth): log in, set a secure session cookie and store only its hash
+7faa347 feat(auth): add login with server-side sessions
+843ae4f test(auth): return the same 401 for wrong password and unknown email
+9e22cc7 feat(auth): reject unknown email against a dummy hash
+ae7c488 build(api): add @fastify/rate-limit 11.2.0
+180e915 test(auth): rate limit login attempts per ip
+7603fd3 feat(auth): add login rate limit behind the proxy
+11a3e27 test(auth): return the viewer, permissions and today from me
+19a5dce feat(auth): add me endpoint
+c81d1cb test(auth): expire sessions after 8 hours and delete them on logout
+d129bf4 feat(auth): add session expiry and logout
+1c4f506 refactor(auth): compute the secure cookie flag once
+fa9b1b6 test(api): guard every route by role before validation
+9d4f5e0 feat(api): add requires guard
+b2afaf1 test(api): check every route against the expected access table
+7f0fa58 test(api): give each access matrix call its own session
+33f851d feat(api): record every route and its action in a catalog
+a7110d6 test(api): redact cookies, passwords and money fields in logs
+05d048b feat(api): add no-store caching and log redaction
+7b85718 test(web): turn problem responses into api errors
+100d282 feat(web): add api client with problem parsing
+1fe39d9 test(web): show login errors and land each role on its page
+5cce406 feat(web): add login page and session handling
+01ae415 test(web): gate nav and routes by permissions
+dae6f29 feat(web): add app shell, route guards and forbidden page
+867db6f test(web): redirect to login with next and on session expiry
+58ea4fd feat(web): add landing redirect and session-expired handling
+1b3bc17 test(web): send the root path to the role's landing page
+aa20b01 feat(web): redirect the root path to the landing page
+384fe60 refactor(web): extract api client problem parsing
+bc16dbf test(auth): reject a malformed login body with 400 validation_failed
+0126e5f fix(auth): validate the login body through the route schema
+c345c44 test(web): never retry a query that failed with an api error
+57e6dc4 fix(web): stop retrying queries that fail with an api error
+a55d3f4 test(auth): ignore forwarded-for entries added by the client
+535e0bf fix(auth): trust only the proxy hop for the client address

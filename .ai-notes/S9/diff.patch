@@ -1,0 +1,867 @@
+diff --git a/apps/web/src/api/client.ts b/apps/web/src/api/client.ts
+index 858e047..d02399f 100644
+--- a/apps/web/src/api/client.ts
++++ b/apps/web/src/api/client.ts
+@@ -1,3 +1,4 @@
+ import { problemSchema, type ErrorCode, type Problem } from '@acme/shared';
++import { connection } from './connection.ts';
+ 
+ /** A problem response (04 section 4.4) as the screens see it. */
+@@ -19,4 +20,32 @@ export class ApiError extends Error {
+ }
+ 
++/** The server is asleep or unreachable (D-045); the connection store polls until it wakes. */
++export class ServerWakingError extends Error {
++  constructor(write = false) {
++    super(
++      write
++        ? 'The server was waking up, so your change may not have been saved. Check the page and try again.'
++        : 'The server is waking up.',
++    );
++    this.name = 'ServerWakingError';
++  }
++}
++
++const SLEEPING_STATUSES = [502, 503, 504];
++const isJson = (response: Response) =>
++  (response.headers.get('content-type') ?? '').includes('json');
++/** A problem response: problem+json, or JSON that has a problem body (D-045). */
++async function hasProblemBody(response: Response): Promise<boolean> {
++  if ((response.headers.get('content-type') ?? '').includes('application/problem+json'))
++    return true;
++  if (!isJson(response)) return false;
++  return problemSchema.safeParse(
++    await response
++      .clone()
++      .json()
++      .catch(() => undefined),
++  ).success;
++}
++
+ export type ApiRequest<T> = {
+   method?: 'GET' | 'POST' | 'PATCH';
+@@ -43,17 +72,45 @@ export function onUnauthenticated(listener: () => void): () => void {
+ }
+ 
+-async function send(path: string, method: string, body?: unknown): Promise<Response> {
+-  const response = await fetch(path, {
+-    method,
+-    headers: body === undefined ? {} : { 'content-type': 'application/json' },
+-    body: body === undefined ? undefined : JSON.stringify(body),
+-  });
+-  if (!response.ok) {
+-    const error = await toApiError(response);
+-    if (error.code === 'UNAUTHENTICATED')
+-      unauthenticatedListeners.forEach((listener) => listener());
++async function sendOnce(path: string, method: string, body?: unknown): Promise<Response> {
++  const finish = connection.requestStarted();
++  try {
++    const response = await fetch(path, {
++      method,
++      headers: body === undefined ? {} : { 'content-type': 'application/json' },
++      body: body === undefined ? undefined : JSON.stringify(body),
++    });
++    if (!response.ok) {
++      if (
++        !(await hasProblemBody(response)) &&
++        (SLEEPING_STATUSES.includes(response.status) || !isJson(response))
++      )
++        throw new ServerWakingError(method !== 'GET');
++      const error = await toApiError(response);
++      if (error.code === 'UNAUTHENTICATED')
++        unauthenticatedListeners.forEach((listener) => listener());
++      throw error;
++    }
++    return response;
++  } catch (error) {
++    if (error instanceof TypeError) {
++      connection.serverWaking();
++      throw new ServerWakingError(method !== 'GET');
++    }
++    if (error instanceof ServerWakingError) connection.serverWaking();
+     throw error;
++  } finally {
++    finish();
++  }
++}
++
++/** Retries a GET once after the server wakes; a write is never retried (D-045). */
++async function send(path: string, method: string, body?: unknown): Promise<Response> {
++  try {
++    return await sendOnce(path, method, body);
++  } catch (error) {
++    if (method !== 'GET' || !(error instanceof ServerWakingError)) throw error;
++    if (!(await connection.recovered())) throw error;
++    return sendOnce(path, method, body);
+   }
+-  return response;
+ }
+ 
+@@ -64,4 +121,8 @@ export async function apiFetch<T = void>(
+ ): Promise<T> {
+   const response = await send(path, method, body);
++  if (schema && !isJson(response)) {
++    connection.serverWaking();
++    throw new ServerWakingError();
++  }
+   return (schema ? schema.parse(await response.json()) : undefined) as T;
+ }
+diff --git a/apps/web/src/api/connection.ts b/apps/web/src/api/connection.ts
+new file mode 100644
+index 0000000..04c1f26
+--- /dev/null
++++ b/apps/web/src/api/connection.ts
+@@ -0,0 +1,127 @@
++export type ConnectionState = 'ok' | 'slow' | 'waking' | 'down';
++
++/** Timers the connection store uses; tests inject a manual one (D-045). */
++export type Scheduler = {
++  /** Runs `fn` once after `ms`; returns the cancel function. */
++  after(ms: number, fn: () => void): () => void;
++  /** Runs `fn` every `ms`; returns the cancel function. */
++  every(ms: number, fn: () => void): () => void;
++};
++
++const SLOW_AFTER_MS = 4000;
++const POLL_EVERY_MS = 3000;
++const DOWN_AFTER_MS = 90_000;
++
++const realScheduler: Scheduler = {
++  after(ms, fn) {
++    const handle = setTimeout(fn, ms);
++    return () => clearTimeout(handle);
++  },
++  every(ms, fn) {
++    const handle = setInterval(fn, ms);
++    return () => clearInterval(handle);
++  },
++};
++
++let scheduler = realScheduler;
++let state: ConnectionState = 'ok';
++let pending = 0;
++let cancelPoll: (() => void) | undefined;
++let cancelDown: (() => void) | undefined;
++let polling = false;
++let waiters: ((awake: boolean) => void)[] = [];
++const listeners = new Set<() => void>();
++
++function setState(next: ConnectionState): void {
++  if (state === next) return;
++  state = next;
++  listeners.forEach((listener) => listener());
++}
++
++function stopTimers(): void {
++  cancelPoll?.();
++  cancelDown?.();
++  cancelPoll = cancelDown = undefined;
++}
++
++function startWaking(): void {
++  setState('waking');
++  cancelPoll = scheduler.every(POLL_EVERY_MS, () => void poll());
++  cancelDown = scheduler.after(DOWN_AFTER_MS, () => {
++    stopTimers();
++    setState('down');
++    settle(false);
++  });
++}
++
++function settle(awake: boolean): void {
++  const done = waiters;
++  waiters = [];
++  done.forEach((resolve) => resolve(awake));
++}
++
++async function poll(): Promise<void> {
++  if (polling) return;
++  polling = true;
++  try {
++    const response = await fetch('/api/health');
++    const healthy = response.ok && (response.headers.get('content-type') ?? '').includes('json');
++    if (healthy && state === 'waking') {
++      stopTimers();
++      setState('ok');
++      settle(true);
++    }
++  } catch {
++    // Still asleep; the next tick tries again.
++  } finally {
++    polling = false;
++  }
++}
++
++/** The connection store (04 section 8.3): a tiny external store read with `useSyncExternalStore`. */
++export const connection = {
++  getState: (): ConnectionState => state,
++  subscribe(listener: () => void): () => void {
++    listeners.add(listener);
++    return () => listeners.delete(listener);
++  },
++  /** Starts the 4-second slow timer for a request; returns the function to call when it ends. */
++  requestStarted(): () => void {
++    pending += 1;
++    const cancel = scheduler.after(SLOW_AFTER_MS, () => {
++      if (state === 'ok') setState('slow');
++    });
++    return () => {
++      cancel();
++      pending -= 1;
++      if (pending === 0 && state === 'slow') setState('ok');
++    };
++  },
++  /** A request hit a sleeping server. */
++  serverWaking(): void {
++    if (state === 'waking' || state === 'down') return;
++    startWaking();
++  },
++  /** "Try again" on the server-down banner restarts the health poll. */
++  tryAgain(): void {
++    if (state === 'down') startWaking();
++  },
++  /** Resolves true once the server answers health again, so a failed GET can be retried. */
++  recovered(): Promise<boolean> {
++    if (state === 'ok' || state === 'slow') return Promise.resolve(true);
++    if (state === 'down') return Promise.resolve(false);
++    return new Promise((resolve) => waiters.push(resolve));
++  },
++  setScheduler(next: Scheduler): void {
++    scheduler = next;
++  },
++  /** Back to the real timers and a healthy state (tests). */
++  reset(): void {
++    stopTimers();
++    settle(false);
++    scheduler = realScheduler;
++    pending = 0;
++    state = 'ok';
++    listeners.forEach((listener) => listener());
++  },
++};
+diff --git a/apps/web/src/components/ServerStatusBanner.test.tsx b/apps/web/src/components/ServerStatusBanner.test.tsx
+new file mode 100644
+index 0000000..b776b98
+--- /dev/null
++++ b/apps/web/src/components/ServerStatusBanner.test.tsx
+@@ -0,0 +1,148 @@
++import { act, screen, waitFor } from '@testing-library/react';
++import userEvent from '@testing-library/user-event';
++import { http, HttpResponse } from 'msw';
++import { afterEach, beforeEach, describe, expect, it } from 'vitest';
++import { aProblem } from '../../test/fixtures/problem.ts';
++import { aManualScheduler } from '../../test/manualScheduler.ts';
++import { render } from '../../test/render.tsx';
++import { server } from '../../test/server.ts';
++import { apiFetch } from '../api/client.ts';
++import { connection } from '../api/connection.ts';
++import { ServerStatusBanner } from './ServerStatusBanner.tsx';
++
++const WAKING = /^Waking the server\./;
++
++let scheduler: ReturnType<typeof aManualScheduler>;
++beforeEach(() => {
++  scheduler = aManualScheduler();
++  connection.setScheduler(scheduler);
++});
++afterEach(() => connection.reset());
++
++describe('waking banner (05 section 5.9 C rows 2 and 3; D-045)', () => {
++  it('shows the waking banner when a request is pending over 4 seconds', async () => {
++    let release = () => {};
++    const gate = new Promise<void>((resolve) => (release = resolve));
++    server.use(
++      http.get('/api/slow', async () => {
++        await gate;
++        return HttpResponse.json({ status: 'ok' });
++      }),
++    );
++    render(<ServerStatusBanner />);
++
++    const pending = apiFetch('/api/slow');
++    act(() => scheduler.advance(3999));
++    expect(screen.queryByText(WAKING)).toBeNull();
++    act(() => scheduler.advance(1));
++
++    expect(await screen.findByText(WAKING)).toBeVisible();
++    release();
++    await pending;
++  });
++
++  it.each([
++    [
++      'a 200 HTML page',
++      () => new HttpResponse('<html></html>', { headers: { 'content-type': 'text/html' } }),
++    ],
++    ['a bare 502', () => new HttpResponse('Bad Gateway', { status: 502 })],
++    ['a bare 503', () => new HttpResponse(null, { status: 503 })],
++    ['a bare 504', () => new HttpResponse(null, { status: 504 })],
++    ['a network error', () => HttpResponse.error()],
++  ])('shows the waking banner for %s', async (_name, respond) => {
++    server.use(http.get('/api/employees', respond));
++    render(<ServerStatusBanner />);
++
++    void apiFetch('/api/employees', { schema: { parse: (v) => v } }).catch(() => {});
++
++    expect(await screen.findByText(WAKING)).toBeVisible();
++  });
++
++  it('treats a 503 with a problem body as an ApiError and shows no banner', async () => {
++    server.use(
++      http.get('/api/health', () =>
++        HttpResponse.json(aProblem({ status: 503, code: 'DB_UNAVAILABLE' }), {
++          status: 503,
++          headers: { 'content-type': 'application/problem+json' },
++        }),
++      ),
++    );
++    render(<ServerStatusBanner />);
++
++    const error = await apiFetch('/api/health').catch((e: unknown) => e);
++
++    expect(error).toMatchObject({ name: 'ApiError', code: 'DB_UNAVAILABLE' });
++    expect(screen.queryByText(WAKING)).toBeNull();
++  });
++});
++
++describe('health poll and GET retry (05 section 5.9 C row 3; D-045)', () => {
++  it('hides the banner when health answers 200 and retries the failed GET once', async () => {
++    let gets = 0;
++    let polls = 0;
++    server.use(
++      http.get('/api/employees', () => {
++        gets += 1;
++        return gets === 1 ? new HttpResponse(null, { status: 503 }) : HttpResponse.json({ ok: 1 });
++      }),
++      http.get('/api/health', () => {
++        polls += 1;
++        return polls === 1
++          ? new HttpResponse(null, { status: 503 })
++          : HttpResponse.json({ status: 'ok' });
++      }),
++    );
++    render(<ServerStatusBanner />);
++
++    const result = apiFetch('/api/employees', { schema: { parse: (v) => v } });
++    expect(await screen.findByText(WAKING)).toBeVisible();
++    act(() => scheduler.advance(3000));
++    await waitFor(() => expect(polls).toBe(1));
++    expect(screen.getByText(WAKING)).toBeVisible();
++    act(() => scheduler.advance(3000));
++
++    await expect(result).resolves.toEqual({ ok: 1 });
++    expect(polls).toBe(2);
++    expect(gets).toBe(2);
++    await waitFor(() => expect(screen.queryByText(WAKING)).toBeNull());
++  });
++});
++
++describe('server down (05 section 5.9 C row 5; 04 section 8.2)', () => {
++  const DOWN = "The server isn't responding.";
++
++  async function wakeThenFailFor90Seconds(healthy: { value: boolean }) {
++    server.use(
++      http.get('/api/employees', () => new HttpResponse(null, { status: 503 })),
++      http.get('/api/health', () =>
++        healthy.value
++          ? HttpResponse.json({ status: 'ok' })
++          : new HttpResponse(null, { status: 503 }),
++      ),
++    );
++    render(<ServerStatusBanner />);
++    void apiFetch('/api/employees', { schema: { parse: (v) => v } }).catch(() => {});
++    await screen.findByText(WAKING);
++    act(() => scheduler.advance(90_000));
++  }
++
++  it('says the server is not responding, with Try again, after 90 seconds of failed polls', async () => {
++    await wakeThenFailFor90Seconds({ value: false });
++
++    expect(await screen.findByText(DOWN)).toBeVisible();
++    expect(screen.getByRole('button', { name: 'Try again' })).toBeVisible();
++    expect(screen.queryByText(WAKING)).toBeNull();
++  });
++
++  it('restarts the health poll on Try again and hides the banner on a 200', async () => {
++    const healthy = { value: false };
++    await wakeThenFailFor90Seconds(healthy);
++    await userEvent.setup().click(await screen.findByRole('button', { name: 'Try again' }));
++    healthy.value = true;
++    act(() => scheduler.advance(3000));
++
++    await waitFor(() => expect(screen.queryByText(DOWN)).toBeNull());
++    expect(screen.queryByText(WAKING)).toBeNull();
++  });
++});
+diff --git a/apps/web/src/components/ServerStatusBanner.tsx b/apps/web/src/components/ServerStatusBanner.tsx
+new file mode 100644
+index 0000000..ffa55e6
+--- /dev/null
++++ b/apps/web/src/components/ServerStatusBanner.tsx
+@@ -0,0 +1,25 @@
++import { Alert, Button } from '@mantine/core';
++import { useSyncExternalStore, type ReactElement } from 'react';
++import { connection } from '../api/connection.ts';
++
++/** The waking and server-down banners under the header (04 section 8.2); content stays visible. */
++export function ServerStatusBanner(): ReactElement | null {
++  const state = useSyncExternalStore(connection.subscribe, connection.getState);
++  if (state === 'ok') return null;
++  if (state === 'down') {
++    return (
++      <Alert color="red" role="alert" radius={0}>
++        The server isn't responding.{' '}
++        <Button size="compact-sm" variant="light" color="red" onClick={connection.tryAgain}>
++          Try again
++        </Button>
++      </Alert>
++    );
++  }
++  return (
++    <Alert color="yellow" role="status" radius={0}>
++      Waking the server. Free hosting sleeps after 15 minutes without use; this can take up to a
++      minute.
++    </Alert>
++  );
++}
+diff --git a/apps/web/src/components/Shell.tsx b/apps/web/src/components/Shell.tsx
+index d7c4a79..6558592 100644
+--- a/apps/web/src/components/Shell.tsx
++++ b/apps/web/src/components/Shell.tsx
+@@ -25,4 +25,5 @@ import {
+ import { onUnauthenticated } from '../api/client.ts';
+ import { ME_KEY, useLogout, useMe } from '../features/auth/useSession.ts';
++import { ServerStatusBanner } from './ServerStatusBanner.tsx';
+ import { ToastProvider } from './Toasts.tsx';
+ 
+@@ -160,4 +161,5 @@ export function Shell(): ReactElement {
+       </AppShell.Header>
+       <AppShell.Main>
++        <ServerStatusBanner />
+         <ToastProvider>
+           <Outlet context={me.data} />
+diff --git a/apps/web/src/features/employees/SalaryChangeModal.test.tsx b/apps/web/src/features/employees/SalaryChangeModal.test.tsx
+index 3bee2e2..8aa0956 100644
+--- a/apps/web/src/features/employees/SalaryChangeModal.test.tsx
++++ b/apps/web/src/features/employees/SalaryChangeModal.test.tsx
+@@ -4,12 +4,14 @@ import { screen, waitFor, within } from '@testing-library/react';
+ import userEvent from '@testing-library/user-event';
+ import { http, HttpResponse } from 'msw';
+-import { describe, expect, it } from 'vitest';
++import { afterEach, describe, expect, it } from 'vitest';
+ import { anEmployeeDetail } from '../../../test/fixtures/employees.ts';
+ import { aSalaryChangeItem, aSalaryHistory } from '../../../test/fixtures/salary.ts';
+ import { aMeResponse } from '../../../test/fixtures/me.ts';
+ import { aProblem } from '../../../test/fixtures/problem.ts';
++import { aManualScheduler } from '../../../test/manualScheduler.ts';
+ import { render } from '../../../test/render.tsx';
+ import { server } from '../../../test/server.ts';
+ import { AppRoutes } from '../../AppRoutes.tsx';
++import { connection } from '../../api/connection.ts';
+ 
+ const problem = (status: number, body: Parameters<typeof aProblem>[0]) =>
+@@ -263,2 +265,33 @@ describe('record salary change outcomes and preview (04 sections 8.5 S-6, 8.6)',
+   });
+ });
++
++describe('record salary change on a waking server (05 section 5.9 C row 4; D-045)', () => {
++  afterEach(() => connection.reset());
++
++  it('does not retry the write and says the change may not have been saved', async () => {
++    connection.setScheduler(aManualScheduler());
++    servesEmployee();
++    servesBand();
++    let posts = 0;
++    server.use(
++      http.post('/api/employees/4217/salary-changes', () => {
++        posts += 1;
++        return new HttpResponse(null, { status: 503 });
++      }),
++    );
++    const user = userEvent.setup();
++    renderDetail();
++
++    const dialog = await openModal(user);
++    await choose(user, 'Reason', 'Merit increase');
++    await user.type(within(dialog).getByLabelText('New annual salary'), '2000000');
++    await user.click(within(dialog).getByRole('button', { name: 'Record change' }));
++
++    expect(
++      await within(dialog).findByText(
++        'The server was waking up, so your change may not have been saved. Check the page and try again.',
++      ),
++    ).toBeVisible();
++    expect(posts).toBe(1);
++  });
++});
+diff --git a/apps/web/src/queryClient.test.tsx b/apps/web/src/queryClient.test.tsx
+index cc36269..9c95789 100644
+--- a/apps/web/src/queryClient.test.tsx
++++ b/apps/web/src/queryClient.test.tsx
+@@ -4,5 +4,5 @@ import type { ReactNode } from 'react';
+ import { describe, expect, it } from 'vitest';
+ import { aProblem } from '../test/fixtures/problem.ts';
+-import { ApiError } from './api/client.ts';
++import { ApiError, ServerWakingError } from './api/client.ts';
+ import { createQueryClient } from './queryClient.ts';
+ 
+@@ -30,3 +30,9 @@ describe('createQueryClient (04 section 8.3)', () => {
+     expect(calls).toBe(1);
+   });
++
++  it('never retries a ServerWakingError: the waking logic owns transport retries', () => {
++    const retry = createQueryClient().getDefaultOptions().queries?.retry;
++
++    expect(typeof retry === 'function' && retry(0, new ServerWakingError())).toBe(false);
++  });
+ });
+diff --git a/apps/web/src/queryClient.ts b/apps/web/src/queryClient.ts
+index 40dc7eb..9f8747f 100644
+--- a/apps/web/src/queryClient.ts
++++ b/apps/web/src/queryClient.ts
+@@ -1,13 +1,16 @@
+ import { QueryClient } from '@tanstack/react-query';
+-import { ApiError } from './api/client.ts';
++import { ApiError, ServerWakingError } from './api/client.ts';
+ 
+ /**
+  * The app's query client (04 section 8.3). A problem response is an answer, not a glitch, so it
+- * is never retried; a 401 from `me` then redirects to login at once (04 section 8.2).
++ * is never retried, and the waking logic owns transport retries (D-045); a 401 from `me` then redirects to login at once (04 section 8.2).
+  */
+ export function createQueryClient(): QueryClient {
+   return new QueryClient({
+     defaultOptions: {
+-      queries: { retry: (failures, error) => !(error instanceof ApiError) && failures < 3 },
++      queries: {
++        retry: (failures, error) =>
++          !(error instanceof ApiError || error instanceof ServerWakingError) && failures < 3,
++      },
+     },
+   });
+diff --git a/apps/web/test/manualScheduler.ts b/apps/web/test/manualScheduler.ts
+new file mode 100644
+index 0000000..b5030fa
+--- /dev/null
++++ b/apps/web/test/manualScheduler.ts
+@@ -0,0 +1,29 @@
++import type { Scheduler } from '../src/api/connection.ts';
++
++type Timer = { at: number; fn: () => void; every?: number };
++
++/** A scheduler whose clock only moves when a test calls `advance`. */
++export function aManualScheduler(): Scheduler & { advance(ms: number): void } {
++  let now = 0;
++  const timers = new Set<Timer>();
++  const add = (timer: Timer) => {
++    timers.add(timer);
++    return () => timers.delete(timer);
++  };
++  return {
++    after: (ms, fn) => add({ at: now + ms, fn }),
++    every: (ms, fn) => add({ at: now + ms, fn, every: ms }),
++    advance(ms) {
++      const target = now + ms;
++      for (;;) {
++        const due = [...timers].filter((t) => t.at <= target).sort((a, b) => a.at - b.at)[0];
++        if (!due) break;
++        now = due.at;
++        if (due.every) due.at += due.every;
++        else timers.delete(due);
++        due.fn();
++      }
++      now = target;
++    },
++  };
++}
+diff --git a/docs/02-data-model.md b/docs/02-data-model.md
+index 8c7c1e8..da44a83 100644
+--- a/docs/02-data-model.md
++++ b/docs/02-data-model.md
+@@ -250,5 +250,5 @@ At 10,000 rows SQLite can scan the whole employees table in a few milliseconds,
+ 
+ Deliberately not indexed:
+-- **Name search** (`name_search LIKE '%term%'`): a leading wildcard can't use a B-tree index. A 10k-row scan is expected to be a few ms; Chat 8 confirms.
++- **Name search** (`name_search LIKE '%term%'`): a leading wildcard can't use a B-tree index. A 10k-row scan is expected to be a few ms; measure with the S10 performance script (`08` §6).
+ - **Sort by salary in USD**: an expression over a join, which can't be indexed in the portable subset (D-025). Expected cost is a 10k-row sort. Fallback if Chat 8 measures it above budget: store `salary_usd_minor` on `employees`, written with the current salary (FX is static).
+ - **Gender**: four values, low selectivity, always combined with other filters.
+@@ -393,6 +393,6 @@ Built backwards from the current salary, so the last row always equals it.
+   3. Upserts the three users by email, so their passwords follow the current env values.
+ - The reset also deletes all rows from `ask_log` and `sessions` first (so every reviewer is logged out and caps restart).
+-- The same command is the candidate for restoring the live demo to a known state. Chat 8 decides on that.
+-- Cost on Turso: about 52,000 rows written per reset (deletes count as writes too, so a reset roughly doubles that) against the free plan's 10 million rows written per month. Chat 8 owns that budget.
++- The same command is the live demo reset: run by hand against production Turso when needed (`08-deploy-perf-demo.md` §4). No scheduled job.
++- Cost on Turso: about 52,000 rows written per reset (deletes count as writes too, so a reset roughly doubles that) against the free plan's 10 million rows written per month. Occasional manual resets stay inside that budget.
+ 
+ ### 7.11 Seed report (printed to the console)
+@@ -449,6 +449,6 @@ All run against `generateDataset` in memory unless noted:
+ | 4 | Resolved by Chat 3: migrations are hand-written SQL files (ADR 0003) | - | - |
+ | 5 | Resolved by Chat 3: scrypt hashing, sessions in the DB (ADR 0006) | - | - |
+-| 6 | Is the seed command also the demo reset mechanism, and how often does it run? | Candidate only | Chat 8 |
+-| 7 | Does salary-in-USD sorting stay within the F2 budget without a stored USD column? | Expected yes; measured | Chat 8 |
++| 6 | ~~Is the seed command also the demo reset mechanism, and how often does it run?~~ | Resolved: yes; manual only (`08` §4) | Chat 8 |
++| 7 | Does salary-in-USD sorting stay within the F2 budget without a stored USD column? | Expected yes; measure in S10 per `08` §6 | Chat 8 / S10 |
+ 
+ ## Sources
+diff --git a/docs/03-architecture.md b/docs/03-architecture.md
+index 9bad099..450fe90 100644
+--- a/docs/03-architecture.md
++++ b/docs/03-architecture.md
+@@ -221,5 +221,5 @@ Why this shape: the model's only job is language to structure, which strict tool
+ - On startup the API runs pending migrations (idempotent), then serves `/api/*` and the static web build, with an SPA fallback to `index.html` for client routes.
+ - `GET /api/health` returns 200 when the database answers `SELECT 1`.
+-- Turso free database for persistence (D-005). Render free instances spin down after 15 minutes without traffic and take about a minute to start, showing Render's own loading page meanwhile. That page covers the first visit, so the web app needs no waking state there. A tab left open past the 15-minute idle window does: its next API call hits a sleeping instance, and the web app shows `ServerStatusBanner` and retries GETs once the server answers (D-045, 04 section 8.3). The README warns about the first load and Chat 8 decides on keeping it warm. Render's 750 free instance hours a month cover one always-on service.
++- Turso free database for persistence (D-005). Render free instances spin down after 15 minutes without traffic and take about a minute to start, showing Render's own loading page meanwhile. That page covers the first visit, so the web app needs no waking state there. A tab left open past the 15-minute idle window does: its next API call hits a sleeping instance, and the web app shows `ServerStatusBanner` and retries GETs once the server answers (D-045, 04 section 8.3). Cold starts are accepted; the README warns about the first load; there is no keep-warm ping (`08-deploy-perf-demo.md`). Render's 750 free instance hours a month cover intermittent reviewer use without staying always-on.
+ 
+ ## 11. Acceptance criteria for this file
+@@ -247,9 +247,9 @@ Why this shape: the model's only job is language to structure, which strict tool
+ | # | Question | Default | Owner |
+ | --- | --- | --- | --- |
+-| 1 | Keep the free instance warm (scheduled ping), or accept the cold start and warn in the README? | Decide with real cold-start numbers | Chat 8 |
+-| 2 | Which Render and Turso regions, to keep database round trips short? | Render: `singapore` (D-063). Turso: the closest region, picked at S0 | S0, Chat 8 |
++| 1 | ~~Keep the free instance warm, or accept the cold start and warn in the README?~~ | Resolved: accept cold starts (`08` §3) | Chat 8 |
++| 2 | ~~Which Render and Turso regions, to keep database round trips short?~~ | Resolved: Render `singapore` (D-063); Turso as created in S0 (`08` §2) | S0, Chat 8 |
+ | 3 | ~~Exact structured-query JSON schema within the strict-tool limits~~ | Resolved: D-042, 04 section 7.2 | Chat 4 |
+ | 4 | ~~Component tests: mock the API with MSW, or test hooks against a fake client?~~ | Resolved: MSW (D-049) | Chat 5 |
+-| 5 | Turso Cloud is moving to its rewritten engine. Does our SQL subset (D-025) run unchanged on the live database? | A smoke test against the deployed database in S9 | Chat 8 |
++| 5 | Turso Cloud is moving to its rewritten engine. Does our SQL subset (D-025) run unchanged on the live database? | Smoke on live DB in S9 per `08` §5 | Chat 8 / S9 |
+ 
+ ## Sources
+diff --git a/docs/04-api-and-ui.md b/docs/04-api-and-ui.md
+index 0df2e8c..3f85138 100644
+--- a/docs/04-api-and-ui.md
++++ b/docs/04-api-and-ui.md
+@@ -50,5 +50,5 @@ Goes into the repo as `docs/04-api-and-ui.md`. Where this file and an earlier do
+ - Write endpoints (`POST`, `PATCH`) require `Content-Type: application/json`; anything else is 415.
+ - No API versioning prefix (03 section 12).
+-- Fastify trusts only the immediate peer, Render's proxy (`trustProxy: (_address, hop) => hop === 0`), so `request.ip` is the client address Render appends to `X-Forwarded-For` (used by the login rate limit). `trustProxy: true` would take the left-most entry, which the client controls, and let it get round the limit; Fastify 5 ignores a numeric hop count. Changed in S2 after review. Chat 8 confirms with a log line on the live service.
++- Fastify trusts only the immediate peer, Render's proxy (`trustProxy: (_address, hop) => hop === 0`), so `request.ip` is the client address Render appends to `X-Forwarded-For` (used by the login rate limit). `trustProxy: true` would take the left-most entry, which the client controls, and let it get round the limit; Fastify 5 ignores a numeric hop count. Changed in S2 after review. Confirm with a log line on the live service in S9 (`08` §5).
+ - Responses to authenticated endpoints carry `Cache-Control: no-store` (salary data must not sit in shared or disk caches).
+ 
+@@ -1092,8 +1092,8 @@ Each screen lists its content and its loading, empty and error states. "HR roles
+ | # | Question | Default until answered | Owner |
+ | --- | --- | --- | --- |
+-| 1 | What does a `fetch` to `/api` receive while Render spins the service up: a held request, an HTML page, or a 5xx? | The client handles all three (D-045). Chat 8 observes it once and notes the result | Chat 8 |
+-| 2 | Does trusting only the proxy hop (4.1) give the real client IP on Render, so the login limit is per user rather than global? | Assumed yes; Chat 8 checks the logged `request.ip` | Chat 8 |
+-| 3 | Do insights requests that load up to 10,000 rows from Turso stay fast enough (target under 500 ms)? | Measure. Fallback: an in-process cache of the active projection, cleared on every employee or salary write | Chat 8 |
+-| 4 | How long does the first Ask call take while Anthropic compiles the tool grammar, and does it fit the 15-second timeout? | Measure on deploy; the grammar is then cached for 24 hours | Chat 8 |
++| 1 | What does a `fetch` to `/api` receive while Render spins the service up: a held request, an HTML page, or a 5xx? | Client handles all three (D-045). Observe once in S9 (`08` §5) | Chat 8 / S9 |
++| 2 | Does trusting only the proxy hop (4.1) give the real client IP on Render, so the login limit is per user rather than global? | Assumed yes; check logged `request.ip` in S9 (`08` §5) | Chat 8 / S9 |
++| 3 | Do insights requests that load up to 10,000 rows from Turso stay fast enough (target under 500 ms)? | Measure in S10 per `08` §6. Fallback: in-process active-projection cache, cleared on every employee or salary write | Chat 8 / S10 |
++| 4 | How long does the first Ask call take while the provider compiles or warms, and does it fit the 15-second timeout? | Measure on deploy in S10 per `08` §6 | Chat 8 / S10 |
+ | 5 | Should Finance get a CSV of aggregate tables? | No in v1 (01 open question, carried) | After v1 |
+ 
+diff --git a/docs/06-build-plan.md b/docs/06-build-plan.md
+index 61927b8..9896fe6 100644
+--- a/docs/06-build-plan.md
++++ b/docs/06-build-plan.md
+@@ -15,7 +15,7 @@ Updated in Chat 7 to match D-064 to D-068 and A-006 (the Claude Code kit): S0 ho
+ | D-059 | Conventional Commits, checked by commitlint in a `commit-msg` hook. Red: `test(scope): <behaviour>`, test files plus "not implemented" stubs only. Green: `feat(scope)` or `fix(scope)`, production code only. Refactor: `refactor(scope)`, tests unchanged and green. The `pre-commit` hook runs lint-staged (Prettier and ESLint on staged files) and never runs tests. Claude Code's co-author trailer stays on its commits | The log reads as red, green, refactor without opening a diff. A test-running pre-commit hook would block every red commit. The co-author trailer is an honest record of AI pairing, which the brief asks to see | Free-form messages; tests in the pre-commit hook; removing AI trailers |
+ | D-060 | Each slice has a time box. Two checkpoints apply the cut order from `chat-plan.md` by rule: Saturday 21:30 and Sunday 12:00. Build work stops at Sunday 16:00 whatever its state. Each cut is logged in `decisions.md` when it's made, and anything unbuilt is listed in the README with its reason | Deciding cuts by rule at fixed times avoids discovering on Sunday afternoon that the demo can't be recorded. Logged cuts are product decisions, not quiet omissions | Cutting by feel when tired; extending the build into the submission buffer |
+-| D-061 | The skeleton deploy happens in S0: Render free web service from `render.yaml`, `autoDeployTrigger: checksPass`, Turso database created, `/api/health` live. Every merged slice then deploys itself. Chat 8 still confirms the final hosting setup (D-005, D-030 stay Proposed) | Deployment risk (cold starts, env vars, Turso connectivity) surfaces on day one, not in S9. `checksPass` deploys only `main` commits whose checks passed | Deploying first in S9 (any hosting surprise lands on Sunday afternoon) |
++| D-061 | The skeleton deploy happens in S0: Render free web service from `render.yaml`, `autoDeployTrigger: checksPass`, Turso database created, `/api/health` live. Every merged slice then deploys itself. Hosting confirmed in Chat 8 (`08-deploy-perf-demo.md`; D-005, D-030 Decided) | Deployment risk (cold starts, env vars, Turso connectivity) surfaces on day one, not in S9. `checksPass` deploys only `main` commits whose checks passed | Deploying first in S9 (any hosting surprise lands on Sunday afternoon) |
+ | D-062 | Node 24 LTS ("Krypton"), pinned in `.nvmrc` and in `engines.node` as `>=24.0.0 <25`. Render reads `.nvmrc` | Current LTS line; meets Vitest 5's Node 22.12+ requirement. Render advises an upper bound on version ranges | Node 26 (not yet LTS on the start date); Node 22 (older LTS for no reason) |
+-| D-063 | Render region `singapore`. Turso database in the Turso region closest to it, picked at S0 and recorded in the S0 commit | A Render service's region can't be changed after creation, so it's decided before S0. Singapore is Render's closest region to India, where I record the demo and where I assume the reviewers are. Chat 8 can still move the database | Oregon, Render's default (about 250 ms further from India on every request) |
++| D-063 | Render region `singapore`. Turso database in the Turso region closest to it, picked at S0 and recorded in the S0 commit | A Render service's region can't be changed after creation, so it's decided before S0. Singapore is Render's closest region to India, where I record the demo and where I assume the reviewers are. Confirmed in Chat 8 (`08` §2); region left as built | Oregon, Render's default (about 250 ms further from India on every request) |
+ 
+ ## 2. Changes this file makes to earlier docs
+@@ -602,5 +602,5 @@ docs(ask): record first eval run
+ - Web: connection store with injected scheduler, `ServerStatusBanner`, waking detection and GET retry in the API client (D-045).
+ - Playwright config with `webServer` and `globalSetup` running the seed; `e2e/smoke.spec.ts` (05 section 5.10); `e2e` CI job; branch protection requires `e2e`.
+-- Live checks from `08-deploy-perf-demo.md` (Chat 8): env vars, `trustProxy` IP in logs, health check, cold-start time, demo reset mechanism as Chat 8 decides.
++- Live checks from `08-deploy-perf-demo.md` §5: env vars, `trustProxy` IP in logs, sleeping `/api` form, cold-start time, one manual seed reset, portable SQL smoke, waking banner.
+ 
+ **Test list.**
+@@ -685,5 +685,5 @@ docs: link the demo video
+ | --- | --- | --- | --- |
+ | 1 | Which Turso region is closest to Render's Singapore region? | Pick at S0 from Turso's region list; record in the S0 commit | S0 |
+-| 2 | How does the live demo return to a known state after reviewer edits? | Carried from decisions.md; S9 implements whatever Chat 8 decides | Chat 8 |
++| 2 | ~~How does the live demo return to a known state after reviewer edits?~~ | Resolved: manual `npm run seed` against Turso (`08` §4); S9 proves it once on the live checklist | Chat 8 |
+ | 3 | ~~How is TDD enforced in Claude Code (instructions, Stop hook or TDD Guard)?~~ | Resolved: layered, D-064 (skill, Stop hook, commit-shape check, spec-reviewer); red commits still allowed | Chat 7 |
+ | 4 | Does the schedule survive contact? | Checkpoint rules apply cuts automatically (4.2) | Checkpoints A and B |
+diff --git a/docs/08-deploy-perf-demo.md b/docs/08-deploy-perf-demo.md
+new file mode 100644
+index 0000000..1b8d9ba
+--- /dev/null
++++ b/docs/08-deploy-perf-demo.md
+@@ -0,0 +1,121 @@
++# 08 Deploy, performance and demo
++
++Chat 8 output. Confirms hosting, cold-start policy and demo reset; gives S9 its live checklist, S10 the performance and video scripts.
++Inputs: `decisions.md`, `03-architecture.md` §10, `02-data-model.md` §7.10, `04-api-and-ui.md` §§8.2–8.3 and 11, `06-build-plan.md` S9–S10, ADR 0002, `render.yaml`.
++
++## 1. Decisions
++
++| # | Decision | Why | Rejected |
++| --- | --- | --- | --- |
++| 1 | Accept Render free cold starts. Warn in the README. No keep-warm ping or cron | Reviewers expect a free-tier take-home; D-045 covers a tab left open past the 15-minute idle window; a warm ping would burn most of the 750 free instance hours | Scheduled ping every 10–14 minutes; paid always-on |
++| 2 | Demo reset is the existing seed CLI, run by hand against production Turso | Same deterministic dataset the tests and video rely on (D-026); no new endpoint to secure; Turso free plan allows occasional resets | Daily cron reset; public reset URL; never reset |
++| 3 | Hosting as built: one Render free web service in `singapore`, Turso free DB, `autoDeployTrigger: checksPass` (D-005, D-030, D-061, D-063, ADR 0002) | Already live from S0; Chat 8 confirms rather than redesigns | Separate static site; Oregon region; first deploy only in S9 |
++
++## 2. Hosting (confirmed)
++
++One Render free web service (`render.yaml`):
++
++- `plan: free`, `region: singapore`, `runtime: node` (Node from `.nvmrc`, D-062).
++- Build: `npm ci --include=dev && npm run build`. Start: `node apps/api/dist/main.js`.
++- `healthCheckPath: /api/health`. `autoDeployTrigger: checksPass`.
++- Fastify serves `/api/*` and the Vite build, with an SPA fallback (ADR 0002).
++- Database: Turso free plan via `DATABASE_URL` and `DATABASE_AUTH_TOKEN` (`sync: false` in the blueprint). Region: as created in S0 (closest Turso region to Singapore at the time).
++
++Env vars on the live service (03 §8):
++
++| Variable | Required on Render |
++| --- | --- |
++| `NODE_ENV=production` | yes (blueprint) |
++| `DATABASE_URL`, `DATABASE_AUTH_TOKEN` | yes |
++| `ASK_PROVIDER`, `GEMINI_API_KEY` or `ANTHROPIC_API_KEY`, optional `ASK_MODEL` | only if the live demo shows Ask (D-004) |
++| `DEMO_HR_ADMIN_PASSWORD`, `DEMO_HR_VIEWER_PASSWORD`, `DEMO_FINANCE_PASSWORD` | not read by the API; needed on the machine that runs the seed reset |
++| `PORT`, `LOG_LEVEL`, Ask daily limits | optional (defaults apply) |
++
++Secrets stay in Render's dashboard and a local git-ignored `.env`. Never commit them.
++
++## 3. Cold starts
++
++- After about 15 minutes without traffic the free instance sleeps. The first browser visit shows Render's own loading page (about a minute). The app needs no waking UI for that case.
++- A tab left open past the idle window hits a sleeping instance on the next `/api` call. The client shows the waking banner, polls `GET /api/health`, and retries GETs once (D-045, 04 §8.3). Writes are never retried.
++- No keep-warm mechanism. The README states that the first load after idle can take up to about a minute.
++- Render's 750 free instance hours a month are enough for intermittent reviewer use without a warm ping.
++
++## 4. Demo reset
++
++When to run: before recording the demo video, or when a reviewer has changed the seeded world enough that counts, gaps or the smoke path no longer match the deterministic dataset.
++
++From a machine that can reach Turso (local clone is fine):
++
++```bash
++# Use the production Turso URL and token, and the same DEMO_* passwords as Render.
++export DATABASE_URL='libsql://…'
++export DATABASE_AUTH_TOKEN='…'
++export DEMO_HR_ADMIN_PASSWORD='…'   # ≥ 12 chars
++export DEMO_HR_VIEWER_PASSWORD='…'
++export DEMO_FINANCE_PASSWORD='…'
++npm run seed
++```
++
++Behaviour (02 §7.10): clears `ask_log` and `sessions`, deletes and re-inserts domain tables, upserts the three demo users by email. Running twice leaves identical domain data.
++
++Cost: about 52,000 rows written per reset; deletes count too, so roughly 100,000 row-writes against Turso's free plan (10 million rows written per month). Occasional manual resets stay well inside the budget. No scheduled job and no reset HTTP route.
++
++## 5. S9 live checklist
++
++Observations and one manual seed. Product code for S9 remains the waking client, banner and Playwright smoke (06 S9); this list does not add features.
++
++| # | Check | How | Record |
++| --- | --- | --- | --- |
++| 1 | Env vars on Render | Dashboard: `DATABASE_*`, `NODE_ENV`; Ask key if demoing Ask | tick |
++| 2 | `trustProxy` hop 0 | One login; confirm the logged `request.ip` is a client address, not Render's proxy (04 §11 Q2) | IP shape seen |
++| 3 | Sleeping `/api` response | Leave the tab idle past 15 minutes (or restart the service); trigger a GET; note held request, HTML page, or bare 5xx (04 §11 Q1). D-045 already handles all three | which form observed |
++| 4 | Cold-start wall time | From a spun-down service, time until `GET /api/health` returns 200 | seconds (fill here after S9) |
++| 5 | Demo reset | Run §4 once against live Turso; log in and confirm ~10,000 active employees | tick |
++| 6 | Portable SQL on live Turso | After deploy: employee list page and one insights view load without SQL errors (03 §13 Q5 / D-025) | tick |
++| 7 | Waking banner | After spin-down, next in-app GET shows the yellow banner, then data, with no error page (06 S9 acceptance) | tick |
++
++Cold-start wall time (S9 fill-in): _____ s.
++
++## 6. Performance measurement (S10)
++
++Run in S10; write real numbers to `docs/performance.md`. Do not invent timings in this file.
++
++Script outline (local file DB and/or production Turso, 10,000 active employees):
++
++1. Seed once.
++2. Time the default employee list page (`page=1`, `pageSize=50`, no filters) — F2 budget under 300 ms locally.
++3. Time one insights request that loads up to 10,000 active rows (target under 500 ms, 04 §11 Q3).
++4. Time list sort by salary in USD (02 §10 Q7) — expected to stay in budget without a stored USD column.
++5. If practical, compare with indexes temporarily dropped; otherwise note "indexes on" only.
++6. Optional: first Ask call latency on the live service (grammar / cold model path) against the 15-second timeout (04 §11 Q4).
++
++Fallback if insights miss the budget: an in-process cache of the active projection, cleared on every employee or salary write (04 §11 Q3). Do not build it unless measurement says so.
++
++## 7. Demo video script (3 to 5 minutes)
++
++Record from the live URL after a fresh §4 reset. Say the cold-start warning once if the first load is slow.
++
++1. Open the live URL; land on login. Mention free hosting may sleep after 15 minutes idle.
++2. Log in as HR Admin (`hr.admin@acme.test`). Land on `/employees`; toolbar shows about 10,000 employees.
++3. Filter Country India, Job title Software Engineer, Level L3; URL carries the filters; toolbar shows the seeded cohort count.
++4. Open the first employee; record a merit increase of 5% dated today; toast appears; history top row is "Merit increase" with `+5.0%`.
++5. Open Insights; show a payroll or distribution figure and the FX as-of date.
++6. Open Pay equity; point at a flagged cohort (gap at or above 5%).
++7. Log out; log in as Finance (`finance@acme.test`). Land on `/insights`; nav has no "Employees".
++8. Optional, if an Ask key is set: Ask "What is the median pay for a Senior Engineer in India?" (eval q01); show the answer and "How I read your question".
++9. Close: live link in the README, three demo accounts, and that `npm run seed` against Turso restores the known dataset after reviewer edits.
++
++Not in the video: CSV export deep dive, Ask without a key, Playwright.
++
++## 8. Acceptance for this file
++
++- [x] Cold start, demo reset and hosting confirmed with rejected alternatives.
++- [x] S9 live checklist is concrete enough to run without guessing.
++- [x] S10 has a performance outline and a timed demo script.
++- [x] No new product surface beyond what 02/03/04/06 already specified.
++
++## 9. Out of scope
++
++- Implementing the waking client or Playwright (S9).
++- Writing `docs/performance.md` or recording the video (S10).
++- Keep-warm infrastructure, paid Render, or an automated reset endpoint.
+diff --git a/docs/adr/0002-single-deployable-same-origin.md b/docs/adr/0002-single-deployable-same-origin.md
+index 676558f..cadd956 100644
+--- a/docs/adr/0002-single-deployable-same-origin.md
++++ b/docs/adr/0002-single-deployable-same-origin.md
+@@ -1,7 +1,7 @@
+ # ADR 0002: One deployable serving API and UI from the same origin
+ 
+-- Status: Proposed (amends D-005; Chat 8 confirms hosting)
++- Status: Accepted (amends D-005; hosting confirmed in Chat 8 / `08-deploy-perf-demo.md`)
+ - Date: 2026-10-09
+-- Updated: 2026-10-09 in Chat 7, Consequences aligned with D-045 (as recorded in 04 section 2). No new decision.
++- Updated: 2026-10-11 in Chat 8. Status Accepted; cold-start policy recorded (accept free-tier spin-down; no keep-warm). Earlier: 2026-10-09 in Chat 7, Consequences aligned with D-045 (04 section 2).
+ 
+ ## Context
+@@ -28,4 +28,4 @@ Deploy one Render free web service. Fastify serves `/api/*` and the built React
+ - No CORS configuration and a first-party `HttpOnly` cookie (ADR 0006).
+ - One build, one deploy, one URL in the README.
+-- Lost: the UI loads instantly from a CDN while the API wakes. On a cold start, the whole page waits for Render's spin-up (about a minute), and Render shows its own loading page, so the "waking the server" UI state isn't needed for the first visit. It is still needed when a tab outlives the 15-minute idle window: the next API call hits a sleeping instance, so the web app shows a waking banner and retries GETs (D-045, 04 section 8.3). Chat 8 decides whether to keep the instance warm.
++- Lost: the UI loads instantly from a CDN while the API wakes. On a cold start, the whole page waits for Render's spin-up (about a minute), and Render shows its own loading page, so the "waking the server" UI state isn't needed for the first visit. It is still needed when a tab outlives the 15-minute idle window: the next API call hits a sleeping instance, so the web app shows a waking banner and retries GETs (D-045, 04 section 8.3). Cold starts are accepted; there is no keep-warm ping (`08-deploy-perf-demo.md`).
+ - The API process serves static files, a trivial load at this scale.
+diff --git a/docs/decisions.md b/docs/decisions.md
+index a4b136e..86caca7 100644
+--- a/docs/decisions.md
++++ b/docs/decisions.md
+@@ -23,5 +23,5 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | D-003 | AI "Ask about pay": the LLM fills a structured query (metric, group-by, filters) via a tool call, and the existing insights service runs it. The interpreted query is shown beside the answer | Helps the team pull data across 10k employees. A structured query keeps it testable, respects role permissions, and can't inject SQL | Free-form text-to-SQL (bypasses permissions, unsafe, hard to test); no AI feature | Decided | Blueprint |
+ | D-004 | The app works fully without an LLM API key; "Ask about pay" is hidden or disabled when no key is set | Reviewers can run it locally without secrets; the live demo isn't hostage to a third-party API | AI as a hard dependency | Decided | Blueprint |
+-| D-005 | Free tiers first: database on Turso's free plan; API and React build served together by one Render free web service (D-030). A paid instance is a fallback only. Amended by A-003 | No cost, and data persists across restarts (Render free has no persistent disk) | SQLite file on Render free (edits lost on restart); Fly.io (no free tier for new users); paid always-on instance (fallback only) | Proposed, Chat 8 confirms | Blueprint, 2+3 |
++| D-005 | Free tiers first: database on Turso's free plan; API and React build served together by one Render free web service (D-030). A paid instance is a fallback only. Amended by A-003 | No cost, and data persists across restarts (Render free has no persistent disk) | SQLite file on Render free (edits lost on restart); Fly.io (no free tier for new users); paid always-on instance (fallback only) | Decided | Blueprint, 2+3, 8 |
+ | D-006 | SQLite through the libSQL client: a local file in dev, in-memory in tests, Turso in production; one driver throughout. Amended by A-004 | Matches the brief's SQLite suggestion and works with D-005 without a second code path | better-sqlite3 (can't talk to Turso); Postgres on Neon (heavier, drifts from the brief's hint) | Decided | Blueprint, 2+3 |
+ | D-007 | AI prompts and the AI usage log are drafted in a git-ignored `.ai-notes/` folder and committed once, at the end, after careful review | I want to review what's shared before it goes in the repo | Committing prompts with each slice | Decided | Blueprint |
+@@ -48,5 +48,5 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | D-028 | Store only personal data features need; no date of birth, address, personal email, phone or national ID | Sensitive data; every extra field is risk | Typical HRIS record | Decided | 2+3 |
+ | D-029 | Each salary history row records the title and level in effect from that date; title and level change only through a salary change; country is fixed at hire in v1 | Answers "when did she become Senior, from what level?"; position and pay can't drift apart | No position on history; separate position history; title/level editable on the employee form | Decided | 2+3 |
+-| D-030 | One Render web service serves /api and the React build from one origin (ADR 0002) | No CORS, first-party HttpOnly cookie, one deploy | Separate static site with cross-site cookies, localStorage token, or rewrite proxy | Proposed, Chat 8 confirms | 2+3 |
++| D-030 | One Render web service serves /api and the React build from one origin (ADR 0002) | No CORS, first-party HttpOnly cookie, one deploy | Separate static site with cross-site cookies, localStorage token, or rewrite proxy | Decided | 2+3, 8 |
+ | D-031 | @libsql/client for all environments; Drizzle as typed query builder only; hand-written SQL migrations with a schema-drift test (ADR 0003) | SQL keeps STRICT and CHECK; Drizzle types dynamic filters | Drizzle Kit migrations; Kysely (thin libSQL dialect); Prisma; raw SQL only | Decided | 2+3 |
+ | D-032 | Layered modular monolith: routes, services, repositories by feature; pure domain/ with no I/O; buildApp(deps) composition root, no DI container (ADR 0004) | Rules testable without HTTP, DB or clock | Ports for everything; fat handlers; separate services | Decided | 2+3 |
+@@ -79,7 +79,7 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | D-059 | Conventional Commits checked by commitlint (commit-msg hook); red test(scope) with tests and not-implemented stubs only; green feat/fix; refactor with tests unchanged; pre-commit runs lint-staged only, never tests; Claude Code's co-author trailer kept; commit-msg also runs scripts/check-commit-shape.mjs. Amended by A-006 | The log reads as red, green, refactor; a test-running pre-commit hook would block red commits; the trailer is an honest AI record | Free-form messages; tests in pre-commit; removing AI trailers | Decided | 4+5+6 |
+ | D-060 | Per-slice time boxes; checkpoints Sat 21:30 and Sun 12:00 apply the chat-plan cut order by rule; build stops Sun 16:00; each cut logged as an amendment and listed in the README | Cuts decided by rule at fixed times, not discovered late | Cutting by feel; eating the submission buffer | Decided | 4+5+6 |
+-| D-061 | Skeleton deploy in S0: Render free service from render.yaml with autoDeployTrigger checksPass, Turso DB created, /api/health live | Hosting surprises surface on day one; only green main commits deploy | First deploy in S9 | Proposed, Chat 8 confirms | 4+5+6 |
++| D-061 | Skeleton deploy in S0: Render free service from render.yaml with autoDeployTrigger checksPass, Turso DB created, /api/health live | Hosting surprises surface on day one; only green main commits deploy | First deploy in S9 | Decided | 4+5+6, 8 |
+ | D-062 | Node 24 LTS pinned in .nvmrc and engines.node ">=24.0.0 <25" | Current LTS; meets Vitest 5; Render reads .nvmrc and advises an upper bound | Node 26 (not LTS yet); Node 22 | Decided | 4+5+6 |
+-| D-063 | Render region singapore; Turso in its closest region, picked at S0 | Region can't change after creation; closest Render region to India (demo and, by assumption, reviewers) | Oregon default | Proposed, Chat 8 confirms | 4+5+6 |
++| D-063 | Render region singapore; Turso in its closest region, picked at S0 | Region can't change after creation; closest Render region to India (demo and, by assumption, reviewers) | Oregon default | Decided | 4+5+6, 8 |
+ | D-064 | TDD enforced in layers: /tdd-slice skill (process); Stop hook running npm test and npm run typecheck that blocks ending a turn, skipped in plan mode or when the reply starts BLOCKED:; commit-msg shape check (A-006); spec-reviewer per slice | Deterministic floor at no dependency cost; the model is used once per slice to review, not on every edit | Instructions only (erode over long sessions); TDD Guard (model call and latency per edit, two undeclared dev dependencies, non-deterministic, superseded by Probity) | Decided | 7 |
+ | D-065 | Node PreToolUse guard on every Bash call denies: commit --no-verify or -n, HUSKY=0, core.hooksPath changes, git add -f, staging .ai-notes/, staging while .ai-notes/ isn't ignored, commit --amend, force push. Allowlist: npm test, test:coverage, lint, typecheck, git add, git commit. Deny Read(./.env) | Hook-bypass and history rewrites are what would damage the graded log; Node hooks need no jq and run on any OS; the .env deny keeps secrets out of transcripts | Permission rules only (match text, easy to sidestep); bash and jq hooks; no guard | Decided | 7 |
+@@ -95,5 +95,5 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | Question | Owner chat |
+ | --- | --- |
+-| How the live demo returns to a known state after reviewer edits | Chat 8 |
++| ~~How the live demo returns to a known state after reviewer edits~~ | Resolved in `08-deploy-perf-demo.md`: manual `npm run seed` against production Turso |
+ 
+ ## Amendments
+@@ -111,2 +111,3 @@ Status: **Decided** = locked. **Proposed** = default to build on until the named
+ | A-009 | D-036 (old: "Ask about pay uses claude-haiku-5-5 with two strict tools ...") | Provider is chosen by `ASK_PROVIDER`: `gemini` (default, `gemini-flash-latest`, function calling, no strict mode) or `anthropic` (claude-haiku-5-5, strict tools); ADR 0009 | No Anthropic API key available; Claude Pro includes no API access; Gemini has a free tier |
+ | A-010 | D-037 (old: "dedicated Console workspace with a $5 monthly limit ...") | The $5 workspace limit applies only when the provider is Anthropic; Gemini runs on the free tier. App caps, `max_tokens`, timeout and the 503 without a key are unchanged, the key is the configured provider's (ADR 0009) | Free tier has no spend but has rate limits |
++| A-011 | D-038 (old: as amended by A-008, "one Playwright smoke test") | Cut 3 applied at S9 (D-060): no Playwright, no `e2e/` smoke test, no `e2e` CI job and no `e2e` branch protection. The waking client, banner and S9 live checks stay. List the cut in the README | Time box; the waking logic is covered by component and client tests, and the live check in `08` section 5 covers the built app by hand |

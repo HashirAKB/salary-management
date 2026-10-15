@@ -1,0 +1,9 @@
+1e02aff docs(deploy): add chat 8 deploy, perf and demo decisions
+bb0d07c test(web): show the waking banner for slow and non-json responses
+89bea0e feat(web): add connection store and server status banner
+a07ba0a test(web): retry gets after the server wakes and never retry writes
+9419663 test(web): do not await a GET that waits for the server to wake
+c2df278 feat(web): add waking detection to the api client
+277ed86 test(web): show server down after 90 seconds of failed polls
+2b61e14 feat(web): add server down state with try again
+ea855aa docs(docs): log cut 3 skipping the playwright smoke test

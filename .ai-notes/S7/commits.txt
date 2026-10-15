@@ -1,0 +1,30 @@
+43ea0fe test(insights): compute percentiles like excel percentile.inc
+df77a29 feat(insights): add percentile function
+19a8738 test(shared): compute gender gap and share percentages
+8bf0e51 feat(shared): add gap and share percentages
+0fbe53d test(insights): aggregate totals and averages in usd per group
+e97dab1 feat(insights): add pay aggregation engine
+a7c3310 test(insights): suppress groups under the minimum size
+00085ad feat(insights): add minimum group suppression
+af089fd test(insights): suppress the ungrouped group under the minimum
+897dabb fix(insights): apply the minimum size to the ungrouped group
+bcae9b0 test(insights): compute cohort gender gaps and flag at five percent
+60833c5 feat(insights): add pay equity computation
+026ce49 test(insights): return the summary for the hand-built fixture
+2755664 test(insights): list the summary route and log in at the test clock
+0de9b21 feat(insights): add summary endpoint
+a33c1fb test(insights): hide a second group when exactly one is suppressed
+4d08d6b feat(insights): hide a second group when exactly one is suppressed
+83bfb55 docs(docs): record complementary suppression for small groups
+ed5c6fa docs(docs): reword the hidden-row text for small groups
+140a7b7 test(insights): return pay distribution by each dimension
+1743fbb feat(insights): add pay distribution endpoint
+b3378cb test(insights): return pay equity cohorts with filters
+cf2eddb feat(insights): add pay equity endpoint
+f2ca7fc test(insights): never send finance a group under five
+9f8f10a build(web): add @mantine/charts 9.7.1 and recharts 3.10.1
+b728ab8 test(web): show insights with suppressed rows and role-based links
+eea98bc feat(web): add insights page
+3ebe27f test(web): show pay equity with not-comparable rows and review badges
+5bdd732 feat(web): add pay equity page
+52abe92 chore: disable security plugin and stop pasting test output

@@ -1,0 +1,24 @@
+f26270a test(employees): show one employee with band and compa-ratio
+18e4456 feat(employees): add employee detail endpoint
+26b0e3e test(api): return the pay band for a position
+4715afe feat(api): add pay band endpoint
+bd0e823 test(shared): reject empty, long and formula-leading names
+4d9c83e feat(shared): add person name schema
+a61824f test(shared): reject formula names hidden behind leading whitespace
+0e4c300 fix(shared): reject formula names hidden behind leading whitespace
+342d3ca test(employees): create an employee with hire row and salary
+69576d4 feat(employees): add create employee
+183aaee test(employees): reject future hire, wrong currency, missing band
+6458730 feat(employees): add create rules
+c7660d3 test(employees): edit name and gender only
+b9f704a feat(employees): add employee edit
+53b32bb test(employees): terminate once, not before hire or in the future
+98b54ae feat(employees): add termination
+c0e9176 test(web): show employee detail with role-based actions
+1a807dc feat(web): add employee detail page
+77f12a8 test(web): add an employee with band warning and field errors
+1591a0b feat(web): add new employee page
+3c16ed2 chore(web): allow 10 s for findBy under a parallel run
+04ec362 test(web): edit details and terminate from the detail page
+3759c49 feat(web): add edit and terminate modals
+239109a refactor(employees): share employee detail mapping between endpoints
